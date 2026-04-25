@@ -17,6 +17,9 @@ use windows::Win32::{
         MSLLHOOKSTRUCT, HHOOK,
         GetMessageW,
     },
+    UI::Input::KeyboardAndMouse::{
+        GetKeyState, VK_CONTROL, VK_SHIFT,
+    },
     System::LibraryLoader::GetModuleHandleW,
 };
 
@@ -24,12 +27,41 @@ use windows::Win32::{
 // Click event
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Capture mode type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Normal single element capture (Ctrl + click or simple click)
+    Single,
+    /// Batch capture similar elements (Shift + click)
+    Batch,
+    /// No capture (modifier not pressed)
+    None,
+}
+
 /// Represents a captured mouse click event.
 #[derive(Debug, Clone, Copy)]
 pub struct ClickEvent {
     pub x: i32,
     pub y: i32,
     pub is_down: bool,  // true for WM_LBUTTONDOWN, false for WM_LBUTTONUP
+    pub ctrl_pressed: bool,
+    pub shift_pressed: bool,
+}
+
+impl ClickEvent {
+    /// Determine the capture mode based on keyboard modifiers.
+    pub fn capture_mode(&self) -> CaptureMode {
+        if self.ctrl_pressed && self.is_down {
+            CaptureMode::Single
+        } else if self.shift_pressed && self.is_down {
+            CaptureMode::Batch
+        } else if self.is_down {
+            // Default to Single for simple clicks
+            CaptureMode::Single
+        } else {
+            CaptureMode::None
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -104,10 +136,20 @@ pub mod win_hook {
             if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
                 // Extract mouse position from MSLLHOOKSTRUCT.
                 let hook_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+                
+                // Check keyboard modifier states.
+                // GetKeyState returns i16, high bit (0x8000) indicates key is pressed.
+                let ctrl_state = unsafe { GetKeyState(VK_CONTROL.0.into()) };
+                let shift_state = unsafe { GetKeyState(VK_SHIFT.0.into()) };
+                let ctrl_pressed = ctrl_state < 0;
+                let shift_pressed = shift_state < 0;
+                
                 let event = ClickEvent {
                     x: hook_struct.pt.x,
                     y: hook_struct.pt.y,
                     is_down: msg == WM_LBUTTONDOWN,
+                    ctrl_pressed,
+                    shift_pressed,
                 };
                 
                 debug!("Mouse hook captured: {:?} at ({}, {})", 

@@ -9,9 +9,10 @@ use log::info;
 
 use crate::{
     capture,
+    capture_overlay::CaptureOverlay,
     highlight,
     model::{AppConfig, HierarchyNode, Operator, ValidationResult},
-    mouse_hook,
+    mouse_hook::{self, CaptureMode},
     xpath,
 };
 
@@ -56,6 +57,9 @@ pub struct SelectorApp {
 
     // Capture
     capture_state:  CaptureState,
+    
+    // Overlay
+    overlay:       CaptureOverlay,
 
     // UI state
     status_msg:     String,
@@ -91,6 +95,7 @@ impl SelectorApp {
             show_simplified: config.show_simplified,
             validation:      ValidationResult::Idle,
             capture_state:   CaptureState::Idle,
+            overlay:         CaptureOverlay::new(),
             status_msg:      "就绪 — 按 F4 开始捕获元素".to_string(),
             history:         config.last_xpaths.clone(),
             config,
@@ -123,17 +128,34 @@ impl SelectorApp {
 
     fn start_capture(&mut self) {
         self.capture_state = CaptureState::WaitingClick {
-            deadline: Instant::now() + Duration::from_secs(5),
-        };
-        self.status_msg    = "请在 5 秒内点击目标控件 …".to_string();
+            deadline: Instant::now() + Duration::from_secs(30),
+        };  // Extended timeout for user convenience
+        self.status_msg    = "请在 30 秒内点击目标控件 …".to_string();
         // Activate global mouse hook with swallow mode to prevent click from reaching target.
         mouse_hook::activate_capture(true);
+        // Show the capture guidance overlay.
+        self.overlay.show();
     }
 
-    fn finish_capture_at(&mut self, x: i32, y: i32) {
+    fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode) {
         // Deactivate mouse hook first.
         mouse_hook::deactivate_capture();
+        // Hide the overlay.
+        self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
+        
+        // Handle different capture modes.
+        match mode {
+            CaptureMode::Batch => {
+                self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
+                // TODO: Implement batch capture logic for similar elements.
+                // For now, fall back to single capture.
+            }
+            CaptureMode::Single | CaptureMode::None => {
+                // Normal single capture.
+            }
+        }
+        
         let result = capture::capture_at(x, y);
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
@@ -607,20 +629,25 @@ impl eframe::App for SelectorApp {
         if let CaptureState::WaitingClick { deadline } = &self.capture_state {
             if Instant::now() > *deadline {
                 mouse_hook::deactivate_capture();
+                self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获超时，已取消".to_string();
             } else if escape {
                 mouse_hook::deactivate_capture();
+                self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获已取消".to_string();
             } else if let Some(event) = mouse_hook::poll_click() {
                 // Use the click event from global mouse hook (works across all windows).
                 // Only process WM_LBUTTONDOWN events for capture.
                 if event.is_down {
-                    self.finish_capture_at(event.x, event.y);
+                    self.finish_capture_at(event.x, event.y, event.capture_mode());
                 }
             }
         }
+
+        // Draw the capture overlay if visible.
+        self.overlay.draw(ctx);
 
         // ── Panels ────────────────────────────────────────────────────────────
         self.draw_titlebar(ctx);

@@ -3,6 +3,7 @@
 
 mod app;
 mod capture;
+mod capture_overlay;
 mod error;
 mod highlight;
 mod model;
