@@ -11,6 +11,7 @@ use crate::{
     capture,
     highlight,
     model::{AppConfig, HierarchyNode, Operator, ValidationResult},
+    mouse_hook,
     xpath,
 };
 
@@ -125,9 +126,13 @@ impl SelectorApp {
             deadline: Instant::now() + Duration::from_secs(5),
         };
         self.status_msg    = "请在 5 秒内点击目标控件 …".to_string();
+        // Activate global mouse hook with swallow mode to prevent click from reaching target.
+        mouse_hook::activate_capture(true);
     }
 
     fn finish_capture_at(&mut self, x: i32, y: i32) {
+        // Deactivate mouse hook first.
+        mouse_hook::deactivate_capture();
         self.capture_state = CaptureState::Capturing;
         let result = capture::capture_at(x, y);
         if let Some(err) = &result.error {
@@ -586,13 +591,11 @@ impl eframe::App for SelectorApp {
         }
 
         // ── Global keyboard handling ──────────────────────────────────────────
-        let (f4, f7, escape, clicked, click_pos) = ctx.input(|i| {
+        let (f4, f7, escape) = ctx.input(|i| {
             let f4     = i.key_pressed(Key::F4);
             let f7     = i.key_pressed(Key::F7);
             let escape = i.key_pressed(Key::Escape);
-            let clicked = i.pointer.primary_clicked();
-            let pos    = i.pointer.interact_pos();
-            (f4, f7, escape, clicked, pos)
+            (f4, f7, escape)
         });
 
         if f4 && self.capture_state == CaptureState::Idle {
@@ -600,17 +603,21 @@ impl eframe::App for SelectorApp {
         }
         if f7 { self.do_validate(); }
 
-        // Handle click while in wait state.
+        // Handle click while in wait state using global mouse hook.
         if let CaptureState::WaitingClick { deadline } = &self.capture_state {
             if Instant::now() > *deadline {
+                mouse_hook::deactivate_capture();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获超时，已取消".to_string();
             } else if escape {
+                mouse_hook::deactivate_capture();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获已取消".to_string();
-            } else if clicked {
-                if let Some(pos) = click_pos {
-                    self.finish_capture_at(pos.x as i32, pos.y as i32);
+            } else if let Some(event) = mouse_hook::poll_click() {
+                // Use the click event from global mouse hook (works across all windows).
+                // Only process WM_LBUTTONDOWN events for capture.
+                if event.is_down {
+                    self.finish_capture_at(event.x, event.y);
                 }
             }
         }

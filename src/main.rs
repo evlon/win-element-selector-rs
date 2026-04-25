@@ -6,6 +6,7 @@ mod capture;
 mod error;
 mod highlight;
 mod model;
+mod mouse_hook;
 mod xpath;
 
 use eframe::egui;
@@ -28,6 +29,11 @@ fn main() -> anyhow::Result<()> {
                 .expect("CoInitializeEx failed");
         }
     }
+
+    // Initialize the global mouse hook system.
+    mouse_hook::init()
+        .expect("Failed to initialize mouse hook system");
+    info!("Mouse hook system initialized");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
