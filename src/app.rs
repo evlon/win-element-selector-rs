@@ -448,9 +448,6 @@ impl SelectorApp {
             .id_salt("tree_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                // Set the width to fill available space
-                ui.set_min_width(ui.available_width());
-                
                 let n = self.hierarchy.len();
                 for idx in 0..n {
                     let is_sel    = self.selected_node == Some(idx);
@@ -491,15 +488,44 @@ impl SelectorApp {
     fn draw_property_panel(&mut self, ui: &mut Ui) {
         panel_header(ui, "⚙  元素属性");
 
-        let Some(sel_idx) = self.selected_node else {
-            ui.add_space(20.0);
+        ScrollArea::vertical()
+            .id_salt("property_scroll")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                let Some(sel_idx) = self.selected_node else {
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("← 点击左侧节点查看属性").color(C_MUTED).italics());
+                    });
+                    return;
+                };
+                if sel_idx >= self.hierarchy.len() { return; }
+
+        // Ancestors breadcrumb - simple vertical list
+        ui.add_space(4.0);
+        ui.label(RichText::new("层级追溯:").color(C_MUTED).size(11.0));
+        ui.add_space(2.0);
+        
+        for i in 0..=sel_idx {
+            let ancestor = &self.hierarchy[i];
+            let is_current = i == sel_idx;
+            let indent = 8.0 + (i as f32 * 10.0);
+            
             ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                ui.label(RichText::new("← 点击左侧节点查看属性").color(C_MUTED).italics());
+                ui.add_space(indent);
+                let label_text = format!("• {}", ancestor.tree_label());
+                if is_current {
+                    ui.label(RichText::new(&label_text).color(C_TARGET_FG).strong().size(10.5));
+                } else {
+                    ui.label(RichText::new(&label_text).color(C_MUTED).size(10.0));
+                }
             });
-            return;
-        };
-        if sel_idx >= self.hierarchy.len() { return; }
+        }
+        
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
 
         // Node summary
         let node = &self.hierarchy[sel_idx];
@@ -619,6 +645,7 @@ impl SelectorApp {
             self.custom_xpath = false;
             self.rebuild_xpath();
         }
+        });
     }
 }
 
@@ -683,26 +710,24 @@ impl eframe::App for SelectorApp {
         egui::CentralPanel::default()
             .frame(Frame::none().fill(Color32::from_gray(252)))
             .show(ctx, |ui| {
-                // Split into left (hierarchy) + right (properties).
-                let avail = ui.available_size();
-                let left_w = (avail.x * 0.44).max(280.0).min(440.0);
-
-                ui.horizontal(|ui| {
-                    // Left
-                    ui.allocate_ui(Vec2::new(left_w, avail.y), |ui| {
+                // Use egui SidePanel API for proper layout
+                // Left panel first
+                egui::SidePanel::left("left_panel")
+                    .resizable(true)
+                    .default_width(350.0)
+                    .width_range(280.0..=500.0)
+                    .show_inside(ui, |ui| {
                         self.draw_hierarchy_panel(ui);
                     });
-
-                    // Divider
-                    ui.add(
-                        egui::Separator::default().vertical().spacing(0.0),
-                    );
-
-                    // Right
-                    ui.allocate_ui(Vec2::new(ui.available_width(), avail.y), |ui| {
+                
+                // Right panel
+                egui::SidePanel::right("right_panel")
+                    .resizable(true)
+                    .default_width(400.0)
+                    .width_range(300.0..=600.0)
+                    .show_inside(ui, |ui| {
                         self.draw_property_panel(ui);
                     });
-                });
             });
     }
 }
@@ -756,75 +781,88 @@ fn draw_tree_row(
 
     let bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT }; 
     
-    // Create a frame for the entire row - this ensures full-width clickable area
-    Frame::none()
-        .fill(bg)
-        .rounding(Rounding::same(3.0))
-        .inner_margin(Margin::symmetric(8.0, 2.0))
-        .show(ui, |ui| {
-            // Horizontal layout for one row: indent -> connector -> icon -> label
-            ui.horizontal(|ui| {
-                // Add indentation space
-                ui.add_space(indent);
-                
-                // Allocate space for tree connector (vertical/horizontal lines)
-                let (line_rect, _) = ui.allocate_exact_size(Vec2::new(line_width, row_height), Sense::hover());
-                let painter = ui.painter();
-                
-                // Draw tree connecting lines
-                let line_x = line_rect.left() + 10.0;  // Center of connector area
-                let mid_y = line_rect.center().y;
-                
-                // Horizontal line connecting to label
-                painter.line_segment(
-                    [egui::pos2(line_x, mid_y), egui::pos2(line_rect.right() - 4.0, mid_y)],
-                    Stroke::new(1.0, C_TREE_LINE),
-                );
-                
-                // Vertical line for tree structure
-                if depth > 0 {
-                    // Line going up to connect to parent
-                    painter.line_segment(
-                        [egui::pos2(line_x, line_rect.top()), egui::pos2(line_x, mid_y)],
-                        Stroke::new(1.0, C_TREE_LINE),
-                    );
-                }
-                
-                // Line going down to connect to siblings
-                if !is_target {
-                    painter.line_segment(
-                        [egui::pos2(line_x, mid_y), egui::pos2(line_x, line_rect.bottom())],
-                        Stroke::new(1.0, C_TREE_LINE),
-                    );
-                }
-                
-                // Node icon based on state
-                if !node.included {
-                    ui.label(RichText::new("⊖").color(C_MUTED).size(12.0));
-                } else if is_target {
-                    ui.label(RichText::new("🎯").color(C_TARGET_FG).size(12.0));
-                } else {
-                    ui.label(RichText::new("●").color(C_SEL_FG).size(12.0));
-                }
-                
-                ui.add_space(6.0);
-                
-                // Node label text
-                let label_text = RichText::new(node.tree_label()).size(12.0);
-                let label_text = if is_target {
-                    label_text.color(C_TARGET_FG).strong()
-                } else if is_sel {
-                    label_text.color(C_SEL_FG)
-                } else if !node.included {
-                    label_text.color(C_MUTED).strikethrough()
-                } else {
-                    label_text.color(Color32::from_gray(40))
-                };
-                ui.label(label_text);
-            });
-        })
-        .response
-        .interact(Sense::click())
+    // Allocate full width for this row to ensure vertical stacking
+    let (_, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+    
+    // Use the allocated rectangle for drawing
+    let rect = resp.rect;
+    let painter = ui.painter();
+    
+    // Draw background
+    if is_sel {
+        painter.rect_filled(rect, Rounding::same(3.0), bg);
+    }
+    
+    // Calculate positions
+    let line_x = rect.left() + indent + 10.0;
+    let mid_y = rect.center().y;
+    
+    // Draw tree connecting lines
+    painter.line_segment(
+        [egui::pos2(line_x, mid_y), egui::pos2(line_x + 6.0, mid_y)],
+        Stroke::new(1.0, C_TREE_LINE),
+    );
+    
+    if depth > 0 {
+        painter.line_segment(
+            [egui::pos2(line_x, rect.top()), egui::pos2(line_x, mid_y)],
+            Stroke::new(1.0, C_TREE_LINE),
+        );
+    }
+    
+    if !is_target {
+        painter.line_segment(
+            [egui::pos2(line_x, mid_y), egui::pos2(line_x, rect.bottom())],
+            Stroke::new(1.0, C_TREE_LINE),
+        );
+    }
+    
+    // Node icon based on state
+    let icon_x = rect.left() + indent + 16.0;
+    let icon = if !node.included {
+        "⊖"
+    } else if is_target {
+        "🎯"
+    } else {
+        "●"
+    };
+    let icon_color = if !node.included {
+        C_MUTED
+    } else if is_target {
+        C_TARGET_FG
+    } else {
+        C_SEL_FG
+    };
+    painter.text(
+        egui::pos2(icon_x, mid_y - 6.0),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        egui::FontId::default(),
+        icon_color,
+    );
+    
+    // Node label text
+    let label_x = icon_x + 18.0;
+    let label_text = RichText::new(node.tree_label()).size(12.0);
+    let label_color = if is_target {
+        C_TARGET_FG
+    } else if is_sel {
+        C_SEL_FG
+    } else if !node.included {
+        C_MUTED
+    } else {
+        Color32::from_gray(40)
+    };
+    
+    painter.text(
+        egui::pos2(label_x, mid_y),
+        egui::Align2::LEFT_CENTER,
+        node.tree_label(),
+        egui::FontId::proportional(12.0),
+        label_color,
+    );
+    
+    resp
 }
 
 fn node_tooltip(ui: &mut Ui, node: &HierarchyNode) {
