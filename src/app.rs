@@ -250,91 +250,113 @@ impl SelectorApp {
     }
 
     fn draw_xpath_bar(&mut self, ctx: &egui::Context) {
+        let line_count = self.xpath_text.lines().count().max(2).min(5);
+        
         egui::TopBottomPanel::top("xpath_bar")
-            .exact_height(44.0)
-            .frame(Frame::none().fill(Color32::from_gray(250)).inner_margin(Margin::symmetric(8.0, 5.0)))
+            .resizable(false)
+            .frame(Frame::none().fill(Color32::from_gray(250)).inner_margin(Margin::symmetric(8.0, 2.0)))
             .show(ctx, |ui| {
+                // Match all backgrounds to eliminate any visual gaps
+                let style = ui.style_mut();
+                style.visuals.widgets.inactive.bg_fill = Color32::from_gray(250);
+                style.visuals.widgets.hovered.bg_fill = Color32::from_gray(250);
+                style.visuals.widgets.active.bg_fill = Color32::from_gray(250);
+                style.visuals.widgets.open.bg_fill = Color32::from_gray(250);
+                style.visuals.extreme_bg_color = Color32::from_gray(250);  // TextEdit background
+                style.visuals.panel_fill = Color32::from_gray(250);
+                // Top row: Label + buttons
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("XPath").color(C_MUTED).size(11.0),
-                    );
+                    ui.label(RichText::new("XPath").color(C_MUTED).size(11.0));
                     ui.add_space(4.0);
-
-                    // XPath text box
-                    let edit_resp = ui.add(
-                        TextEdit::singleline(&mut self.xpath_text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(ui.available_width() - 260.0)
-                            .hint_text("//ControlType[@Attr='val']")
-                            .text_color(C_MONO_FG),
-                    );
-                    if edit_resp.changed() {
-                        self.custom_xpath = true;
-                        self.xpath_error  = xpath::lint(&self.xpath_text);
-                        self.validation   = ValidationResult::Idle;
-                    }
-
-                    // Error tooltip on hover
-                    if let Some(err) = &self.xpath_error {
-                        edit_resp.on_hover_text(
-                            RichText::new(format!("⚠ {}", err)).color(C_ERR),
-                        );
-                    }
-
-                    ui.add_space(6.0);
-
-                    // Copy button
-                    if ui.button("📋").on_hover_text("复制 XPath").clicked() {
-                        ui.output_mut(|o| o.copied_text = self.xpath_text.clone());
-                        self.status_msg = "XPath 已复制到剪贴板".to_string();
-                    }
-
-                    // Simplify toggle
-                    let simp_txt = if self.show_simplified { "完整" } else { "精简" };
-                    if ui.button(simp_txt).on_hover_text("切换精简/完整 XPath").clicked() {
-                        self.show_simplified = !self.show_simplified;
-                        self.config.show_simplified = self.show_simplified;
-                        self.custom_xpath = false;
-                        self.rebuild_xpath();
-                    }
-
-                    // Custom mode badge
-                    if self.custom_xpath {
-                        ui.label(RichText::new("[自定义]").color(C_WARN).size(10.5));
-                        if ui.button("↺ 重置").on_hover_text("回到自动生成的 XPath").clicked() {
+                    
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // History dropdown
+                        if !self.history.is_empty() {
+                            egui::ComboBox::from_id_salt("history_combo")
+                                .selected_text("历史")
+                                .width(56.0)
+                                .show_ui(ui, |ui| {
+                                    let mut chosen = None;
+                                    for (i, h) in self.history.iter().enumerate() {
+                                        let label = if h.len() > 48 {
+                                            format!("{}…", &h[..48])
+                                        } else {
+                                            h.clone()
+                                        };
+                                        if ui.selectable_label(false, label).clicked() {
+                                            chosen = Some(i);
+                                        }
+                                    }
+                                    if let Some(i) = chosen {
+                                        self.xpath_text  = self.history[i].clone();
+                                        self.custom_xpath = true;
+                                        self.xpath_error  = xpath::lint(&self.xpath_text);
+                                    }
+                                });
+                        }
+                        
+                        // Custom mode badge
+                        if self.custom_xpath {
+                            if ui.button("↺ 重置").on_hover_text("回到自动生成的 XPath").clicked() {
+                                self.custom_xpath = false;
+                                self.rebuild_xpath();
+                            }
+                            ui.label(RichText::new("[自定义]").color(C_WARN).size(10.5));
+                        }
+                        
+                        // Simplify toggle
+                        let simp_txt = if self.show_simplified { "完整" } else { "精简" };
+                        if ui.button(simp_txt).on_hover_text("切换精简/完整 XPath").clicked() {
+                            self.show_simplified = !self.show_simplified;
+                            self.config.show_simplified = self.show_simplified;
                             self.custom_xpath = false;
                             self.rebuild_xpath();
                         }
-                    }
-
-                    // History dropdown
-                    if !self.history.is_empty() {
-                        egui::ComboBox::from_id_source("history_combo")
-                            .selected_text("历史")
-                            .width(56.0)
-                            .show_ui(ui, |ui| {
-                                let mut chosen = None;
-                                for (i, h) in self.history.iter().enumerate() {
-                                    let label = if h.len() > 48 {
-                                        format!("{}…", &h[..48])
-                                    } else {
-                                        h.clone()
-                                    };
-                                    if ui.selectable_label(false, label).clicked() {
-                                        chosen = Some(i);
-                                    }
-                                }
-                                if let Some(i) = chosen {
-                                    self.xpath_text  = self.history[i].clone();
-                                    self.custom_xpath = true;
-                                    self.xpath_error  = xpath::lint(&self.xpath_text);
-                                }
-                            });
-                    }
+                        
+                        // Copy button
+                        if ui.button("📋").on_hover_text("复制 XPath").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.xpath_text.clone());
+                            self.status_msg = "XPath 已复制到剪贴板".to_string();
+                        }
+                    });
                 });
-
+                
+                // Multi-line XPath text box - wrap in Frame to cover any gaps
+                Frame::none()
+                    .fill(Color32::from_gray(250))
+                    .stroke(Stroke::NONE)
+                    .show(ui, |ui| {
+                        // Override TextEdit stroke to match background
+                        ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+                        ui.style_mut().visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+                        ui.style_mut().visuals.widgets.active.bg_stroke = Stroke::NONE;
+                        
+                        let edit_resp = ui.add(
+                            TextEdit::multiline(&mut self.xpath_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(line_count)
+                                .desired_width(ui.available_width())
+                                .hint_text("//ControlType[@Attr='val']")
+                                .text_color(C_MONO_FG)
+                                .frame(false),
+                        );
+                        
+                        if edit_resp.changed() {
+                            self.custom_xpath = true;
+                            self.xpath_error  = xpath::lint(&self.xpath_text);
+                            self.validation   = ValidationResult::Idle;
+                        }
+                        
+                        // Error tooltip on hover
+                        if let Some(err) = &self.xpath_error {
+                            edit_resp.on_hover_text(
+                                RichText::new(format!("⚠ {}", err)).color(C_ERR),
+                            );
+                        }
+                    });
+                
                 // Error bar under the text box
-                if let Some(err) = &self.xpath_error.clone() {
+                if let Some(err) = &self.xpath_error {
                     ui.label(RichText::new(format!("  ⚠ {}", err)).color(C_ERR).size(10.5));
                 }
             });
@@ -421,18 +443,22 @@ impl SelectorApp {
 
     fn draw_hierarchy_panel(&mut self, ui: &mut Ui) {
         panel_header(ui, "📂  元素层级结构");
-
+    
         ScrollArea::vertical()
-            .id_source("tree_scroll")
+            .id_salt("tree_scroll")
             .auto_shrink([false; 2])
             .show(ui, |ui| {
+                // Set the width to fill available space
+                ui.set_min_width(ui.available_width());
+                
                 let n = self.hierarchy.len();
                 for idx in 0..n {
                     let is_sel    = self.selected_node == Some(idx);
                     let is_target = idx == n - 1;
                     let depth     = idx;
-
-                    let resp = draw_tree_row(ui, &self.hierarchy[idx], depth, is_sel, is_target);
+    
+                    // Draw tree row - each call creates a new row vertically
+                    let resp = draw_tree_row(ui, &self.hierarchy[idx], depth, is_sel, is_target, n);
                     if resp.clicked() {
                         self.selected_node = Some(idx);
                     }
@@ -535,7 +561,7 @@ impl SelectorApp {
 
                 // Operator combo
                 let old = filter.operator.clone();
-                egui::ComboBox::from_id_source(format!("op_{}_{}", sel_idx, fi))
+                egui::ComboBox::from_id_salt(format!("op_{}_{}", sel_idx, fi))
                     .selected_text(filter.operator.label())
                     .width(76.0)
                     .show_ui(ui, |ui| {
@@ -712,67 +738,93 @@ fn btn(label: &str, width: f32) -> egui::Button<'static> {
 }
 
 /// Draw one tree row and return the response for click/hover handling.
+/// Uses vertical layout with proper indentation and connecting lines.
 fn draw_tree_row(
     ui: &mut Ui,
     node: &HierarchyNode,
     depth: usize,
     is_sel: bool,
     is_target: bool,
+    _total_count: usize,
 ) -> egui::Response {
-    let indent = depth as f32 * 16.0 + 8.0;
+    // Each level gets 20px indentation
+    let indent = depth as f32 * 20.0;
+    // Row height is fixed for consistent alignment
+    let row_height = 26.0;
+    // Line width for tree connectors
+    let line_width = 20.0;
 
-    let bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
-    let frame = Frame::none()
+    let bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT }; 
+    
+    // Create a frame for the entire row - this ensures full-width clickable area
+    Frame::none()
         .fill(bg)
         .rounding(Rounding::same(3.0))
-        .inner_margin(Margin { left: 0.0, right: 4.0, top: 1.0, bottom: 1.0 });
-
-    frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-
-            // Tree connector
-            let (line_rect, _) = ui.allocate_exact_size(Vec2::new(16.0, 22.0), Sense::hover());
-            let painter = ui.painter();
-            let lx = line_rect.left() + 7.0;
-            let my = line_rect.center().y;
-            painter.line_segment(
-                [egui::pos2(lx, line_rect.top()), egui::pos2(lx, my)],
-                Stroke::new(1.0, C_TREE_LINE),
-            );
-            painter.line_segment(
-                [egui::pos2(lx, my), egui::pos2(line_rect.right() + 2.0, my)],
-                Stroke::new(1.0, C_TREE_LINE),
-            );
-            if !is_target {
+        .inner_margin(Margin::symmetric(8.0, 2.0))
+        .show(ui, |ui| {
+            // Horizontal layout for one row: indent -> connector -> icon -> label
+            ui.horizontal(|ui| {
+                // Add indentation space
+                ui.add_space(indent);
+                
+                // Allocate space for tree connector (vertical/horizontal lines)
+                let (line_rect, _) = ui.allocate_exact_size(Vec2::new(line_width, row_height), Sense::hover());
+                let painter = ui.painter();
+                
+                // Draw tree connecting lines
+                let line_x = line_rect.left() + 10.0;  // Center of connector area
+                let mid_y = line_rect.center().y;
+                
+                // Horizontal line connecting to label
                 painter.line_segment(
-                    [egui::pos2(lx, my), egui::pos2(lx, line_rect.bottom())],
+                    [egui::pos2(line_x, mid_y), egui::pos2(line_rect.right() - 4.0, mid_y)],
                     Stroke::new(1.0, C_TREE_LINE),
                 );
-            }
-
-            // Excluded badge
-            if !node.included {
-                ui.label(RichText::new("⊖ ").color(C_MUTED).size(10.0));
-            }
-
-            // Label text
-            let label_text = RichText::new(node.tree_label()).size(12.0);
-            let label_text = if is_target {
-                label_text.color(C_TARGET_FG).strong()
-            } else if is_sel {
-                label_text.color(C_SEL_FG)
-            } else if !node.included {
-                label_text.color(C_MUTED).strikethrough()
-            } else {
-                label_text.color(Color32::from_gray(40))
-            };
-            ui.label(label_text)
+                
+                // Vertical line for tree structure
+                if depth > 0 {
+                    // Line going up to connect to parent
+                    painter.line_segment(
+                        [egui::pos2(line_x, line_rect.top()), egui::pos2(line_x, mid_y)],
+                        Stroke::new(1.0, C_TREE_LINE),
+                    );
+                }
+                
+                // Line going down to connect to siblings
+                if !is_target {
+                    painter.line_segment(
+                        [egui::pos2(line_x, mid_y), egui::pos2(line_x, line_rect.bottom())],
+                        Stroke::new(1.0, C_TREE_LINE),
+                    );
+                }
+                
+                // Node icon based on state
+                if !node.included {
+                    ui.label(RichText::new("⊖").color(C_MUTED).size(12.0));
+                } else if is_target {
+                    ui.label(RichText::new("🎯").color(C_TARGET_FG).size(12.0));
+                } else {
+                    ui.label(RichText::new("●").color(C_SEL_FG).size(12.0));
+                }
+                
+                ui.add_space(6.0);
+                
+                // Node label text
+                let label_text = RichText::new(node.tree_label()).size(12.0);
+                let label_text = if is_target {
+                    label_text.color(C_TARGET_FG).strong()
+                } else if is_sel {
+                    label_text.color(C_SEL_FG)
+                } else if !node.included {
+                    label_text.color(C_MUTED).strikethrough()
+                } else {
+                    label_text.color(Color32::from_gray(40))
+                };
+                ui.label(label_text);
+            });
         })
-        .inner
-    })
-    .inner
-    .interact(Sense::click())
+        .response
+        .interact(Sense::click())
 }
 
 fn node_tooltip(ui: &mut Ui, node: &HierarchyNode) {
