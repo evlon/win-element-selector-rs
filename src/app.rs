@@ -40,6 +40,14 @@ enum CaptureState {
     Capturing,
 }
 
+/// Persisted capture data for restoring on restart.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedCapture {
+    hierarchy: Vec<HierarchyNode>,
+    selected_node: Option<usize>,
+    xpath_text: String,
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 pub struct SelectorApp {
     // Data
@@ -64,6 +72,7 @@ pub struct SelectorApp {
     // UI state
     status_msg:     String,
     history:        Vec<String>,       // recent XPaths, newest-first, capped at 20
+    pending_save:   bool,               // flag to trigger save on next update
 
     // Config (persisted via egui storage)
     config:         AppConfig,
@@ -83,13 +92,39 @@ impl SelectorApp {
             })
             .unwrap_or_default();
 
-        let result   = capture::mock();
-        let xpath    = xpath::generate(&result.hierarchy);
+        // Try to restore last capture session from file
+        let save_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("last_capture.json");
+        
+        let (hierarchy, selected_node, xpath_text) = if save_path.exists() {
+            match std::fs::read_to_string(&save_path) {
+                Ok(content) => {
+                    match serde_json::from_str::<PersistedCapture>(&content) {
+                        Ok(captured) => {
+                            info!("Restored last capture from file: {} nodes", captured.hierarchy.len());
+                            (captured.hierarchy, captured.selected_node, captured.xpath_text)
+                        }
+                        Err(e) => {
+                            info!("Failed to parse last_capture.json: {}", e);
+                            Self::mock_capture()
+                        }
+                    }
+                }
+                Err(e) => {
+                    info!("Failed to read last_capture.json: {}", e);
+                    Self::mock_capture()
+                }
+            }
+        } else {
+            info!("No last_capture.json found, using mock data");
+            Self::mock_capture()
+        };
 
         Self {
-            hierarchy:       result.hierarchy,
-            selected_node:   Some(3),
-            xpath_text:      xpath,
+            hierarchy,
+            selected_node,
+            xpath_text,
             xpath_error:     None,
             custom_xpath:    false,
             show_simplified: config.show_simplified,
@@ -98,8 +133,44 @@ impl SelectorApp {
             overlay:         CaptureOverlay::new(),
             status_msg:      "就绪 — 按 F4 开始捕获元素".to_string(),
             history:         config.last_xpaths.clone(),
+            pending_save:    false,
             config,
             countdown_str:   String::new(),
+        }
+    }
+
+    fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String) {
+        let result = capture::mock();
+        let xpath = xpath::generate(&result.hierarchy);
+        (result.hierarchy, Some(3), xpath)
+    }
+
+    fn save_to_file(&self) {
+        if self.hierarchy.is_empty() {
+            return;
+        }
+        
+        let save_path = std::env::current_dir()
+            .unwrap_or_default()
+            .join("last_capture.json");
+        
+        let captured = PersistedCapture {
+            hierarchy: self.hierarchy.clone(),
+            selected_node: self.selected_node,
+            xpath_text: self.xpath_text.clone(),
+        };
+        
+        match serde_json::to_string_pretty(&captured) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&save_path, json) {
+                    info!("Failed to save to file: {}", e);
+                } else {
+                    info!("Saved capture to {}", save_path.display());
+                }
+            }
+            Err(e) => {
+                info!("Failed to serialize capture data: {}", e);
+            }
         }
     }
 
@@ -168,6 +239,7 @@ impl SelectorApp {
             );
             // Flash highlight on captured element.
             if let Some(last) = result.hierarchy.last() {
+                // Flash for 800ms so the user can see what was captured.
                 highlight::flash(&last.rect, 800);
             }
         }
@@ -176,6 +248,8 @@ impl SelectorApp {
         self.custom_xpath  = false;
         self.validation    = ValidationResult::Idle;
         self.rebuild_xpath();
+        self.pending_save  = true;  // Flag for eframe save
+        self.save_to_file();  // Also save to file immediately
         info!("capture done: {}", self.xpath_text);
     }
 
@@ -383,21 +457,23 @@ impl SelectorApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(4.0);
 
-                        // Cancel / Confirm
-                        if ui.add(btn("取消", 68.0)).clicked() {
+                        // Save / Exit buttons
+                        if ui.add(btn("退出", 68.0)).clicked() {
+                            self.save_to_file();  // Save before exit
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                         ui.add_space(4.0);
                         if ui.add(
                             egui::Button::new(
-                                RichText::new("✔ 确定").color(Color32::WHITE).size(12.0),
+                                RichText::new("💾 保存").color(Color32::WHITE).size(12.0),
                             )
                             .fill(C_TITLE_BG)
                             .min_size(Vec2::new(68.0, 28.0)),
                         ).clicked() {
                             self.push_history();
-                            self.status_msg = format!("已确认 XPath: {}", self.xpath_text);
-                            info!("confirmed xpath: {}", self.xpath_text);
+                            self.save_to_file();  // Save to file
+                            self.status_msg = "已保存 XPath 到历史记录".to_string();
+                            info!("saved xpath: {}", self.xpath_text);
                         }
 
                         ui.add_space(10.0);
@@ -653,9 +729,29 @@ impl SelectorApp {
 
 impl eframe::App for SelectorApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        info!("save() called - persisting data");
+        // Save config
         self.config.last_xpaths = self.history.clone();
         if let Ok(json) = serde_json::to_string(&self.config) {
             storage.set_string("app_config", json);
+            info!("Saved app_config");
+        }
+
+        // Save last capture session
+        if !self.hierarchy.is_empty() {
+            let captured = PersistedCapture {
+                hierarchy: self.hierarchy.clone(),
+                selected_node: self.selected_node,
+                xpath_text: self.xpath_text.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&captured) {
+                storage.set_string("last_capture", json);
+                info!("Saved last_capture with {} nodes", self.hierarchy.len());
+            } else {
+                info!("Failed to serialize last_capture");
+            }
+        } else {
+            info!("No hierarchy to save");
         }
     }
 
@@ -692,9 +788,14 @@ impl eframe::App for SelectorApp {
                 self.status_msg = "捕获已取消".to_string();
             } else if let Some(event) = mouse_hook::poll_click() {
                 // Use the click event from global mouse hook (works across all windows).
-                // Only process WM_LBUTTONDOWN events for capture.
+                // Only process WM_LBUTTONDOWN events with modifier keys (Ctrl or Shift).
                 if event.is_down {
-                    self.finish_capture_at(event.x, event.y, event.capture_mode());
+                    let mode = event.capture_mode();
+                    // Only capture if Ctrl or Shift is pressed
+                    if mode != CaptureMode::None {
+                        self.finish_capture_at(event.x, event.y, mode);
+                    }
+                    // If no modifier, ignore the click (allow normal clicking)
                 }
             }
         }

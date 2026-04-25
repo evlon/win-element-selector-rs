@@ -24,6 +24,17 @@ use windows::Win32::{
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Mouse move event for real-time highlight
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Represents a mouse move event for real-time element highlighting.
+#[derive(Debug, Clone, Copy)]
+pub struct MouseMoveEvent {
+    pub x: i32,
+    pub y: i32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Click event
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -55,10 +66,8 @@ impl ClickEvent {
             CaptureMode::Single
         } else if self.shift_pressed && self.is_down {
             CaptureMode::Batch
-        } else if self.is_down {
-            // Default to Single for simple clicks
-            CaptureMode::Single
         } else {
+            // No modifier pressed - do not capture
             CaptureMode::None
         }
     }
@@ -76,21 +85,41 @@ pub struct HookState {
     swallow: bool,
     /// Channel to send click events to main thread.
     sender: Sender<ClickEvent>,
+    /// Channel to send mouse move events to main thread.
+    move_sender: Sender<MouseMoveEvent>,
 }
 
 impl HookState {
-    fn new(sender: Sender<ClickEvent>) -> Self {
+    fn new(sender: Sender<ClickEvent>, move_sender: Sender<MouseMoveEvent>) -> Self {
         Self {
             active: false,
             swallow: true,  // Default: swallow clicks to prevent triggering target
             sender,
+            move_sender,
         }
     }
 }
 
 // Global hook state wrapped in Arc<Mutex> for thread-safe access.
 static HOOK_STATE: once_cell::sync::Lazy<Arc<Mutex<HookState>>> = 
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HookState::new(unbounded().0))));
+    once_cell::sync::Lazy::new(|| {
+        let (click_tx, _) = unbounded();
+        let (move_tx, _) = unbounded();
+        Arc::new(Mutex::new(HookState::new(click_tx, move_tx)))
+    });
+
+// Global channels for receiving events
+static CLICK_CHANNEL: once_cell::sync::Lazy<(Sender<ClickEvent>, Mutex<Option<Receiver<ClickEvent>>>)> = 
+    once_cell::sync::Lazy::new(|| {
+        let (tx, rx) = unbounded();
+        (tx, Mutex::new(Some(rx)))
+    });
+
+static MOVE_CHANNEL: once_cell::sync::Lazy<(Sender<MouseMoveEvent>, Mutex<Option<Receiver<MouseMoveEvent>>>)> = 
+    once_cell::sync::Lazy::new(|| {
+        let (tx, rx) = unbounded();
+        (tx, Mutex::new(Some(rx)))
+    });
 
 // Global hook handle (only accessed from hook thread).
 #[cfg(target_os = "windows")]
@@ -160,9 +189,10 @@ pub mod win_hook {
                     info!("Click event sent to main thread: {:?}", event);
                 }
                 
-                // If swallow mode is enabled, block the event from reaching target.
-                if state.swallow && event.is_down {
-                    debug!("Swallowing click event (blocking propagation)");
+                // Only swallow the event if modifier key is pressed AND swallow mode is enabled.
+                // This allows normal clicking when no modifier is pressed.
+                if state.swallow && event.is_down && (ctrl_pressed || shift_pressed) {
+                    debug!("Swallowing click event with modifier (blocking propagation)");
                     // Return non-zero to block the event.
                     return LRESULT(1);
                 }

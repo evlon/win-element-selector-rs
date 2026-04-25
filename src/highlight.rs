@@ -62,13 +62,14 @@ mod windows_impl {
             Graphics::Gdi::{
                 BeginPaint, CreatePen, DeleteObject, EndPaint,
                 GetStockObject, PAINTSTRUCT, PS_SOLID, SelectObject,
-                NULL_BRUSH, Rectangle,
+                NULL_BRUSH, Rectangle, CreateSolidBrush,
             },
             UI::{
                 WindowsAndMessaging::{
                     CreateWindowExW, DefWindowProcW, DestroyWindow,
-                    PostQuitMessage, RegisterClassExW,
+                    GetMessageW, PostQuitMessage, RegisterClassExW,
                     SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
+                    TranslateMessage, DispatchMessageW,
                     HWND_TOPMOST, LWA_ALPHA,
                     SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
                     WM_DESTROY, WM_PAINT, WNDCLASSEXW,
@@ -76,6 +77,7 @@ mod windows_impl {
                     WS_EX_TRANSPARENT, WS_POPUP, GetClientRect,
                 },
             },
+            System::LibraryLoader::GetModuleHandleW,
         },
     };
 
@@ -84,11 +86,34 @@ mod windows_impl {
 
     pub fn flash(rect: &ElementRect, duration_ms: u64) {
         let r = rect.clone();
+        log::info!("highlight::flash called at ({}, {}, {}, {})", r.x, r.y, r.width, r.height);
         thread::spawn(move || {
             if let Some(hwnd) = create_highlight_window(&r) {
+                log::info!("highlight window created successfully");
                 unsafe { let _ = ShowWindow(hwnd, SW_SHOW); };
-                thread::sleep(std::time::Duration::from_millis(duration_ms));
+                
+                // Run message pump for duration_ms
+                let start = std::time::Instant::now();
+                let duration = std::time::Duration::from_millis(duration_ms);
+                while start.elapsed() < duration {
+                    unsafe {
+                        let mut msg = std::mem::zeroed();
+                        let ret = GetMessageW(&mut msg, None, 0, 0);
+                        if ret.0 > 0 {
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        } else {
+                            break;
+                        }
+                    }
+                    // Small sleep to prevent 100% CPU
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                
                 unsafe { let _ = DestroyWindow(hwnd); };
+                log::info!("highlight window destroyed");
+            } else {
+                log::error!("failed to create highlight window");
             }
         });
     }
@@ -117,16 +142,19 @@ mod windows_impl {
 
         unsafe {
             // Register class (idempotent — ignore ERROR_CLASS_ALREADY_EXISTS).
+            let h_instance = GetModuleHandleW(None).unwrap_or_default();
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 lpfnWndProc: Some(highlight_wnd_proc),
                 lpszClassName: PCWSTR(class.as_ptr()),
+                hInstance: h_instance.into(),
+                hbrBackground: CreateSolidBrush(COLORREF(0xFFFFFF)), // White background
                 ..Default::default()
             };
             let _ = RegisterClassExW(&wc); // ignore failure (already registered)
 
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,  // Removed WS_EX_TRANSPARENT
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
@@ -139,12 +167,21 @@ mod windows_impl {
 
             match hwnd {
                 Ok(h) => {
-                    // 60% opacity red overlay.
-                    SetLayeredWindowAttributes(h, COLORREF(0), 153, LWA_ALPHA).ok()?;
-                    SetWindowPos(
+                    // Use only alpha blending - make the window 70% opaque
+                    // This allows the red border drawn by GDI to be visible
+                    // DO NOT use LWA_COLORKEY as it makes the entire window transparent
+                    let _ = SetLayeredWindowAttributes(h, COLORREF(0), 180, LWA_ALPHA);
+                    
+                    // Force window to top and show it
+                    let _ = SetWindowPos(
                         h, HWND_TOPMOST, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE,
-                    ).ok()?;
+                    );
+                    
+                    log::info!("Highlight window created at ({}, {}, {}, {}), alpha set to 180", 
+                               rect.x - BORDER, rect.y - BORDER,
+                               rect.width + BORDER * 2, rect.height + BORDER * 2);
+                    
                     Some(h)
                 }
                 Err(e) => {
@@ -166,20 +203,31 @@ mod windows_impl {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
 
-                let pen   = CreatePen(PS_SOLID, BORDER, COLORREF(0x0000FF)); // red BGR
-                let brush = GetStockObject(NULL_BRUSH);
-                let old_pen   = SelectObject(hdc, pen);
-                let old_brush = SelectObject(hdc, brush);
-
+                // Get client area
                 let mut rc = RECT::default();
-                GetClientRect(hwnd, &mut rc).ok();
-                Rectangle(
-                    hdc, rc.left, rc.top, rc.right, rc.bottom,
-                );
-
-                SelectObject(hdc, old_pen);
-                SelectObject(hdc, old_brush);
-                DeleteObject(pen);
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    // Draw semi-transparent red fill
+                    let red_brush = CreateSolidBrush(COLORREF(0x0000FF)); // Red BGR
+                    if !red_brush.is_invalid() {
+                        let old_brush = SelectObject(hdc, red_brush);
+                        let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+                        SelectObject(hdc, old_brush);
+                        let _ = DeleteObject(red_brush);
+                    }
+                    
+                    // Draw red border (5 pixels)
+                    let pen = CreatePen(PS_SOLID, 5, COLORREF(0x0000FF)); // Red BGR
+                    if !pen.is_invalid() {
+                        let old_pen = SelectObject(hdc, pen);
+                        let brush = GetStockObject(NULL_BRUSH);
+                        let old_brush = SelectObject(hdc, brush);
+                        let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+                        SelectObject(hdc, old_pen);
+                        SelectObject(hdc, old_brush);
+                        let _ = DeleteObject(pen);
+                    }
+                }
+                
                 EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
