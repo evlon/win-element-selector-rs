@@ -11,7 +11,7 @@ use crate::{
     capture,
     capture_overlay::CaptureOverlay,
     highlight,
-    model::{AppConfig, HierarchyNode, Operator, ValidationResult, WindowInfo},
+    model::{AppConfig, DetailedValidationResult, HierarchyNode, Operator, SegmentValidationResult, ValidationResult, WindowInfo},
     mouse_hook::{self, CaptureMode},
     xpath,
 };
@@ -55,12 +55,15 @@ pub struct SelectorApp {
     available_windows: Vec<WindowInfo>,
     show_window_panel: bool,
 
-    xpath_text:      String,
+    xpath_text:      String,         // Combined display: "window_selector, element_xpath"
+    window_selector: String,         // Window selector only
+    element_xpath:   String,         // Element XPath only
     xpath_error:     Option<String>,
     custom_xpath:    bool,
     show_simplified: bool,
 
     validation:    ValidationResult,
+    detailed_validation: Option<DetailedValidationResult>,
     capture_state: CaptureState,
     overlay:       CaptureOverlay,
 
@@ -98,14 +101,16 @@ impl SelectorApp {
             .unwrap_or_default()
             .join("last_capture.json");
 
-        let (hierarchy, selected_node, xpath_text) = if save_path.exists() {
+        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath) = if save_path.exists() {
             match std::fs::read_to_string(&save_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<PersistedCapture>(&s).ok())
             {
                 Some(c) => {
                     info!("Restored {} nodes from last_capture.json", c.hierarchy.len());
-                    (c.hierarchy, c.selected_node, c.xpath_text)
+                    let xpath_result = xpath::generate(&c.hierarchy);
+                    let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
+                    (c.hierarchy, c.selected_node, xpath, xpath_result.window_selector, xpath_result.element_xpath)
                 }
                 None => {
                     info!("Failed to parse last_capture.json, using mock");
@@ -125,10 +130,13 @@ impl SelectorApp {
             available_windows: Vec::new(),
             show_window_panel: true,
             xpath_text,
+            window_selector,
+            element_xpath,
             xpath_error: None,
             custom_xpath: false,
             show_simplified: config.show_simplified,
             validation: ValidationResult::Idle,
+            detailed_validation: None,
             capture_state: CaptureState::Idle,
             overlay: CaptureOverlay::new(),
             status_msg: "就绪 — 按 F4 开始捕获元素".to_string(),
@@ -144,10 +152,12 @@ impl SelectorApp {
         }
     }
 
-    fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String) {
+    fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String, String, String) {
         let result = capture::mock();
-        let xpath = xpath::generate(&result.hierarchy);
-        (result.hierarchy, Some(3), xpath)
+        let xpath_result = xpath::generate(&result.hierarchy);
+        // Combined for display
+        let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
+        (result.hierarchy, Some(3), xpath, xpath_result.window_selector, xpath_result.element_xpath)
     }
 
     fn save_to_file(&self) {
@@ -168,11 +178,33 @@ impl SelectorApp {
 
     fn rebuild_xpath(&mut self) {
         if self.custom_xpath { return; }
-        self.xpath_text = if self.show_simplified {
-            xpath::simplify(&self.hierarchy)
+        
+        // Generate window selector from window_info
+        let window_selector = if let Some(ref win) = self.window_info {
+            if !win.class_name.is_empty() && !win.title.is_empty() {
+                format!("Window[@ClassName='{}' and @Name='{}']", win.class_name, win.title)
+            } else if !win.class_name.is_empty() {
+                format!("Window[@ClassName='{}']", win.class_name)
+            } else if !win.title.is_empty() {
+                format!("Window[@Name='{}']", win.title)
+            } else {
+                "Window".to_string()
+            }
         } else {
-            xpath::generate(&self.hierarchy)
+            "Window".to_string()
         };
+        
+        // Generate element XPath from element hierarchy (nodes after Window)
+        let element_xpath = if self.show_simplified {
+            xpath::generate_simplified_elements(&self.hierarchy)
+        } else {
+            xpath::generate_elements(&self.hierarchy)
+        };
+        
+        // Update all three fields
+        self.window_selector = window_selector;
+        self.element_xpath = element_xpath;
+        self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation  = ValidationResult::Idle;
     }
@@ -209,7 +241,20 @@ impl SelectorApp {
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
         } else {
-            let n = result.hierarchy.len();
+            // Find Window node position
+            let window_idx = result.hierarchy.iter()
+                .position(|n| n.control_type == "Window")
+                .unwrap_or(0);
+            
+            // Extract element hierarchy (nodes after Window) for tree display
+            let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
+                result.hierarchy[window_idx + 1..].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            let n = element_hierarchy.len();
+            
             self.selected_node = n.checked_sub(1);
             self.window_info = result.window_info.clone();
             let window_hint = result.window_info
@@ -220,12 +265,13 @@ impl SelectorApp {
                 "已捕获 {} 层层级 — 坐标 ({}, {}){}",
                 n, result.cursor_x, result.cursor_y, window_hint
             );
-            if let Some(last) = result.hierarchy.last() {
+            if let Some(last) = element_hierarchy.last() {
                 highlight::flash(&last.rect, 800);
             }
             // Expand all nodes in the new tree
             self.node_expanded = vec![true; n];
-        }        self.hierarchy    = result.hierarchy;
+            self.hierarchy = element_hierarchy;
+        }
         self.capture_state = CaptureState::Idle;
         self.custom_xpath  = false;
         self.validation    = ValidationResult::Idle;
@@ -242,18 +288,29 @@ impl SelectorApp {
             return;
         }
         self.validation = ValidationResult::Running;
-        let result = capture::validate_with_window(&self.xpath_text, self.window_info.clone());
-        if let ValidationResult::Found { ref first_rect, .. } = result {
+        
+        // Use detailed validation API
+        let detailed_result = capture::validate_selector_and_xpath_detailed(
+            &self.window_selector,
+            &self.element_xpath,
+        );
+        
+        // Store detailed result for UI display
+        self.detailed_validation = Some(detailed_result.clone());
+        
+        // Update overall validation state
+        self.validation = detailed_result.overall.clone();
+        
+        if let ValidationResult::Found { ref first_rect, .. } = detailed_result.overall {
             if let Some(r) = first_rect { highlight::flash(r, 1200); }
         }
-        self.status_msg = match &result {
+        self.status_msg = match &detailed_result.overall {
             ValidationResult::Found { count, .. } =>
-                format!("校验通过 ✔ — 找到 {} 个匹配元素", count),
-            ValidationResult::NotFound => "校验失败 — 未找到匹配元素".to_string(),
+                format!("校验通过 ✔ — 找到 {} 个匹配元素 (总用时: {}ms)", count, detailed_result.total_duration_ms),
+            ValidationResult::NotFound => format!("校验失败 — 未找到匹配元素 (总用时: {}ms)", detailed_result.total_duration_ms),
             ValidationResult::Error(e) => format!("校验错误: {}", e),
             _ => String::new(),
         };
-        self.validation = result;
         self.push_history();
     }
 
@@ -306,7 +363,6 @@ impl SelectorApp {
     }
 
     fn draw_xpath_bar(&mut self, ctx: &egui::Context) {
-        let line_count = self.xpath_text.lines().count().max(2).min(5);
         egui::TopBottomPanel::top("xpath_bar")
             .resizable(false)
             .frame(
@@ -367,28 +423,57 @@ impl SelectorApp {
                             self.custom_xpath           = false;
                             self.rebuild_xpath();
                         }
-                        // Copy
-                        if ui.small_button("📋 复制").on_hover_text("复制 XPath 到剪贴板").clicked() {
+                        // Validation details toggle
+                        let val_txt = if self.config.show_validation_details { "📊 详情" } else { "📈 简洁" };
+                        if ui.small_button(val_txt).on_hover_text("切换验证详情显示").clicked() {
+                            self.config.show_validation_details = !self.config.show_validation_details;
+                        }
+                        // Three copy buttons
+                        if ui.small_button("📋 窗口").on_hover_text("复制窗口选择器").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.window_selector.clone());
+                            self.status_msg = "窗口选择器已复制到剪贴板".to_string();
+                        }
+                        if ui.small_button("📋 元素").on_hover_text("复制元素 XPath").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.element_xpath.clone());
+                            self.status_msg = "元素 XPath 已复制到剪贴板".to_string();
+                        }
+                        if ui.small_button("📋 组合").on_hover_text("复制组合格式（逗号分隔）").clicked() {
                             ui.output_mut(|o| o.copied_text = self.xpath_text.clone());
-                            self.status_msg = "XPath 已复制到剪贴板".to_string();
+                            self.status_msg = "组合 XPath 已复制到剪贴板".to_string();
                         }
                     });
                 });
 
                 ui.add_space(3.0);
 
-                // Multi-line editor
+                // Window selector row
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🪟 窗口:").color(C_MUTED).size(10.0).monospace());
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&self.window_selector).font(egui::FontId::monospace(10.5)).color(Color32::from_gray(60)));
+                });
+                
+                ui.add_space(2.0);
+
+                // Element XPath row (editable)
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔗 元素:").color(C_MUTED).size(10.0).monospace());
+                    ui.add_space(4.0);
+                });
+                
                 let edit_resp = ui.add(
-                    TextEdit::multiline(&mut self.xpath_text)
+                    TextEdit::multiline(&mut self.element_xpath)
                         .font(egui::TextStyle::Monospace)
-                        .desired_rows(line_count)
+                        .desired_rows(2)
                         .desired_width(ui.available_width())
-                        .hint_text("//ControlType[@Attr='val']")
+                        .hint_text("/ControlType[@Attr='val']")
                         .text_color(C_MONO_FG)
                         .frame(true),
                 );
                 if edit_resp.changed() {
                     self.custom_xpath = true;
+                    // Update combined text
+                    self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
                     self.xpath_error  = xpath::lint(&self.xpath_text);
                     self.validation   = ValidationResult::Idle;
                 }
@@ -572,6 +657,8 @@ impl SelectorApp {
                 // Tight spacing for tree rows
                 ui.spacing_mut().item_spacing.y = 0.0;
 
+                let validation_segments = self.detailed_validation.as_ref().map(|d| &d.segments);
+                let show_validation_details = self.config.show_validation_details;
                 Self::draw_tree_recursive(
                     ui,
                     &mut self.hierarchy,
@@ -580,6 +667,8 @@ impl SelectorApp {
                     0,
                     n,
                     0,
+                    validation_segments,
+                    show_validation_details,
                 );
                 ui.add_space(12.0);
             });
@@ -598,6 +687,8 @@ impl SelectorApp {
         idx: usize,
         total: usize,
         _depth: usize,
+        validation_segments: Option<&Vec<SegmentValidationResult>>,
+        show_validation_details: bool,
     ) {
         let is_leaf   = idx + 1 >= total;
         let is_target = idx + 1 == total;
@@ -611,7 +702,23 @@ impl SelectorApp {
                           else if !included { C_MUTED }
                           else { Color32::from_gray(35) };
 
-        let header_text = RichText::new(format!("{} {}", icon, label_text))
+        // Add validation marker if available and enabled
+        let validation_marker = if show_validation_details {
+            validation_segments
+                .and_then(|segments| segments.get(idx))
+                .map(|seg| {
+                    if seg.matched {
+                        format!(" ✅ {}ms", seg.duration_ms)
+                    } else {
+                        format!(" ❌ {}ms", seg.duration_ms)
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let header_text = RichText::new(format!("{} {}{}", icon, label_text, validation_marker))
             .size(12.0)
             .color(label_color)
             .strong_if(is_sel || is_target);
@@ -664,6 +771,8 @@ impl SelectorApp {
                             idx + 1,
                             total,
                             _depth + 1,
+                            validation_segments,
+                            show_validation_details,
                         );
                     });
 

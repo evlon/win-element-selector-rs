@@ -164,6 +164,7 @@ impl HierarchyNode {
 
     /// Build the full XPath segment with proper prefix.
     /// is_first: true for the root node (//), false for children (/)
+    #[allow(dead_code)]
     pub fn xpath_segment_with_prefix(&self, is_first: bool) -> String {
         let prefix = if is_first { "//" } else { "/" };
         let segment = self.xpath_segment();
@@ -205,6 +206,16 @@ pub struct WindowInfo {
     pub process_id: u32,         // Process ID
 }
 
+// ─── XPathResult ─────────────────────────────────────────────────────────────
+
+/// Complete XPath selection result: window selector + element XPath.
+pub struct XPathResult {
+    /// Window selector in XPath-like format, e.g. "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
+    pub window_selector: String,
+    /// Element XPath starting from window root, e.g. "/Group/Button[@Name='发送']" or "/Group//Button[...]"
+    pub element_xpath: String,
+}
+
 // ─── CaptureResult ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -218,6 +229,33 @@ pub struct CaptureResult {
 }
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
+
+/// Result of validating a single XPath segment.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SegmentValidationResult {
+    /// Segment index (0-based)
+    pub segment_index: usize,
+    /// Segment text (e.g., "/Group[@ClassName='QWidget']")
+    pub segment_text: String,
+    /// Whether this segment matched
+    pub matched: bool,
+    /// Number of matches found at this level
+    pub match_count: usize,
+    /// Time taken to validate this segment (in milliseconds)
+    pub duration_ms: u64,
+}
+
+/// Detailed validation result with per-segment information.
+#[derive(Debug, Clone)]
+pub struct DetailedValidationResult {
+    /// Overall result
+    pub overall: ValidationResult,
+    /// Per-segment validation results
+    pub segments: Vec<SegmentValidationResult>,
+    /// Total validation time (in milliseconds)
+    pub total_duration_ms: u64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationResult {
@@ -247,6 +285,8 @@ pub struct AppConfig {
     pub highlight_on_hover: bool,
     pub show_simplified:    bool,
     pub last_xpaths:        Vec<String>,   // history, newest first
+    /// Show detailed validation results (per-segment timing)
+    pub show_validation_details: bool,
 }
 
 impl Default for AppConfig {
@@ -255,6 +295,7 @@ impl Default for AppConfig {
             highlight_on_hover: true,
             show_simplified:    false,
             last_xpaths:        Vec::new(),
+            show_validation_details: true,
         }
     }
 }

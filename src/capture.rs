@@ -6,7 +6,7 @@
 // Windows UI Automation capture via IUIAutomation COM interface.
 // Non-Windows platforms compile with a rich mock for UI development.
 
-use crate::model::{CaptureResult, ElementRect, HierarchyNode, ValidationResult, WindowInfo};
+use crate::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -294,53 +294,77 @@ pub mod uia {
 
     // ── Validation ────────────────────────────────────────────────────────────
 
-    /// Validate XPath with window hint for fast two-stage search.
-    /// Stage 1: Find target window from desktop children (~50ms)
-    /// Stage 2: Search elements inside the window (~800ms)
-    pub fn validate_xpath_with_window(xpath: &str, window_hint: Option<WindowInfo>) -> ValidationResult {
+    /// Validate using window selector and element XPath (new format).
+    /// Stage 1: Parse window selector to find target window
+    /// Stage 2: Search elements using element XPath inside the window
+    /// Returns detailed validation result with per-segment information.
+    pub fn validate_selector_and_xpath_detailed(
+        window_selector: &str,
+        element_xpath: &str,
+    ) -> DetailedValidationResult {
+        use std::time::Instant;
+        let total_start = Instant::now();
+        
         let auto = match get_automation() {
             Ok(a)  => a,
-            Err(e) => return ValidationResult::Error(e.to_string()),
-        };
-
-        // Stage 1: Find target window (if window_hint provided)
-        let search_root = if let Some(ref window_info) = window_hint {
-            log::info!("[XPath Validation] Stage 1/2: Locating target window: {:?}", window_info);
-            
-            match find_target_window(&auto, window_info) {
-                Some(window) => {
-                    log::info!("[XPath Validation] ✓ Window found, searching inside window");
-                    window
-                }
-                None => {
-                    return ValidationResult::Error(
-                        format!("窗口未找到: '{}' (类名: '{}')", window_info.title, window_info.class_name)
-                    );
-                }
-            }
-        } else {
-            // No window hint, search from desktop root
-            match unsafe { auto.GetRootElement() } {
-                Ok(r)  => r,
-                Err(e) => return ValidationResult::Error(format!("GetRootElement: {e}")),
+            Err(e) => {
+                return DetailedValidationResult {
+                    overall: ValidationResult::Error(e.to_string()),
+                    segments: vec![],
+                    total_duration_ms: total_start.elapsed().as_millis() as u64,
+                };
             }
         };
 
-        // Stage 2: Search elements from search_root
-        log::info!("[XPath Validation] Stage 2/2: Searching elements in subtree");
+        // Stage 1: Find target window using window selector
+        log::info!("[XPath Validation] Stage 1/2: Locating window with selector: {}", window_selector);
         
-        match find_by_xpath(&auto, &search_root, xpath) {
-            Ok(results) if results.is_empty() => ValidationResult::NotFound,
-            Ok(results) => {
-                let first_rect = results.first().and_then(|e| {
-                    unsafe { e.CurrentBoundingRectangle().ok() }.map(|r| ElementRect {
-                        x: r.left, y: r.top,
-                        width: r.right - r.left, height: r.bottom - r.top,
-                    })
-                });
-                ValidationResult::Found { count: results.len(), first_rect }
+        let search_root = match find_window_by_selector(&auto, window_selector) {
+            Some(window) => {
+                log::info!("[XPath Validation] ✓ Window found, searching inside window");
+                window
             }
-            Err(e) => ValidationResult::Error(e.to_string()),
+            None => {
+                return DetailedValidationResult {
+                    overall: ValidationResult::Error(
+                        format!("窗口未找到: {}", window_selector)
+                    ),
+                    segments: vec![],
+                    total_duration_ms: total_start.elapsed().as_millis() as u64,
+                };
+            }
+        };
+
+        // Stage 2: Search elements from search_root with detailed tracking
+        log::info!("[XPath Validation] Stage 2/2: Searching elements with XPath: {}", element_xpath);
+        
+        let (results, segments) = match find_by_xpath_detailed(&auto, &search_root, element_xpath) {
+            Ok((results, segments)) => (results, segments),
+            Err(e) => {
+                return DetailedValidationResult {
+                    overall: ValidationResult::Error(e.to_string()),
+                    segments: vec![],
+                    total_duration_ms: total_start.elapsed().as_millis() as u64,
+                };
+            }
+        };
+        
+        let overall = if results.is_empty() {
+            ValidationResult::NotFound
+        } else {
+            let first_rect = results.first().and_then(|e| {
+                unsafe { e.CurrentBoundingRectangle().ok() }.map(|r| ElementRect {
+                    x: r.left, y: r.top,
+                    width: r.right - r.left, height: r.bottom - r.top,
+                })
+            });
+            ValidationResult::Found { count: results.len(), first_rect }
+        };
+        
+        DetailedValidationResult {
+            overall,
+            segments,
+            total_duration_ms: total_start.elapsed().as_millis() as u64,
         }
     }
 
@@ -404,12 +428,17 @@ pub mod uia {
         window_list
     }
 
-    /// Find target window from desktop's direct children.
-    fn find_target_window(
+
+    /// Find target window by parsing window selector XPath.
+    /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
+    fn find_window_by_selector(
         auto: &IUIAutomation,
-        window_info: &WindowInfo,
+        window_selector: &str,
     ) -> Option<IUIAutomationElement> {
         use windows::Win32::UI::Accessibility::*;
+        
+        // Parse window selector to extract conditions
+        let (expected_name, expected_class) = parse_window_selector(window_selector);
         
         let desktop = unsafe { auto.GetRootElement().ok()? };
         let condition = unsafe { auto.CreateTrueCondition().ok()? };
@@ -429,14 +458,49 @@ pub mod uia {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
                 
-                // Match by title and class name
-                if title == window_info.title && class == window_info.class_name {
+                // Match by parsed conditions
+                let name_match = expected_name.as_ref().map_or(true, |n| &title == n);
+                let class_match = expected_class.as_ref().map_or(true, |c| &class == c);
+                
+                if name_match && class_match {
                     return Some(win);
                 }
             }
         }
         
         None
+    }
+
+    /// Parse window selector to extract Name and ClassName conditions.
+    /// Returns (Option<Name>, Option<ClassName>)
+    fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>) {
+        let mut name = None;
+        let mut class = None;
+        
+        // Extract content between [ and ]
+        if let Some(start) = selector.find('[') {
+            if let Some(end) = selector.rfind(']') {
+                let predicates = &selector[start + 1..end];
+                
+                // Parse @Name='value'
+                if let Some(pos) = predicates.find("@Name='") {
+                    let start_pos = pos + 7;
+                    if let Some(end_pos) = predicates[start_pos..].find('\'') {
+                        name = Some(predicates[start_pos..start_pos + end_pos].to_string());
+                    }
+                }
+                
+                // Parse @ClassName='value'
+                if let Some(pos) = predicates.find("@ClassName='") {
+                    let start_pos = pos + 12;
+                    if let Some(end_pos) = predicates[start_pos..].find('\'') {
+                        class = Some(predicates[start_pos..start_pos + end_pos].to_string());
+                    }
+                }
+            }
+        }
+        
+        (name, class)
     }
 
     /// XPath segment with scope information.
@@ -498,24 +562,38 @@ pub mod uia {
         segments
     }
 
-    fn find_by_xpath(
+    /// Find elements by XPath with detailed per-segment validation results.
+    fn find_by_xpath_detailed(
         auto: &IUIAutomation,
         root: &IUIAutomationElement,
         xpath: &str,
-    ) -> anyhow::Result<Vec<IUIAutomationElement>> {
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        use std::time::Instant;
         use windows::Win32::UI::Accessibility::*;
 
         let segments = parse_xpath(xpath);
         log::info!("[XPath Validation] Parsing {} segments", segments.len());
 
         if segments.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
 
         // Start search from root element.
         let mut current_search_root = root.clone();
+        let mut segment_results: Vec<SegmentValidationResult> = Vec::new();
         
         for (seg_idx, seg) in segments.iter().enumerate() {
+            let seg_start = Instant::now();
+            let seg_text = format!(
+                "{}{}[{}]",
+                if seg.descendants { "//" } else { "/" },
+                seg.tag,
+                seg.preds.iter()
+                    .map(|(attr, op, val)| format!("@{}{}'{}'", attr, op, val))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            );
+            
             log::info!(
                 "[XPath Validation] Segment {}: {} tag='{}', preds={:?}",
                 seg_idx,
@@ -568,60 +646,35 @@ pub mod uia {
                 }
             }
             
-            log::info!("[XPath Validation] Found {} matches for segment {}", matches.len(), seg_idx);
+            let duration_ms = seg_start.elapsed().as_millis() as u64;
+            log::info!("[XPath Validation] Found {} matches for segment {} ({}ms)", matches.len(), seg_idx, duration_ms);
+            
+            // Record segment result
+            segment_results.push(SegmentValidationResult {
+                segment_index: seg_idx,
+                segment_text: seg_text,
+                matched: !matches.is_empty(),
+                match_count: matches.len(),
+                duration_ms,
+            });
             
             if matches.is_empty() {
-                return Ok(vec![]);
+                return Ok((vec![], segment_results));
+            }
+            
+            // If this is the last segment, return all matches.
+            if seg_idx == segments.len() - 1 {
+                log::info!("[XPath Validation] Final result: {} matches", matches.len());
+                return Ok((matches, segment_results));
             }
             
             // For next segment, use the first match as search root.
             current_search_root = matches[0].clone();
         }
 
-        // Re-search the last segment to get all matches.
-        let last_seg = segments.last().unwrap();
-        let scope = if last_seg.descendants {
-            TreeScope_Subtree
-        } else {
-            TreeScope_Children
-        };
-        
-        let condition: IUIAutomationCondition = unsafe {
-            auto.CreateTrueCondition()?
-        };
-        let found = unsafe {
-            current_search_root.FindAll(scope, &condition)?
-        };
-        
-        let count = unsafe { found.Length()? };
-        let mut final_results: Vec<IUIAutomationElement> = Vec::new();
-        
-        for i in 0..count {
-            let elem = unsafe { found.GetElement(i)? };
-            let ct = unsafe {
-                elem.CurrentControlType()
-                    .map(control_type_name)
-                    .unwrap_or_default()
-            };
-            if !last_seg.tag.is_empty() && last_seg.tag != "*" && ct != last_seg.tag {
-                continue;
-            }
-            let all_match = last_seg.preds.iter().filter(|(attr, _, _)| attr != "Index").all(|(attr, op, val)| {
-                let actual = match attr.as_str() {
-                    "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                    "ClassName"    => get_bstr(unsafe { elem.CurrentClassName() }),
-                    "Name"         => get_bstr(unsafe { elem.CurrentName() }),
-                    _              => String::new(),
-                };
-                check_predicate(&actual, op, val)
-            });
-            if all_match {
-                final_results.push(elem);
-            }
-        }
-        
-        log::info!("[XPath Validation] Final result: {} matches", final_results.len());
-        Ok(final_results)
+        // Should never reach here, but just in case.
+        log::info!("[XPath Validation] Final result: 0 matches");
+        Ok((vec![], segment_results))
     }
 
     fn parse_segment(seg: &str) -> (String, Vec<(String, String, String)>) {
@@ -727,9 +780,12 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
     uia::capture_at_point(x, y)
 }
 
-/// Validate XPath with window hint for fast search.
-pub fn validate_with_window(xpath: &str, window_hint: Option<WindowInfo>) -> ValidationResult {
-    uia::validate_xpath_with_window(xpath, window_hint)
+/// Validate using window selector and element XPath with detailed per-segment results.
+pub fn validate_selector_and_xpath_detailed(
+    window_selector: &str,
+    element_xpath: &str,
+) -> DetailedValidationResult {
+    uia::validate_selector_and_xpath_detailed(window_selector, element_xpath)
 }
 
 /// Enumerate all top-level windows on desktop.
