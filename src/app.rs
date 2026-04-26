@@ -77,8 +77,13 @@ pub struct SelectorApp {
     // Config (persisted via egui storage)
     config:         AppConfig,
 
-    // Countdown display
+    // Countdown display (unused)
+    #[allow(dead_code)]
     countdown_str:  String,
+    
+    // Real-time highlight tracking
+    last_mouse_move: Option<Instant>,  // When mouse last moved
+    last_highlight_pos: Option<(i32, i32)>,  // Last highlighted position
 }
 
 impl SelectorApp {
@@ -136,6 +141,8 @@ impl SelectorApp {
             pending_save:    false,
             config,
             countdown_str:   String::new(),
+            last_mouse_move: None,
+            last_highlight_pos: None,
         }
     }
 
@@ -204,6 +211,7 @@ impl SelectorApp {
         self.status_msg    = "请在 30 秒内点击目标控件 …".to_string();
         // Activate global mouse hook with swallow mode to prevent click from reaching target.
         mouse_hook::activate_capture(true);
+        log::info!("Capture started - mouse hook activated with report_moves=true");
         // Show the capture guidance overlay.
         self.overlay.show();
     }
@@ -280,6 +288,22 @@ impl SelectorApp {
         };
         self.validation = result;
         self.push_history();
+    }
+    
+    /// Highlight element at the given screen position (for real-time preview).
+    fn highlight_element_at(&mut self, x: i32, y: i32) {
+        log::info!("Attempting to highlight element at ({}, {})", x, y);
+        // Capture element at position (quick, non-blocking)
+        let result = capture::capture_at(x, y);
+        if result.error.is_none() {
+            if let Some(last) = result.hierarchy.last() {
+                // Short flash (300ms) for real-time preview
+                log::info!("Highlighting element: {:?}", last.rect);
+                highlight::flash(&last.rect, 300);
+            }
+        } else {
+            log::warn!("Failed to capture element at ({}, {}): {:?}", x, y, result.error);
+        }
     }
 
     // ── Drawing helpers ───────────────────────────────────────────────────────
@@ -798,6 +822,38 @@ impl eframe::App for SelectorApp {
                     // If no modifier, ignore the click (allow normal clicking)
                 }
             }
+            
+            // Handle mouse still/moved events for real-time highlight
+            // Use debounce in main thread: check if mouse has been still for 500ms.
+            let (mouse_x, mouse_y, mouse_time) = mouse_hook::get_mouse_state();
+            
+            if mouse_time > 0 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                let elapsed = now_ms - mouse_time;
+                
+                if elapsed >= 500 {
+                    // Mouse has been still for 500ms - trigger highlight.
+                    if self.last_highlight_pos != Some((mouse_x, mouse_y)) {
+                        log::info!("Mouse still at ({}, {}) for {}ms, triggering highlight", mouse_x, mouse_y, elapsed);
+                        self.highlight_element_at(mouse_x, mouse_y);
+                        self.last_highlight_pos = Some((mouse_x, mouse_y));
+                    }
+                } else {
+                    // Mouse moved recently - clear highlight if showing a different position.
+                    if self.last_highlight_pos.is_some() {
+                        log::debug!("Mouse moved, clearing highlight");
+                        self.last_highlight_pos = None;
+                    }
+                }
+            }
+        } else {
+            // Not in capture mode, clear tracking
+            self.last_mouse_move = None;
+            self.last_highlight_pos = None;
         }
 
         // Draw the capture overlay if visible.
@@ -877,7 +933,8 @@ fn draw_tree_row(
     let indent = depth as f32 * 20.0;
     // Row height is fixed for consistent alignment
     let row_height = 26.0;
-    // Line width for tree connectors
+    // Line width for tree connectors (unused)
+    #[allow(unused_variables)]
     let line_width = 20.0;
 
     let bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT }; 
@@ -942,8 +999,9 @@ fn draw_tree_row(
         icon_color,
     );
     
-    // Node label text
+    // Node label text (unused variable, only used for RichText)
     let label_x = icon_x + 18.0;
+    #[allow(unused_variables)]
     let label_text = RichText::new(node.tree_label()).size(12.0);
     let label_color = if is_target {
         C_TARGET_FG

@@ -1,6 +1,7 @@
 // src/error.rs
 use thiserror::Error;
 
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum SelectorError {
     #[error("UI Automation 初始化失败: {0}")]
@@ -37,4 +38,5 @@ pub enum SelectorError {
     Clipboard(String),
 }
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, SelectorError>;

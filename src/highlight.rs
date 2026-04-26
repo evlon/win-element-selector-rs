@@ -27,6 +27,7 @@ pub fn flash(rect: &ElementRect, duration_ms: u64) {
 }
 
 /// Show a persistent highlight (call hide() to remove).
+#[allow(dead_code)]
 pub fn show(rect: &ElementRect) -> HighlightHandle {
     #[cfg(target_os = "windows")]
     {
@@ -39,7 +40,23 @@ pub fn show(rect: &ElementRect) -> HighlightHandle {
     }
 }
 
+/// Move an existing highlight window to a new position.
+/// Returns true if successful, false if the highlight is not active.
+#[allow(dead_code)]
+pub fn move_to(rect: &ElementRect) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows_impl::move_to(rect)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        debug!("highlight::move_to (stub)");
+        false
+    }
+}
+
 /// Opaque handle; dropping it hides the highlight.
+#[allow(dead_code)]
 pub struct HighlightHandle {
     active: Arc<AtomicBool>,
 }
@@ -74,7 +91,8 @@ mod windows_impl {
                     SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
                     WM_DESTROY, WM_PAINT, WNDCLASSEXW,
                     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-                    WS_EX_TRANSPARENT, WS_POPUP, GetClientRect,
+                    // WS_EX_TRANSPARENT, WS_POPUP, GetClientRect,
+                    WS_POPUP, GetClientRect,
                 },
             },
             System::LibraryLoader::GetModuleHandleW,
@@ -118,6 +136,7 @@ mod windows_impl {
         });
     }
 
+    #[allow(dead_code)]
     pub fn show(rect: &ElementRect) -> HighlightHandle {
         let active = Arc::new(AtomicBool::new(true));
         let active2 = active.clone();
@@ -135,6 +154,11 @@ mod windows_impl {
         });
 
         HighlightHandle { active }
+    }
+
+    pub fn move_to(_rect: &ElementRect) -> bool {
+        // Not implemented - use flash() instead for real-time highlight
+        false
     }
 
     fn create_highlight_window(rect: &ElementRect) -> Option<HWND> {
@@ -228,7 +252,7 @@ mod windows_impl {
                     }
                 }
                 
-                EndPaint(hwnd, &ps);
+                let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
             WM_DESTROY => {

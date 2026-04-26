@@ -13,7 +13,7 @@ use windows::Win32::{
     Foundation::{LPARAM, WPARAM, LRESULT},
     UI::WindowsAndMessaging::{
         SetWindowsHookExW, UnhookWindowsHookEx, CallNextHookEx,
-        WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
         MSLLHOOKSTRUCT, HHOOK,
         GetMessageW,
     },
@@ -27,12 +27,26 @@ use windows::Win32::{
 // Mouse move event for real-time highlight
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Represents a mouse move event for real-time element highlighting.
+/// Represents a mouse move event (unused, kept for API compatibility).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct MouseMoveEvent {
     pub x: i32,
     pub y: i32,
 }
+
+/// Event sent to main thread when mouse stops moving.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct MouseStillEvent {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Signal to clear the current highlight (unused, kept for API compatibility).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct MouseMovedEvent;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Click event
@@ -83,19 +97,29 @@ pub struct HookState {
     active: bool,
     /// Whether to swallow (block) the click event from reaching target.
     swallow: bool,
+    /// Whether to report mouse still/moved events (for real-time highlight).
+    report_moves: bool,
     /// Channel to send click events to main thread.
-    sender: Sender<ClickEvent>,
-    /// Channel to send mouse move events to main thread.
-    move_sender: Sender<MouseMoveEvent>,
+    click_sender: Sender<ClickEvent>,
+    /// Channel to send mouse still events to main thread.
+    still_sender: Sender<MouseStillEvent>,
+    /// Channel to send mouse moved events to main thread.
+    moved_sender: Sender<MouseMovedEvent>,
 }
 
 impl HookState {
-    fn new(sender: Sender<ClickEvent>, move_sender: Sender<MouseMoveEvent>) -> Self {
+    fn new(
+        click_sender: Sender<ClickEvent>,
+        still_sender: Sender<MouseStillEvent>,
+        moved_sender: Sender<MouseMovedEvent>,
+    ) -> Self {
         Self {
             active: false,
             swallow: true,  // Default: swallow clicks to prevent triggering target
-            sender,
-            move_sender,
+            report_moves: false,
+            click_sender,
+            still_sender,
+            moved_sender,
         }
     }
 }
@@ -104,8 +128,9 @@ impl HookState {
 static HOOK_STATE: once_cell::sync::Lazy<Arc<Mutex<HookState>>> = 
     once_cell::sync::Lazy::new(|| {
         let (click_tx, _) = unbounded();
-        let (move_tx, _) = unbounded();
-        Arc::new(Mutex::new(HookState::new(click_tx, move_tx)))
+        let (still_tx, _) = unbounded();
+        let (moved_tx, _) = unbounded();
+        Arc::new(Mutex::new(HookState::new(click_tx, still_tx, moved_tx)))
     });
 
 // Global channels for receiving events
@@ -115,7 +140,13 @@ static CLICK_CHANNEL: once_cell::sync::Lazy<(Sender<ClickEvent>, Mutex<Option<Re
         (tx, Mutex::new(Some(rx)))
     });
 
-static MOVE_CHANNEL: once_cell::sync::Lazy<(Sender<MouseMoveEvent>, Mutex<Option<Receiver<MouseMoveEvent>>>)> = 
+static STILL_CHANNEL: once_cell::sync::Lazy<(Sender<MouseStillEvent>, Mutex<Option<Receiver<MouseStillEvent>>>)> = 
+    once_cell::sync::Lazy::new(|| {
+        let (tx, rx) = unbounded();
+        (tx, Mutex::new(Some(rx)))
+    });
+
+static MOVED_CHANNEL: once_cell::sync::Lazy<(Sender<MouseMovedEvent>, Mutex<Option<Receiver<MouseMovedEvent>>>)> = 
     once_cell::sync::Lazy::new(|| {
         let (tx, rx) = unbounded();
         (tx, Mutex::new(Some(rx)))
@@ -161,6 +192,22 @@ pub mod win_hook {
         if state.active {
             let msg = w_param.0 as u32;
             
+            // Track mouse movement for debounce in hook thread.
+            // Simply record the latest position and timestamp to shared state.
+            if state.report_moves && msg == WM_MOUSEMOVE {
+                let hook_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
+                let x = hook_struct.pt.x;
+                let y = hook_struct.pt.y;
+                
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                // Update shared state for main thread to access.
+                update_mouse_state(x, y, now_ms);
+            }
+            
             // Only process left button events.
             if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
                 // Extract mouse position from MSLLHOOKSTRUCT.
@@ -184,9 +231,9 @@ pub mod win_hook {
                 debug!("Mouse hook captured: {:?} at ({}, {})", 
                        if event.is_down { "DOWN" } else { "UP" }, event.x, event.y);
                 
-                // Send event to main thread (non-blocking).
-                if state.sender.send(event).is_ok() {
-                    info!("Click event sent to main thread: {:?}", event);
+                // Send click event to main thread (non-blocking).
+                if state.click_sender.send(event).is_ok() {
+                    debug!("Click event sent to main thread");
                 }
                 
                 // Only swallow the event if modifier key is pressed AND swallow mode is enabled.
@@ -277,6 +324,7 @@ pub mod win_hook {
     }
 
     /// Stop the hook thread by sending WM_QUIT.
+    #[allow(dead_code)]
     pub fn stop_hook_thread() {
         if !HOOK_THREAD_RUNNING.load(Ordering::SeqCst) {
             return;
@@ -323,19 +371,26 @@ pub mod win_hook {
 /// Initialize the mouse hook system.
 /// This starts the hook thread that will run the message loop.
 pub fn init() -> anyhow::Result<()> {
-    // Create a new channel for events.
-    let (sender, receiver) = unbounded();
+    // Create new channels for events.
+    let (click_sender, click_receiver) = unbounded();
+    let (still_sender, still_receiver) = unbounded();
+    let (moved_sender, moved_receiver) = unbounded();
     
-    // Update the global state with the new receiver.
+    // Update the global state with the new receivers.
     {
         let mut state = HOOK_STATE.lock();
-        state.sender = sender;
+        state.click_sender = click_sender;
+        state.still_sender = still_sender;
+        state.moved_sender = moved_sender;
         state.active = false;
         state.swallow = true;
+        state.report_moves = false;
     }
     
-    // Store receiver for later retrieval.
-    *RECEIVER.lock() = Some(receiver);
+    // Store receivers for later retrieval.
+    *CLICK_CHANNEL.1.lock() = Some(click_receiver);
+    *STILL_CHANNEL.1.lock() = Some(still_receiver);
+    *MOVED_CHANNEL.1.lock() = Some(moved_receiver);
     
     // Start the hook thread.
     win_hook::start_hook_thread()?;
@@ -345,9 +400,12 @@ pub fn init() -> anyhow::Result<()> {
 }
 
 /// Cleanup the mouse hook system.
+#[allow(dead_code)]
 pub fn cleanup() {
     win_hook::stop_hook_thread();
-    *RECEIVER.lock() = None;
+    *CLICK_CHANNEL.1.lock() = None;
+    *STILL_CHANNEL.1.lock() = None;
+    *MOVED_CHANNEL.1.lock() = None;
     HOOK_STATE.lock().active = false;
     info!("Mouse hook system cleaned up");
 }
@@ -358,40 +416,81 @@ pub fn activate_capture(swallow: bool) {
     let mut state = HOOK_STATE.lock();
     state.active = true;
     state.swallow = swallow;
+    state.report_moves = true;  // Enable mouse move reporting for real-time highlight
     debug!("Capture activated (swallow={})", swallow);
 }
 
 /// Deactivate capture mode.
 /// Clicks will no longer be captured.
 pub fn deactivate_capture() {
-    HOOK_STATE.lock().active = false;
+    let mut state = HOOK_STATE.lock();
+    state.active = false;
+    state.report_moves = false;  // Disable mouse move reporting
     debug!("Capture deactivated");
 }
 
 /// Check if capture mode is active.
+#[allow(dead_code)]
 pub fn is_active() -> bool {
     HOOK_STATE.lock().active
 }
 
 /// Get the receiver for click events.
 /// The main thread should poll this receiver during the capture state.
+#[allow(dead_code)]
 pub fn get_receiver() -> Option<Receiver<ClickEvent>> {
-    RECEIVER.lock().clone()
+    CLICK_CHANNEL.1.lock().clone()
 }
 
-// Store the receiver separately for easy access.
-static RECEIVER: Mutex<Option<Receiver<ClickEvent>>> = Mutex::new(None);
+// Store the receivers separately for easy access (unused).
+#[allow(dead_code)]
+static CLICK_RECEIVER: Mutex<Option<Receiver<ClickEvent>>> = Mutex::new(None);
+#[allow(dead_code)]
+static MOVE_RECEIVER: Mutex<Option<Receiver<MouseMoveEvent>>> = Mutex::new(None);
 
 /// Poll for a click event (non-blocking).
 /// Returns Some(event) if an event was received, None otherwise.
 pub fn poll_click() -> Option<ClickEvent> {
-    RECEIVER.lock().as_ref().and_then(|rx| rx.try_recv().ok())
+    CLICK_CHANNEL.1.lock().as_ref().and_then(|rx| rx.try_recv().ok())
+}
+
+/// Poll for a mouse still event (non-blocking).
+/// Returns Some(event) if the mouse has stopped at a position.
+#[allow(dead_code)]
+pub fn poll_mouse_still() -> Option<MouseStillEvent> {
+    STILL_CHANNEL.1.lock().as_ref().and_then(|rx| rx.try_recv().ok())
+}
+
+/// Poll for a mouse moved event (non-blocking).
+/// Returns Some(event) if the mouse has moved (to clear highlight).
+#[allow(dead_code)]
+pub fn poll_mouse_moved() -> Option<MouseMovedEvent> {
+    MOVED_CHANNEL.1.lock().as_ref().and_then(|rx| rx.try_recv().ok())
+}
+
+/// Get the latest mouse position and time from hook thread's thread-local storage.
+/// This function must be called from the hook thread, so we expose it differently.
+/// Instead, we'll use a shared Mutex for cross-thread communication.
+static MOUSE_STATE: once_cell::sync::Lazy<parking_lot::Mutex<(i32, i32, u64)>> = 
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new((0, 0, 0)));
+
+/// Get the latest mouse state (x, y, timestamp_ms).
+pub fn get_mouse_state() -> (i32, i32, u64) {
+    let state = MOUSE_STATE.lock();
+    *state
+}
+
+/// Update the mouse state from hook thread.
+pub fn update_mouse_state(x: i32, y: i32, time_ms: u64) {
+    let mut state = MOUSE_STATE.lock();
+    *state = (x, y, time_ms);
 }
 
 /// Wait for a click event with timeout.
 /// Returns Some(event) if an event was received within the timeout, None otherwise.
+#[allow(dead_code)]
 pub fn wait_click_timeout(timeout_ms: u64) -> Option<ClickEvent> {
-    RECEIVER.lock().as_ref().and_then(|rx| {
+    CLICK_CHANNEL.1.lock().as_ref().and_then(|rx| {
         rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)).ok()
     })
 }

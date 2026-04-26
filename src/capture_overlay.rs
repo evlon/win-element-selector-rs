@@ -30,6 +30,7 @@ impl CaptureOverlay {
     }
 
     /// Check if the overlay is visible.
+    #[allow(dead_code)]
     pub fn is_visible(&self) -> bool {
         self.visible
     }

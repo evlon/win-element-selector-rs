@@ -1,1 +1,3 @@
 target/
+*.png
+last_capture.json

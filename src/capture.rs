@@ -1,3 +1,6 @@
+// Allow non-upper-case globals for UIA constants from windows crate.
+#![allow(non_upper_case_globals)]
+
 // src/capture.rs
 //
 // Windows UI Automation capture via IUIAutomation COM interface.
@@ -48,6 +51,7 @@ pub mod uia {
     }
 
     /// Capture the element under the mouse cursor.
+    #[allow(dead_code)]
     pub fn capture_at_cursor() -> CaptureResult {
         let pt = unsafe {
             let mut p = POINT::default();
@@ -435,10 +439,12 @@ pub mod uia {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn capture() -> CaptureResult {
     uia::capture_at_cursor()
 }
 
+#[allow(dead_code)]
 pub fn capture_at(x: i32, y: i32) -> CaptureResult {
     uia::capture_at_point(x, y)
 }
