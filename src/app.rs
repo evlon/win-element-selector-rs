@@ -246,6 +246,14 @@ impl SelectorApp {
                 .position(|n| n.control_type == "Window")
                 .unwrap_or(0);
             
+            // Debug: log window info
+            if let Some(ref win) = result.window_info {
+                info!("Window info extracted: class='{}', name='{}', pid={}", 
+                      win.class_name, win.title, win.process_id);
+            } else {
+                info!("No window info extracted from hierarchy");
+            }
+            
             // Extract element hierarchy (nodes after Window) for tree display
             let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
                 result.hierarchy[window_idx + 1..].to_vec()
