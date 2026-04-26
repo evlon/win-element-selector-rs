@@ -292,23 +292,134 @@ mod tests {
         println!("XPath with skipped node:\n{}", result.element_xpath);
     }
 
-    /// Test that Index predicates are preserved in XPath generation
+    /// Test that Index predicates use position() function
     #[test]
-    fn index_predicate_preserved() {
+    fn position_function_generation() {
         let nodes = vec![
             node("Window", "main", ""),
-            HierarchyNode::new("Button", "", "", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Button", "", "", "", 1, ElementRect::default(), 0),
             HierarchyNode::new("Button", "", "", "", 2, ElementRect::default(), 0),
+            HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0),
         ];
 
         let result = generate(&nodes);
         
-        // Check that Index predicates are included in element XPath
-        assert!(result.element_xpath.contains("@Index='1'"), "Should include Index for node with index 1");
-        assert!(result.element_xpath.contains("@Index='2'"), "Should include Index for node with index 2");
+        // Check that first() is used for position 1
+        assert!(result.element_xpath.contains("first()"), "Should use first() for position 1");
         
-        println!("XPath with Index:\n{}", result.element_xpath);
+        // Check that position()=N is used for middle elements
+        assert!(result.element_xpath.contains("position()=2"), "Should use position()=2 for middle element");
+        
+        println!("XPath with position functions:\n{}", result.element_xpath);
+    }
+
+    /// Test disabling position() function (fallback to @Index)
+    #[test]
+    fn index_fallback_without_position_function() {
+        let mut node = HierarchyNode::new("Button", "", "", "", 2, ElementRect::default(), 0);
+        node.position_mode = "index".to_string();
+        
+        let segment = node.xpath_segment();
+        
+        // Should use @Index when position mode is "index"
+        assert!(segment.contains("@Index='2'"), "Should fallback to @Index when mode is index");
+        assert!(!segment.contains("position()"), "Should not use position() when mode is index");
+        
+        println!("XPath segment with @Index:\n{}", segment);
+    }
+
+    /// Test first() function
+    #[test]
+    fn first_function_generation() {
+        let mut node = HierarchyNode::new("Button", "", "", "", 1, ElementRect::default(), 0);
+        node.sibling_count = 3;
+        
+        let segment = node.xpath_segment();
+        
+        // Default mode should use first() for position 1
+        assert!(segment.contains("first()"), "Should use first() for position 1");
+        assert!(!segment.contains("position()"), "Should not use position()=1");
+        
+        println!("XPath segment with first():\n{}", segment);
+    }
+
+    /// Test last() function
+    #[test]
+    fn last_function_generation() {
+        let mut node = HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0);
+        node.sibling_count = 3;  // Last of 3 siblings
+        
+        let segment = node.xpath_segment();
+        
+        // Default mode should use last() when position equals sibling_count
+        assert!(segment.contains("last()"), "Should use last() for last sibling");
+        assert!(!segment.contains("position()"), "Should not use position() for last");
+        
+        println!("XPath segment with last():\n{}", segment);
+    }
+
+    /// Test manual first() and last() mode override
+    #[test]
+    fn position_mode_override() {
+        // Test manual first() override
+        let mut node1 = HierarchyNode::new("Button", "", "", "", 2, ElementRect::default(), 0);
+        node1.position_mode = "first".to_string();
+        let segment1 = node1.xpath_segment();
+        assert!(segment1.contains("first()"), "Manual first() mode should always use first()");
+        
+        // Test manual last() override
+        let mut node2 = HierarchyNode::new("Button", "", "", "", 1, ElementRect::default(), 0);
+        node2.position_mode = "last".to_string();
+        let segment2 = node2.xpath_segment();
+        assert!(segment2.contains("last()"), "Manual last() mode should always use last()");
+        
+        println!("Manual first(): {}", segment1);
+        println!("Manual last(): {}", segment2);
+    }
+
+    /// Test new operators: NotContains, NotStartsWith, NotEndsWith
+    #[test]
+    fn new_string_operators() {
+        use crate::model::Operator;
+        
+        // NotContains
+        let pred = Operator::NotContains.to_predicate("Name", "test");
+        assert!(pred.contains("not(contains("), "NotContains should use not(contains())");
+        
+        // NotStartsWith
+        let pred = Operator::NotStartsWith.to_predicate("Name", "test");
+        assert!(pred.contains("not(starts-with("), "NotStartsWith should use not(starts-with())");
+        
+        // NotEndsWith
+        let pred = Operator::NotEndsWith.to_predicate("Name", "test");
+        assert!(pred.contains("not(substring("), "NotEndsWith should use not(substring())");
+        
+        println!("NotContains: {}", Operator::NotContains.to_predicate("Name", "test"));
+        println!("NotStartsWith: {}", Operator::NotStartsWith.to_predicate("Name", "test"));
+        println!("NotEndsWith: {}", Operator::NotEndsWith.to_predicate("Name", "test"));
+    }
+
+    /// Test numeric comparison operators
+    #[test]
+    fn numeric_comparison_operators() {
+        use crate::model::Operator;
+        
+        // GreaterThan
+        assert_eq!(Operator::GreaterThan.to_predicate("Index", "5"), "@Index > 5");
+        
+        // GreaterThanOrEq
+        assert_eq!(Operator::GreaterThanOrEq.to_predicate("Index", "5"), "@Index >= 5");
+        
+        // LessThan
+        assert_eq!(Operator::LessThan.to_predicate("Index", "5"), "@Index < 5");
+        
+        // LessThanOrEq
+        assert_eq!(Operator::LessThanOrEq.to_predicate("Index", "5"), "@Index <= 5");
+        
+        println!("GreaterThan: {}", Operator::GreaterThan.to_predicate("Index", "5"));
+        println!("GreaterThanOrEq: {}", Operator::GreaterThanOrEq.to_predicate("Index", "5"));
+        println!("LessThan: {}", Operator::LessThan.to_predicate("Index", "5"));
+        println!("LessThanOrEq: {}", Operator::LessThanOrEq.to_predicate("Index", "5"));
     }
 
     /// Performance test: verify that using / instead of // reduces complexity

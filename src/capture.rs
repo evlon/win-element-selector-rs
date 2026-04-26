@@ -6,7 +6,7 @@
 // Windows UI Automation capture via IUIAutomation COM interface.
 // Non-Windows platforms compile with a rich mock for UI development.
 
-use crate::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, SegmentValidationResult, ValidationResult, WindowInfo};
+use crate::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -84,16 +84,73 @@ pub mod uia {
         }
     }
 
+    /// Get process name by process ID using Windows API.
+    fn get_process_name_by_id(process_id: u32) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::{
+                Foundation::{CloseHandle, HANDLE},
+                System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
+            };
+            use std::ffi::OsString;
+            use std::os::windows::ffi::OsStringExt;
+
+            unsafe {
+                let handle_result = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id);
+                let handle = match handle_result {
+                    Ok(h) => h,
+                    Err(_) => return String::new(),
+                };
+                
+                if handle == HANDLE::default() {
+                    return String::new();
+                }
+
+                let mut buffer = [0u16; 260]; // MAX_PATH
+                let mut length = buffer.len() as u32;
+                
+                let result = QueryFullProcessImageNameW(
+                    handle,
+                    PROCESS_NAME_WIN32,
+                    windows::core::PWSTR(buffer.as_mut_ptr()),
+                    &mut length,
+                );
+                
+                let _ = CloseHandle(handle);
+                
+                if result.is_ok() && length > 0 {
+                    // Get just the filename without path
+                    let full_path = OsString::from_wide(&buffer[..length as usize]);
+                    if let Some(path) = full_path.to_str() {
+                        if let Some(filename) = path.rsplit('\\').next() {
+                            // Remove .exe extension
+                            return filename.strip_suffix(".exe")
+                                .unwrap_or(filename)
+                                .to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        String::new()
+    }
+
     /// Extract window information from the captured hierarchy.
     /// Finds the first Window node in the chain (root → target).
     fn extract_window_info(hierarchy: &[HierarchyNode]) -> Option<WindowInfo> {
         hierarchy
             .iter()
             .find(|n| n.control_type == "Window")
-            .map(|w| WindowInfo {
-                title: w.name.clone(),
-                class_name: w.class_name.clone(),
-                process_id: w.process_id,
+            .map(|w| {
+                // Get process name from process_id
+                let process_name = get_process_name_by_id(w.process_id);
+                WindowInfo {
+                    title: w.name.clone(),
+                    class_name: w.class_name.clone(),
+                    process_id: w.process_id,
+                    process_name,
+                }
             })
     }
 
@@ -154,6 +211,8 @@ pub mod uia {
                     f.value   = last.index.to_string();
                     f.enabled = true;
                 }
+                // Compute total sibling count for last() function support
+                last.sibling_count = count_siblings(&target, &walker).unwrap_or(0);
             }
         }
 
@@ -183,6 +242,23 @@ pub mod uia {
         let class_name    = get_bstr(unsafe { elem.CurrentClassName() });
         let name          = get_bstr(unsafe { elem.CurrentName() });
         let process_id    = unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 };
+        
+        // Extract extended properties
+        let framework_id = get_bstr(unsafe { elem.CurrentFrameworkId() });
+        let help_text = get_bstr(unsafe { elem.CurrentHelpText() });
+        let localized_control_type = get_bstr(unsafe { elem.CurrentLocalizedControlType() });
+        let is_enabled = match unsafe { elem.CurrentIsEnabled() } {
+            Ok(val) => val.as_bool(),
+            Err(_) => true,
+        };
+        let is_offscreen = match unsafe { elem.CurrentIsOffscreen() } {
+            Ok(val) => val.as_bool(),
+            Err(_) => false,
+        };
+        
+        // AccRole is deprecated in UIA, use ControlType instead
+        // But we can still extract it if needed from LegacyIAccessible pattern
+        let acc_role = String::new();
 
         let rect = unsafe {
             elem.CurrentBoundingRectangle()
@@ -197,13 +273,35 @@ pub mod uia {
 
         debug!(
             "element: type={control_type} aid={automation_id} \
-             class={class_name} name={name} pid={process_id}"
+             class={class_name} name={name} pid={process_id} \
+             framework={framework_id} enabled={is_enabled}"
         );
 
-        Some(HierarchyNode::new(
-            control_type, automation_id, class_name, name,
+        let mut node = HierarchyNode::new(
+            control_type.clone(), automation_id.clone(), class_name.clone(), name.clone(),
             0, rect, process_id,
-        ))
+        );
+        
+        // Fill extended properties
+        node.framework_id = framework_id;
+        node.acc_role = acc_role;
+        node.help_text = help_text;
+        node.localized_control_type = localized_control_type;
+        node.is_enabled = is_enabled;
+        node.is_offscreen = is_offscreen;
+        
+        // Add extended property filters
+        if !node.framework_id.is_empty() {
+            node.filters.push(PropertyFilter::new("FrameworkId", &node.framework_id));
+        }
+        if !node.help_text.is_empty() {
+            node.filters.push(PropertyFilter::new("HelpText", &node.help_text));
+        }
+        if !node.localized_control_type.is_empty() {
+            node.filters.push(PropertyFilter::new("LocalizedControlType", &node.localized_control_type));
+        }
+        
+        Some(node)
     }
 
     /// 1-based index among same-type siblings under the parent.
@@ -234,6 +332,29 @@ pub mod uia {
             }
         }
         None
+    }
+
+    /// Count total siblings with the same ControlType under the parent.
+    fn count_siblings(
+        target: &IUIAutomationElement,
+        walker: &IUIAutomationTreeWalker,
+    ) -> Option<i32> {
+        let parent = unsafe { walker.GetParentElement(target).ok()? };
+        let mut child = unsafe { walker.GetFirstChildElement(&parent).ok()? };
+        let target_ct = unsafe { target.CurrentControlType().ok()? };
+
+        let mut count = 0i32;
+        loop {
+            let ct = unsafe { child.CurrentControlType().ok()? };
+            if ct == target_ct {
+                count += 1;
+            }
+            match unsafe { walker.GetNextSiblingElement(&child) } {
+                Ok(next) => child = next,
+                Err(_)   => break,
+            }
+        }
+        Some(count)
     }
 
     fn get_bstr<T: Into<BSTR>>(r: windows::core::Result<T>) -> String {
@@ -416,10 +537,12 @@ pub mod uia {
 
                 // Only include windows with non-empty title
                 if !title.is_empty() {
+                    let process_name = get_process_name_by_id(pid);
                     window_list.push(WindowInfo {
                         title,
                         class_name: class,
                         process_id: pid,
+                        process_name,
                     });
                 }
             }
@@ -822,6 +945,7 @@ pub fn mock() -> CaptureResult {
             title: "My Application  —  文档1".to_string(),
             class_name: "WpfWindow".to_string(),
             process_id: 12345,
+            process_name: "MyApp".to_string(),
         }),
     }
 }

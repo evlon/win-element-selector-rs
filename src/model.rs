@@ -5,21 +5,35 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operator {
-    Equals,
-    NotEquals,
-    Contains,
-    StartsWith,
-    EndsWith,
+    Equals,           // 等于: @Name='value'
+    NotEquals,        // 不等于: @Name!='value'
+    Contains,         // 包含: contains(@Name, 'value')
+    NotContains,      // 不包含: not(contains(@Name, 'value'))
+    StartsWith,       // 开头为: starts-with(@Name, 'value')
+    NotStartsWith,    // 开头不为: not(starts-with(@Name, 'value'))
+    EndsWith,         // 结尾为: substring(@Name, ...)='value'
+    NotEndsWith,      // 结尾不为: not(substring(@Name, ...)='value')
+    GreaterThan,      // 大于: @Index > value (numeric)
+    GreaterThanOrEq,  // 大于等于: @Index >= value
+    LessThan,         // 小于: @Index < value
+    LessThanOrEq,     // 小于等于: @Index <= value
 }
 
 impl Operator {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Equals     => "等于",
-            Self::NotEquals  => "不等于",
-            Self::Contains   => "包含",
-            Self::StartsWith => "开头为",
-            Self::EndsWith   => "结尾为",
+            Self::Equals          => "等于",
+            Self::NotEquals       => "不等于",
+            Self::Contains        => "包含",
+            Self::NotContains     => "不包含",
+            Self::StartsWith      => "开头为",
+            Self::NotStartsWith   => "开头不为",
+            Self::EndsWith        => "结尾为",
+            Self::NotEndsWith     => "结尾不为",
+            Self::GreaterThan     => "大于",
+            Self::GreaterThanOrEq => "大于等于",
+            Self::LessThan        => "小于",
+            Self::LessThanOrEq    => "小于等于",
         }
     }
 
@@ -28,24 +42,40 @@ impl Operator {
             Operator::Equals,
             Operator::NotEquals,
             Operator::Contains,
+            Operator::NotContains,
             Operator::StartsWith,
+            Operator::NotStartsWith,
             Operator::EndsWith,
+            Operator::NotEndsWith,
+            Operator::GreaterThan,
+            Operator::GreaterThanOrEq,
+            Operator::LessThan,
+            Operator::LessThanOrEq,
         ]
     }
 
     /// Generate the XPath predicate fragment for this operator.
     pub fn to_predicate(&self, attr: &str, value: &str) -> String {
         match self {
-            Self::Equals     => format!("@{}='{}'", attr, value),
-            Self::NotEquals  => format!("@{}!='{}'", attr, value),
-            Self::Contains   => format!("contains(@{}, '{}')", attr, value),
-            Self::StartsWith => format!("starts-with(@{}, '{}')", attr, value),
-            Self::EndsWith   => format!(
-                "substring(@{0}, string-length(@{0})-{1}+1)='{2}'",
-                attr,
-                value.len(),
-                value
-            ),
+            Self::Equals          => format!("@{}='{}'", attr, value),
+            Self::NotEquals       => format!("@{}!='{}'", attr, value),
+            Self::Contains        => format!("contains(@{}, '{}')", attr, value),
+            Self::NotContains     => format!("not(contains(@{}, '{}'))", attr, value),
+            Self::StartsWith      => format!("starts-with(@{}, '{}')", attr, value),
+            Self::NotStartsWith   => format!("not(starts-with(@{}, '{}'))", attr, value),
+            Self::EndsWith        => {
+                let val_len = value.chars().count();
+                format!("substring(@{0}, string-length(@{0})-{1}+1)='{2}'", attr, val_len, value)
+            }
+            Self::NotEndsWith     => {
+                let val_len = value.chars().count();
+                format!("not(substring(@{0}, string-length(@{0})-{1}+1)='{2}')", attr, val_len, value)
+            }
+            // Numeric comparisons (for Index, etc.)
+            Self::GreaterThan     => format!("@{} > {}", attr, value),
+            Self::GreaterThanOrEq => format!("@{} >= {}", attr, value),
+            Self::LessThan        => format!("@{} < {}", attr, value),
+            Self::LessThanOrEq    => format!("@{} <= {}", attr, value),
         }
     }
 }
@@ -92,16 +122,30 @@ pub struct ElementRect {
 /// One level in the ancestor chain from root window to target element.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HierarchyNode {
-    pub control_type:   String,
-    pub automation_id:  String,
-    pub class_name:     String,
-    pub name:           String,
-    pub index:          i32,         // 1-based sibling index, 0 = unknown
-    pub rect:           ElementRect,
-    pub process_id:     u32,
-    pub filters:        Vec<PropertyFilter>,
+    pub control_type:          String,
+    pub automation_id:         String,
+    pub class_name:            String,
+    pub name:                  String,
+    pub index:                 i32,         // 1-based sibling index, 0 = unknown
+    pub framework_id:          String,      // FrameworkId: "Win32", "WPF", "Qt", "WinForms", "UWP"
+    pub acc_role:              String,      // Accessibility Role
+    pub help_text:             String,      // HelpText property
+    pub localized_control_type: String,     // LocalizedControlType
+    pub is_enabled:            bool,        // IsEnabled property
+    pub is_offscreen:          bool,        // IsOffscreen property
+    pub rect:                  ElementRect,
+    pub process_id:            u32,
+    pub filters:               Vec<PropertyFilter>,
     /// Whether this node should be included in the final XPath.
-    pub included:       bool,
+    pub included:              bool,
+    /// Position function mode for Index:
+    /// - "position": position()=N (default)
+    /// - "first": first() (when position=1)
+    /// - "last": last() (when position is last sibling)
+    /// - "index": @Index='N' (fallback)
+    pub position_mode:         String,
+    /// Total sibling count (needed for last() detection)
+    pub sibling_count:         i32,
 }
 
 impl HierarchyNode {
@@ -119,12 +163,18 @@ impl HierarchyNode {
         let cn  = class_name.into();
         let nm  = name.into();
 
-        let filters = vec![
-            PropertyFilter::new("AutomationId", &aid),
-            PropertyFilter::new("ClassName",    &cn),
-            PropertyFilter::new("Name",         &nm),
-            PropertyFilter::new("Index",        if index > 0 { index.to_string() } else { String::new() }),
+        // Build filters with extended properties
+        let mut filters = vec![
+            PropertyFilter::new("ControlType",    &ct),
+            PropertyFilter::new("AutomationId",   &aid),
+            PropertyFilter::new("ClassName",      &cn),
+            PropertyFilter::new("Name",           &nm),
         ];
+        
+        // Add Index filter (will use position() function if use_position_function is true)
+        if index > 0 {
+            filters.push(PropertyFilter::new("Index", index.to_string()));
+        }
 
         Self {
             control_type: ct,
@@ -132,10 +182,18 @@ impl HierarchyNode {
             class_name: cn,
             name: nm,
             index,
+            framework_id: String::new(),
+            acc_role: String::new(),
+            help_text: String::new(),
+            localized_control_type: String::new(),
+            is_enabled: true,
+            is_offscreen: false,
             rect,
             process_id,
             filters,
             included: true,
+            position_mode: "position".to_string(),  // Default to position()=N
+            sibling_count: 0,  // Will be computed during capture
         }
     }
 
@@ -145,12 +203,22 @@ impl HierarchyNode {
     }
 
     /// Build the XPath segment for this node.
-    /// The first node in the hierarchy uses "//" (search from root).
-    /// Subsequent nodes use "/" (direct children only) for better performance.
+    /// Supports position(), first(), last() functions for better XPath standard compatibility.
     pub fn xpath_segment(&self) -> String {
         let predicates: Vec<String> = self.filters
             .iter()
-            .filter_map(|f| f.predicate())
+            .filter_map(|f| {
+                // Special handling for Index: convert to position() function
+                if f.name == "Index" && f.enabled && !f.value.is_empty() {
+                    if let Ok(pos) = f.value.parse::<i32>() {
+                        if pos > 0 {
+                            return Some(self.format_position(pos));
+                        }
+                    }
+                }
+                // Regular property filter
+                f.predicate()
+            })
             .collect();
 
         // Note: The prefix (// or /) is determined by the caller based on position.
@@ -159,6 +227,37 @@ impl HierarchyNode {
             format!("{}", self.tag())
         } else {
             format!("{}[{}]", self.tag(), predicates.join(" and "))
+        }
+    }
+
+    /// Format position using XPath functions: first(), last(), or position()=N
+    fn format_position(&self, pos: i32) -> String {
+        match self.position_mode.as_str() {
+            "first" => {
+                // Always use first() (user override)
+                "first()".to_string()
+            }
+            "last" => {
+                // Always use last() (user override)
+                "last()".to_string()
+            }
+            "index" => {
+                // Fallback to @Index attribute
+                format!("@Index='{}'", pos)
+            }
+            _ => {
+                // Default: "position" mode - use smart detection
+                if pos == 1 {
+                    // First element: use first()
+                    "first()".to_string()
+                } else if self.sibling_count > 0 && pos == self.sibling_count {
+                    // Last element: use last()
+                    "last()".to_string()
+                } else {
+                    // Middle element: use position()=N
+                    format!("position()={}", pos)
+                }
+            }
         }
     }
 
@@ -204,6 +303,7 @@ pub struct WindowInfo {
     pub title: String,           // Window title
     pub class_name: String,      // Window class name
     pub process_id: u32,         // Process ID
+    pub process_name: String,    // Process name (e.g., 'Weixin', 'chrome')
 }
 
 // ─── XPathResult ─────────────────────────────────────────────────────────────
@@ -311,12 +411,14 @@ mod tests {
             title: "微信".to_string(),
             class_name: "mmui::MainWindow".to_string(),
             process_id: 12345,
+            process_name: "Weixin".to_string(),
         };
         
         let info2 = WindowInfo {
             title: "微信".to_string(),
             class_name: "mmui::MainWindow".to_string(),
             process_id: 12345,
+            process_name: "Weixin".to_string(),
         };
         
         assert_eq!(info1, info2, "WindowInfo should support equality comparison");
@@ -336,6 +438,7 @@ mod tests {
                 title: "Untitled".to_string(),
                 class_name: "Notepad".to_string(),
                 process_id: 1234,
+                process_name: "notepad".to_string(),
             }),
         };
         

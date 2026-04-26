@@ -181,14 +181,27 @@ impl SelectorApp {
         
         // Generate window selector from window_info
         let window_selector = if let Some(ref win) = self.window_info {
-            if !win.class_name.is_empty() && !win.title.is_empty() {
-                format!("Window[@ClassName='{}' and @Name='{}']", win.class_name, win.title)
-            } else if !win.class_name.is_empty() {
-                format!("Window[@ClassName='{}']", win.class_name)
-            } else if !win.title.is_empty() {
-                format!("Window[@Name='{}']", win.title)
-            } else {
+            let mut conditions = Vec::new();
+            
+            // Add ClassName if available
+            if !win.class_name.is_empty() {
+                conditions.push(format!("@ClassName='{}'", win.class_name));
+            }
+            
+            // Add Name if available
+            if !win.title.is_empty() {
+                conditions.push(format!("@Name='{}'", win.title));
+            }
+            
+            // Add ProcessName if available
+            if !win.process_name.is_empty() {
+                conditions.push(format!("@ProcessName='{}'", win.process_name));
+            }
+            
+            if conditions.is_empty() {
                 "Window".to_string()
+            } else {
+                format!("Window[{}]", conditions.join(" and "))
             }
         } else {
             "Window".to_string()
@@ -248,8 +261,8 @@ impl SelectorApp {
             
             // Debug: log window info
             if let Some(ref win) = result.window_info {
-                info!("Window info extracted: class='{}', name='{}', pid={}", 
-                      win.class_name, win.title, win.process_id);
+                info!("Window info extracted: class='{}', name='{}', process='{}', pid={}", 
+                      win.class_name, win.title, win.process_name, win.process_id);
             } else {
                 info!("No window info extracted from hierarchy");
             }
