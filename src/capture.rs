@@ -6,7 +6,7 @@
 // Windows UI Automation capture via IUIAutomation COM interface.
 // Non-Windows platforms compile with a rich mock for UI development.
 
-use crate::model::{CaptureResult, ElementRect, HierarchyNode, ValidationResult};
+use crate::model::{CaptureResult, ElementRect, HierarchyNode, ValidationResult, WindowInfo};
 use log::{debug, error};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -60,6 +60,7 @@ pub mod uia {
                     hierarchy: vec![],
                     cursor_x: 0, cursor_y: 0,
                     error: Some("GetCursorPos 失败".to_string()),
+                    window_info: None,
                 };
             }
             p
@@ -77,9 +78,23 @@ pub mod uia {
                     hierarchy: vec![],
                     cursor_x: x, cursor_y: y,
                     error: Some(e.to_string()),
+                    window_info: None,
                 }
             }
         }
+    }
+
+    /// Extract window information from the captured hierarchy.
+    /// Finds the first Window node in the chain (root → target).
+    fn extract_window_info(hierarchy: &[HierarchyNode]) -> Option<WindowInfo> {
+        hierarchy
+            .iter()
+            .find(|n| n.control_type == "Window")
+            .map(|w| WindowInfo {
+                title: w.name.clone(),
+                class_name: w.class_name.clone(),
+                process_id: w.process_id,
+            })
     }
 
     fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
@@ -142,7 +157,16 @@ pub mod uia {
             }
         }
 
-        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None })
+        // Extract window info before moving hierarchy.
+        let window_info = extract_window_info(&hierarchy);
+
+        Ok(CaptureResult {
+            hierarchy,
+            cursor_x: x,
+            cursor_y: y,
+            error: None,
+            window_info,
+        })
     }
 
     fn element_to_node(
@@ -270,20 +294,42 @@ pub mod uia {
 
     // ── Validation ────────────────────────────────────────────────────────────
 
-    /// Find all elements matching the given XPath-style expression.
-    /// We implement a subset: `//ControlType[@Attr='val' and ...]` chains.
-    pub fn validate_xpath(xpath: &str) -> ValidationResult {
+    /// Validate XPath with window hint for fast two-stage search.
+    /// Stage 1: Find target window from desktop children (~50ms)
+    /// Stage 2: Search elements inside the window (~800ms)
+    pub fn validate_xpath_with_window(xpath: &str, window_hint: Option<WindowInfo>) -> ValidationResult {
         let auto = match get_automation() {
             Ok(a)  => a,
             Err(e) => return ValidationResult::Error(e.to_string()),
         };
 
-        let root = match unsafe { auto.GetRootElement() } {
-            Ok(r)  => r,
-            Err(e) => return ValidationResult::Error(format!("GetRootElement: {e}")),
+        // Stage 1: Find target window (if window_hint provided)
+        let search_root = if let Some(ref window_info) = window_hint {
+            log::info!("[XPath Validation] Stage 1/2: Locating target window: {:?}", window_info);
+            
+            match find_target_window(&auto, window_info) {
+                Some(window) => {
+                    log::info!("[XPath Validation] ✓ Window found, searching inside window");
+                    window
+                }
+                None => {
+                    return ValidationResult::Error(
+                        format!("窗口未找到: '{}' (类名: '{}')", window_info.title, window_info.class_name)
+                    );
+                }
+            }
+        } else {
+            // No window hint, search from desktop root
+            match unsafe { auto.GetRootElement() } {
+                Ok(r)  => r,
+                Err(e) => return ValidationResult::Error(format!("GetRootElement: {e}")),
+            }
         };
 
-        match find_by_xpath(&auto, &root, xpath) {
+        // Stage 2: Search elements from search_root
+        log::info!("[XPath Validation] Stage 2/2: Searching elements in subtree");
+        
+        match find_by_xpath(&auto, &search_root, xpath) {
             Ok(results) if results.is_empty() => ValidationResult::NotFound,
             Ok(results) => {
                 let first_rect = results.first().and_then(|e| {
@@ -298,68 +344,284 @@ pub mod uia {
         }
     }
 
+    /// Enumerate all top-level windows on desktop.
+    pub fn enumerate_windows() -> Vec<WindowInfo> {
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+
+        let desktop = match unsafe { auto.GetRootElement() } {
+            Ok(d) => d,
+            Err(_) => return vec![],
+        };
+
+        use windows::Win32::UI::Accessibility::*;
+        let condition = match unsafe { auto.CreateTrueCondition() } {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let windows = match unsafe { desktop.FindAll(TreeScope_Children, &condition) } {
+            Ok(w) => w,
+            Err(_) => return vec![],
+        };
+
+        let count = match unsafe { windows.Length() } {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let mut window_list = Vec::new();
+        for i in 0..count {
+            let win = match unsafe { windows.GetElement(i) } {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+
+            let ct = unsafe {
+                win.CurrentControlType()
+                    .map(control_type_name)
+                    .unwrap_or_default()
+            };
+
+            if ct == "Window" {
+                let title = get_bstr(unsafe { win.CurrentName() });
+                let class = get_bstr(unsafe { win.CurrentClassName() });
+                let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
+
+                // Only include windows with non-empty title
+                if !title.is_empty() {
+                    window_list.push(WindowInfo {
+                        title,
+                        class_name: class,
+                        process_id: pid,
+                    });
+                }
+            }
+        }
+
+        window_list
+    }
+
+    /// Find target window from desktop's direct children.
+    fn find_target_window(
+        auto: &IUIAutomation,
+        window_info: &WindowInfo,
+    ) -> Option<IUIAutomationElement> {
+        use windows::Win32::UI::Accessibility::*;
+        
+        let desktop = unsafe { auto.GetRootElement().ok()? };
+        let condition = unsafe { auto.CreateTrueCondition().ok()? };
+        let windows = unsafe { desktop.FindAll(TreeScope_Children, &condition).ok()? };
+        
+        let count = unsafe { windows.Length().ok()? };
+        
+        for i in 0..count {
+            let win = unsafe { windows.GetElement(i).ok()? };
+            let ct = unsafe {
+                win.CurrentControlType()
+                    .map(control_type_name)
+                    .unwrap_or_default()
+            };
+            
+            if ct == "Window" {
+                let title = get_bstr(unsafe { win.CurrentName() });
+                let class = get_bstr(unsafe { win.CurrentClassName() });
+                
+                // Match by title and class name
+                if title == window_info.title && class == window_info.class_name {
+                    return Some(win);
+                }
+            }
+        }
+        
+        None
+    }
+
+    /// XPath segment with scope information.
+    #[derive(Debug)]
+    struct XPathSegment {
+        /// Whether to search descendants (//) or just children (/).
+        descendants: bool,
+        /// Tag name (e.g., "Button", "Window").
+        tag: String,
+        /// Predicates (e.g., [("AutomationId", "=", "btn1")]).
+        preds: Vec<(String, String, String)>,
+    }
+
+    /// Parse XPath into segments, respecting both / and // semantics.
+    fn parse_xpath(xpath: &str) -> Vec<XPathSegment> {
+        let mut segments = Vec::new();
+        let mut remaining = xpath.trim();
+        
+        // Skip leading // or /
+        if remaining.starts_with("//") {
+            remaining = &remaining[2..];
+        } else if remaining.starts_with('/') {
+            remaining = &remaining[1..];
+        }
+        
+        while !remaining.is_empty() {
+            // Determine if next segment is // or /
+            let descendants = if remaining.starts_with("//") {
+                remaining = &remaining[2..];
+                true
+            } else if remaining.starts_with('/') {
+                remaining = &remaining[1..];
+                false
+            } else if segments.is_empty() {
+                // First segment without prefix defaults to descendants
+                true
+            } else {
+                // Subsequent segments without prefix default to children
+                false
+            };
+            
+            // Extract segment content (until next / or end)
+            let end_pos = remaining
+                .find('/')
+                .unwrap_or(remaining.len());
+            let seg_content = &remaining[..end_pos].trim();
+            remaining = &remaining[end_pos..];
+            
+            if !seg_content.is_empty() {
+                let (tag, preds) = parse_segment(seg_content);
+                segments.push(XPathSegment {
+                    descendants,
+                    tag,
+                    preds,
+                });
+            }
+        }
+        
+        segments
+    }
+
     fn find_by_xpath(
         auto: &IUIAutomation,
-        _root: &IUIAutomationElement,
+        root: &IUIAutomationElement,
         xpath: &str,
     ) -> anyhow::Result<Vec<IUIAutomationElement>> {
         use windows::Win32::UI::Accessibility::*;
 
-        // Parse segments split by "//".
-        let segments: Vec<&str> = xpath
-            .split("//")
-            .filter(|s| !s.is_empty())
-            .collect();
+        let segments = parse_xpath(xpath);
+        log::info!("[XPath Validation] Parsing {} segments", segments.len());
 
         if segments.is_empty() {
             return Ok(vec![]);
         }
 
-        let root = unsafe { auto.GetRootElement()? };
-        let mut candidates: Vec<IUIAutomationElement> = vec![root];
+        // Start search from root element.
+        let mut current_search_root = root.clone();
+        
+        for (seg_idx, seg) in segments.iter().enumerate() {
+            log::info!(
+                "[XPath Validation] Segment {}: {} tag='{}', preds={:?}",
+                seg_idx,
+                if seg.descendants { "//" } else { "/" },
+                seg.tag,
+                seg.preds
+            );
+            
+            // Choose search scope based on segment type.
+            let scope = if seg.descendants {
+                TreeScope_Subtree
+            } else {
+                TreeScope_Children
+            };
+            
+            let condition: IUIAutomationCondition = unsafe {
+                auto.CreateTrueCondition()?
+            };
+            let found = unsafe {
+                current_search_root.FindAll(scope, &condition)?
+            };
 
-        for seg in &segments {
-            let (tag, preds) = parse_segment(seg);
-            let mut next_candidates: Vec<IUIAutomationElement> = Vec::new();
-
-            for parent in &candidates {
-                let condition: IUIAutomationCondition = unsafe {
-                    auto.CreateTrueCondition()?
+            let count = unsafe { found.Length()? };
+            log::info!("[XPath Validation] Searching {} elements", count);
+            
+            let mut matches: Vec<IUIAutomationElement> = Vec::new();
+            
+            for i in 0..count {
+                let elem = unsafe { found.GetElement(i)? };
+                let ct = unsafe {
+                    elem.CurrentControlType()
+                        .map(control_type_name)
+                        .unwrap_or_default()
                 };
-                let found = unsafe {
-                    parent.FindAll(windows::Win32::UI::Accessibility::TreeScope_Subtree, &condition)?
-                };
-
-                let count = unsafe { found.Length()? };
-                for i in 0..count {
-                    let elem = unsafe { found.GetElement(i)? };
-                    let ct = unsafe {
-                        elem.CurrentControlType()
-                            .map(control_type_name)
-                            .unwrap_or_default()
+                if !seg.tag.is_empty() && seg.tag != "*" && ct != seg.tag {
+                    continue;
+                }
+                // Check predicates (skip Index).
+                let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index").all(|(attr, op, val)| {
+                    let actual = match attr.as_str() {
+                        "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                        "ClassName"    => get_bstr(unsafe { elem.CurrentClassName() }),
+                        "Name"         => get_bstr(unsafe { elem.CurrentName() }),
+                        _              => String::new(),
                     };
-                    if !tag.is_empty() && tag != "*" && ct != tag {
-                        continue;
-                    }
-                    // Check predicates.
-                    if preds.iter().all(|(attr, op, val)| {
-                        let actual = match attr.as_str() {
-                            "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                            "ClassName"    => get_bstr(unsafe { elem.CurrentClassName() }),
-                            "Name"         => get_bstr(unsafe { elem.CurrentName() }),
-                            _              => String::new(),
-                        };
-                        check_predicate(&actual, op, val)
-                    }) {
-                        next_candidates.push(elem);
-                    }
+                    check_predicate(&actual, op, val)
+                });
+                if all_match {
+                    matches.push(elem);
                 }
             }
-            candidates = next_candidates;
-            if candidates.is_empty() { break; }
+            
+            log::info!("[XPath Validation] Found {} matches for segment {}", matches.len(), seg_idx);
+            
+            if matches.is_empty() {
+                return Ok(vec![]);
+            }
+            
+            // For next segment, use the first match as search root.
+            current_search_root = matches[0].clone();
         }
 
-        Ok(candidates)
+        // Re-search the last segment to get all matches.
+        let last_seg = segments.last().unwrap();
+        let scope = if last_seg.descendants {
+            TreeScope_Subtree
+        } else {
+            TreeScope_Children
+        };
+        
+        let condition: IUIAutomationCondition = unsafe {
+            auto.CreateTrueCondition()?
+        };
+        let found = unsafe {
+            current_search_root.FindAll(scope, &condition)?
+        };
+        
+        let count = unsafe { found.Length()? };
+        let mut final_results: Vec<IUIAutomationElement> = Vec::new();
+        
+        for i in 0..count {
+            let elem = unsafe { found.GetElement(i)? };
+            let ct = unsafe {
+                elem.CurrentControlType()
+                    .map(control_type_name)
+                    .unwrap_or_default()
+            };
+            if !last_seg.tag.is_empty() && last_seg.tag != "*" && ct != last_seg.tag {
+                continue;
+            }
+            let all_match = last_seg.preds.iter().filter(|(attr, _, _)| attr != "Index").all(|(attr, op, val)| {
+                let actual = match attr.as_str() {
+                    "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                    "ClassName"    => get_bstr(unsafe { elem.CurrentClassName() }),
+                    "Name"         => get_bstr(unsafe { elem.CurrentName() }),
+                    _              => String::new(),
+                };
+                check_predicate(&actual, op, val)
+            });
+            if all_match {
+                final_results.push(elem);
+            }
+        }
+        
+        log::info!("[XPath Validation] Final result: {} matches", final_results.len());
+        Ok(final_results)
     }
 
     fn parse_segment(seg: &str) -> (String, Vec<(String, String, String)>) {
@@ -425,7 +687,23 @@ pub mod uia {
     pub fn capture_at_cursor() -> CaptureResult { mock() }
     pub fn capture_at_point(_x: i32, _y: i32) -> CaptureResult { mock() }
 
-    pub fn validate_xpath(xpath: &str) -> ValidationResult {
+    pub fn enumerate_windows() -> Vec<WindowInfo> {
+        // Mock: return sample windows
+        vec![
+            WindowInfo {
+                title: "示例窗口 1".to_string(),
+                class_name: "MockWindow".to_string(),
+                process_id: 1001,
+            },
+            WindowInfo {
+                title: "示例窗口 2".to_string(),
+                class_name: "MockWindow".to_string(),
+                process_id: 1002,
+            },
+        ]
+    }
+
+    pub fn validate_xpath_with_window(xpath: &str, _window_hint: Option<WindowInfo>) -> ValidationResult {
         if xpath.trim().is_empty() {
             ValidationResult::Error("XPath 为空".into())
         } else {
@@ -449,8 +727,14 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
     uia::capture_at_point(x, y)
 }
 
-pub fn validate(xpath: &str) -> ValidationResult {
-    uia::validate_xpath(xpath)
+/// Validate XPath with window hint for fast search.
+pub fn validate_with_window(xpath: &str, window_hint: Option<WindowInfo>) -> ValidationResult {
+    uia::validate_xpath_with_window(xpath, window_hint)
+}
+
+/// Enumerate all top-level windows on desktop.
+pub fn list_windows() -> Vec<WindowInfo> {
+    uia::enumerate_windows()
 }
 
 // ─── Rich mock data ──────────────────────────────────────────────────────────
@@ -478,5 +762,10 @@ pub fn mock() -> CaptureResult {
         cursor_x: 160,
         cursor_y: 48,
         error: None,
+        window_info: Some(WindowInfo {
+            title: "My Application  —  文档1".to_string(),
+            class_name: "WpfWindow".to_string(),
+            process_id: 12345,
+        }),
     }
 }

@@ -11,7 +11,7 @@ use crate::{
     capture,
     capture_overlay::CaptureOverlay,
     highlight,
-    model::{AppConfig, HierarchyNode, Operator, ValidationResult},
+    model::{AppConfig, HierarchyNode, Operator, ValidationResult, WindowInfo},
     mouse_hook::{self, CaptureMode},
     xpath,
 };
@@ -53,6 +53,11 @@ pub struct SelectorApp {
     // Data
     hierarchy:      Vec<HierarchyNode>,
     selected_node:  Option<usize>,
+    window_info:    Option<WindowInfo>,  // Window info for fast XPath validation
+
+    // Window selection
+    available_windows: Vec<WindowInfo>,  // List of available windows
+    show_window_panel: bool,             // Whether to show window panel
 
     // XPath
     xpath_text:     String,
@@ -129,6 +134,9 @@ impl SelectorApp {
         Self {
             hierarchy,
             selected_node,
+            window_info: None,  // Will be set when capturing
+            available_windows: Vec::new(),
+            show_window_panel: true,
             xpath_text,
             xpath_error:     None,
             custom_xpath:    false,
@@ -241,9 +249,19 @@ impl SelectorApp {
         } else {
             let n = result.hierarchy.len();
             self.selected_node = n.checked_sub(1);
+            
+            // Extract and store window info
+            self.window_info = result.window_info.clone();
+            
+            // Build status message with window info
+            let window_hint = result.window_info
+                .as_ref()
+                .map(|w| format!(" [窗口: {}]", w.title))
+                .unwrap_or_default();
+            
             self.status_msg = format!(
-                "已捕获 {} 层层级 — 坐标 ({}, {})",
-                n, result.cursor_x, result.cursor_y
+                "已捕获 {} 层层级 — 坐标 ({}, {}){}",
+                n, result.cursor_x, result.cursor_y, window_hint
             );
             // Flash highlight on captured element.
             if let Some(last) = result.hierarchy.last() {
@@ -268,7 +286,9 @@ impl SelectorApp {
             return;
         }
         self.validation = ValidationResult::Running;
-        let result = capture::validate(&self.xpath_text);
+        
+        // Use window hint for faster validation
+        let result = capture::validate_with_window(&self.xpath_text, self.window_info.clone());
 
         // Flash if found.
         if let ValidationResult::Found { ref first_rect, .. } = result {
@@ -541,7 +561,115 @@ impl SelectorApp {
             });
     }
 
+    fn draw_window_panel(&mut self, ui: &mut Ui) {
+        panel_header(ui, "🪟  窗口选择");
+        
+        ui.add_space(3.0);
+        
+        // Toolbar: refresh button on left, hide button on right
+        ui.horizontal(|ui| {
+            // Left: Refresh button
+            if ui.add(btn("🔄 刷新", 0.0)).on_hover_text("重新加载窗口列表").clicked() {
+                self.available_windows = capture::list_windows();
+                self.status_msg = format!("已加载 {} 个窗口", self.available_windows.len());
+            }
+            
+            // Fill remaining space
+            ui.add_space(ui.available_width() - 80.0);
+            
+            // Right: Hide button
+            if ui.add(btn("✕ 隐藏", 0.0)).on_hover_text("隐藏窗口面板").clicked() {
+                self.show_window_panel = false;
+            }
+        });
+        
+        ui.add_space(3.0);
+        
+        // Window list - use adaptive height
+        if self.available_windows.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(RichText::new("点击刷新加载窗口列表").color(C_MUTED).italics().size(10.5));
+            });
+        } else {
+            // Calculate dynamic max height based on window count (min 60px, max 180px)
+            let window_count = self.available_windows.len();
+            let max_height = (window_count as f32 * 22.0).min(180.0).max(60.0);
+            
+            ScrollArea::vertical()
+                .id_salt("window_scroll")
+                .max_height(max_height)
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for window in self.available_windows.iter() {
+                        let is_selected = self.window_info.as_ref() == Some(window);
+                        
+                        let resp = ui.horizontal(|ui| {
+                            // Selection indicator
+                            if is_selected {
+                                ui.label(RichText::new("▶").color(C_SEL_FG).size(10.0));
+                            } else {
+                                ui.add_space(14.0);
+                            }
+                            
+                            // Window title (truncate if too long)
+                            let title = if window.title.chars().count() > 35 {
+                                format!("{}…", window.title.chars().take(35).collect::<String>())
+                            } else {
+                                window.title.clone()
+                            };
+                            
+                            let title_color = if is_selected { C_SEL_FG } else { Color32::from_gray(40) };
+                            ui.label(RichText::new(title).color(title_color).size(11.0));
+                            
+                            // Process ID
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(format!("(pid:{})", window.process_id)).color(C_MUTED).size(9.5));
+                        });
+                        
+                        if resp.response.clicked() {
+                            self.window_info = Some(window.clone());
+                            self.status_msg = format!("已选择窗口: {}", window.title);
+                        }
+                        
+                        resp.response.on_hover_text(format!(
+                            "标题: {}\n类名: {}\n进程ID: {}",
+                            window.title, window.class_name, window.process_id
+                        ));
+                    }
+                });
+        }
+        
+        // Current window hint - compact layout
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(1.0);
+        
+        if let Some(ref win) = self.window_info {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("当前窗口:").color(C_MUTED).size(9.5));
+                let title = if win.title.chars().count() > 28 {
+                    format!("{}…", win.title.chars().take(28).collect::<String>())
+                } else {
+                    win.title.clone()
+                };
+                ui.label(RichText::new(title).color(C_TARGET_FG).strong().size(10.0));
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("当前窗口: 未设置").color(C_MUTED).italics().size(9.5));
+            });
+        }
+        
+        ui.add_space(4.0);
+    }
+
     fn draw_hierarchy_panel(&mut self, ui: &mut Ui) {
+        // ── Window Selection Panel ──────────────────────────────────────────
+        self.draw_window_panel(ui);
+
         panel_header(ui, "📂  元素层级结构");
     
         ScrollArea::vertical()
@@ -601,6 +729,56 @@ impl SelectorApp {
                     return;
                 };
                 if sel_idx >= self.hierarchy.len() { return; }
+
+        // ── Window Info Section ─────────────────────────────────────────────
+        ui.add_space(4.0);
+        ui.label(RichText::new("🪟  窗口信息").color(C_MUTED).size(11.0));
+        ui.add_space(2.0);
+        
+        egui::Frame::none()
+            .fill(Color32::from_rgb(248, 250, 252))
+            .stroke(Stroke::new(0.5, C_BORDER))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                if let Some(ref win) = self.window_info {
+                    // Window Title
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("标题:").color(C_MUTED).size(10.5).monospace());
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&win.title).color(Color32::from_gray(40)).size(10.5));
+                    });
+                    ui.add_space(3.0);
+                    
+                    // Class Name
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("类名:").color(C_MUTED).size(10.5).monospace());
+                        ui.add_space(8.0);
+                        let class_text = if win.class_name.is_empty() {
+                            "(空)".to_string()
+                        } else {
+                            win.class_name.clone()
+                        };
+                        ui.label(RichText::new(&class_text).color(Color32::from_gray(40)).size(10.5).monospace());
+                    });
+                    ui.add_space(3.0);
+                    
+                    // Process ID
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("PID:").color(C_MUTED).size(10.5).monospace());
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(format!("{}", win.process_id)).color(Color32::from_gray(40)).size(10.5));
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("未设置").color(C_MUTED).italics().size(10.5));
+                    });
+                }
+            });
+        
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
 
         // Ancestors breadcrumb - simple vertical list
         ui.add_space(4.0);
@@ -859,7 +1037,26 @@ impl eframe::App for SelectorApp {
         // Draw the capture overlay if visible.
         self.overlay.draw(ctx);
 
-        // ── Panels ────────────────────────────────────────────────────────────
+        // 全局极致紧凑 · 消除所有多余留白
+        ctx.set_style({
+            let mut style = (*ctx.style()).clone();
+            style.visuals.panel_fill = Color32::WHITE;
+            style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
+            style.visuals.widgets.hovered.bg_fill = Color32::WHITE;
+            style.visuals.widgets.active.bg_fill = Color32::WHITE;
+            style.visuals.window_fill = Color32::WHITE;
+
+            // 极致压缩间距
+            style.spacing.item_spacing       = egui::vec2(0.0, 1.0);
+            style.spacing.window_margin      = egui::Margin::same(0.0);
+            style.spacing.button_padding     = egui::vec2(3.0, 2.0);
+            style.spacing.indent             = 12.0;    // 树层级缩进
+            style.spacing.interact_size      = egui::vec2(18.0, 18.0);
+
+            style
+        });
+
+        // ── Panels ───────────────────────────────────────────────────────────
         self.draw_titlebar(ctx);
         self.draw_xpath_bar(ctx);
         self.draw_status_bar(ctx);
@@ -867,24 +1064,19 @@ impl eframe::App for SelectorApp {
         egui::CentralPanel::default()
             .frame(Frame::none().fill(Color32::from_gray(252)))
             .show(ctx, |ui| {
-                // Use egui SidePanel API for proper layout
                 // Left panel first
                 egui::SidePanel::left("left_panel")
                     .resizable(true)
-                    .default_width(350.0)
-                    .width_range(280.0..=500.0)
+                    .default_width(290.0)
+                    .width_range(260.0..=450.0)
+                    .show_separator_line(false)
+                    .frame(Frame::none().fill(Color32::WHITE).inner_margin(Margin::same(0.0)))
                     .show_inside(ui, |ui| {
                         self.draw_hierarchy_panel(ui);
                     });
-                
-                // Right panel
-                egui::SidePanel::right("right_panel")
-                    .resizable(true)
-                    .default_width(400.0)
-                    .width_range(300.0..=600.0)
-                    .show_inside(ui, |ui| {
-                        self.draw_property_panel(ui);
-                    });
+
+                // Right content fills remaining space
+                self.draw_property_panel(ui);
             });
     }
 }
@@ -895,7 +1087,7 @@ fn panel_header(ui: &mut Ui, title: &str) {
     let avail = ui.available_width();
     Frame::none()
         .fill(C_PANEL_HDR)
-        .inner_margin(Margin::symmetric(10.0, 5.0))
+        .inner_margin(Margin::symmetric(6.0, 2.0))
         .stroke(Stroke::new(0.5, C_BORDER))
         .show(ui, |ui| {
             ui.set_min_width(avail);

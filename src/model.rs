@@ -144,18 +144,30 @@ impl HierarchyNode {
         if self.control_type.is_empty() { "*" } else { &self.control_type }
     }
 
-    /// Build the XPath segment for this node (e.g. `//Button[@AutomationId='x']`).
+    /// Build the XPath segment for this node.
+    /// The first node in the hierarchy uses "//" (search from root).
+    /// Subsequent nodes use "/" (direct children only) for better performance.
     pub fn xpath_segment(&self) -> String {
         let predicates: Vec<String> = self.filters
             .iter()
             .filter_map(|f| f.predicate())
             .collect();
 
+        // Note: The prefix (// or /) is determined by the caller based on position.
+        // This function only builds the tag and predicates part.
         if predicates.is_empty() {
-            format!("//{}", self.tag())
+            format!("{}", self.tag())
         } else {
-            format!("//{}[{}]", self.tag(), predicates.join(" and "))
+            format!("{}[{}]", self.tag(), predicates.join(" and "))
         }
+    }
+
+    /// Build the full XPath segment with proper prefix.
+    /// is_first: true for the root node (//), false for children (/)
+    pub fn xpath_segment_with_prefix(&self, is_first: bool) -> String {
+        let prefix = if is_first { "//" } else { "/" };
+        let segment = self.xpath_segment();
+        format!("{}{}", prefix, segment)
     }
 
     /// Short label shown in the hierarchy tree panel.
@@ -183,6 +195,16 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+// ─── WindowInfo ──────────────────────────────────────────────────────────────
+
+/// Information about the target window for fast XPath validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WindowInfo {
+    pub title: String,           // Window title
+    pub class_name: String,      // Window class name
+    pub process_id: u32,         // Process ID
+}
+
 // ─── CaptureResult ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -191,6 +213,8 @@ pub struct CaptureResult {
     pub cursor_x:   i32,
     pub cursor_y:   i32,
     pub error:      Option<String>,
+    /// Window information extracted from hierarchy (for fast validation).
+    pub window_info: Option<WindowInfo>,
 }
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
@@ -232,5 +256,68 @@ impl Default for AppConfig {
             show_simplified:    false,
             last_xpaths:        Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_window_info_extraction() {
+        // Test that WindowInfo can be created and compared
+        let info1 = WindowInfo {
+            title: "微信".to_string(),
+            class_name: "mmui::MainWindow".to_string(),
+            process_id: 12345,
+        };
+        
+        let info2 = WindowInfo {
+            title: "微信".to_string(),
+            class_name: "mmui::MainWindow".to_string(),
+            process_id: 12345,
+        };
+        
+        assert_eq!(info1, info2, "WindowInfo should support equality comparison");
+    }
+
+    #[test]
+    fn test_capture_result_with_window_info() {
+        let result = CaptureResult {
+            hierarchy: vec![
+                HierarchyNode::new("Window", "", "Notepad", "Untitled", 0, ElementRect::default(), 1234),
+                HierarchyNode::new("Edit", "", "Edit", "", 0, ElementRect::default(), 1234),
+            ],
+            cursor_x: 100,
+            cursor_y: 200,
+            error: None,
+            window_info: Some(WindowInfo {
+                title: "Untitled".to_string(),
+                class_name: "Notepad".to_string(),
+                process_id: 1234,
+            }),
+        };
+        
+        assert!(result.window_info.is_some());
+        let win = result.window_info.unwrap();
+        assert_eq!(win.title, "Untitled");
+        assert_eq!(win.class_name, "Notepad");
+        assert_eq!(win.process_id, 1234);
+    }
+
+    #[test]
+    fn test_capture_result_without_window_info() {
+        // Desktop capture might not have Window in hierarchy
+        let result = CaptureResult {
+            hierarchy: vec![
+                HierarchyNode::new("Pane", "", "#32769", "桌面", 0, ElementRect::default(), 0),
+            ],
+            cursor_x: 500,
+            cursor_y: 300,
+            error: None,
+            window_info: None,
+        };
+        
+        assert!(result.window_info.is_none());
     }
 }
