@@ -148,12 +148,20 @@ mod windows_impl {
                     let _ = ShowWindow(lh, SW_SHOW);
                 }
                 
-                // 消息循环
+                // 消息循环 - 只处理高亮窗口的消息
                 while BORDER_HWND.load(Ordering::SeqCst) != 0 {
                     unsafe {
+                        // 只从边框窗口获取消息，避免截获其他窗口的消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                        // 同时检查标签窗口的消息
+                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
@@ -197,9 +205,16 @@ mod windows_impl {
                 let duration = std::time::Duration::from_millis(duration_ms);
                 while start.elapsed() < duration && BORDER_HWND.load(Ordering::SeqCst) != 0 {
                     unsafe {
+                        // 只从高亮窗口获取消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
@@ -261,9 +276,16 @@ mod windows_impl {
                 
                 while active2.load(Ordering::SeqCst) && BORDER_HWND.load(Ordering::SeqCst) != 0 {
                     unsafe {
+                        // 只从高亮窗口获取消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
