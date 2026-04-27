@@ -139,9 +139,16 @@ pub mod uia {
     /// Extract window information from the captured hierarchy.
     /// Finds the first Window node in the chain (root → target).
     fn extract_window_info(hierarchy: &[HierarchyNode]) -> Option<WindowInfo> {
+        // 跳过桌面节点，找到第一个真正的应用窗口节点
+        // #32769 是 Windows 桌面窗口类名，Desktop 是桌面控制类型
         hierarchy
             .iter()
-            .find(|n| n.control_type == "Window")
+            .find(|n| {
+                // 跳过桌面相关节点
+                n.class_name != "#32769" 
+                && n.control_type != "Desktop"
+                && !n.name.starts_with("桌面")
+            })
             .map(|w| {
                 // Get process name from process_id
                 let process_name = get_process_name_by_id(w.process_id);
@@ -569,6 +576,9 @@ pub mod uia {
         
         let count = unsafe { windows.Length().ok()? };
         
+        // 支持多种窗口类型：Window, Pane, Document 等
+        let valid_window_types = ["Window", "Pane", "Document", "Application"];
+        
         for i in 0..count {
             let win = unsafe { windows.GetElement(i).ok()? };
             let ct = unsafe {
@@ -577,7 +587,8 @@ pub mod uia {
                     .unwrap_or_default()
             };
             
-            if ct == "Window" {
+            // 支持多种窗口类型
+            if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
                 
@@ -642,12 +653,16 @@ pub mod uia {
         let mut segments = Vec::new();
         let mut remaining = xpath.trim();
         
-        // Skip leading // or /
-        if remaining.starts_with("//") {
+        // 记录开头的 / 或 //，用于第一个segment的 descendants 设置
+        let first_is_descendants = if remaining.starts_with("//") {
             remaining = &remaining[2..];
+            true
         } else if remaining.starts_with('/') {
             remaining = &remaining[1..];
-        }
+            false  // 单个 / 表示直接子节点
+        } else {
+            true  // 没有前缀，默认 descendant search
+        };
         
         while !remaining.is_empty() {
             // Determine if next segment is // or /
@@ -658,8 +673,8 @@ pub mod uia {
                 remaining = &remaining[1..];
                 false
             } else if segments.is_empty() {
-                // First segment without prefix defaults to descendants
-                true
+                // 第一个 segment 使用开头记录的 / 或 //
+                first_is_descendants
             } else {
                 // Subsequent segments without prefix default to children
                 false
@@ -755,12 +770,18 @@ pub mod uia {
                     continue;
                 }
                 // Check predicates (skip Index).
-                let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index").all(|(attr, op, val)| {
+                let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index" && attr != "ProcessName").all(|(attr, op, val)| {
                     let actual = match attr.as_str() {
-                        "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                        "ClassName"    => get_bstr(unsafe { elem.CurrentClassName() }),
-                        "Name"         => get_bstr(unsafe { elem.CurrentName() }),
-                        _              => String::new(),
+                        "AutomationId"         => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                        "ClassName"            => get_bstr(unsafe { elem.CurrentClassName() }),
+                        "Name"                 => get_bstr(unsafe { elem.CurrentName() }),
+                        "ControlType"          => unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                        "FrameworkId"          => get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                        "LocalizedControlType" => get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
+                        "HelpText"             => get_bstr(unsafe { elem.CurrentHelpText() }),
+                        "IsEnabled"            => unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool().to_string()).unwrap_or_default() },
+                        "IsOffscreen"          => unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool().to_string()).unwrap_or_default() },
+                        _                       => String::new(),
                     };
                     check_predicate(&actual, op, val)
                 });

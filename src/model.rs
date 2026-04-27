@@ -373,8 +373,31 @@ impl ValidationResult {
             Self::Running    => "校验中…".into(),
             Self::Found { count, .. } => format!("✔ 找到 {} 个", count),
             Self::NotFound   => "✘ 未找到".into(),
-            Self::Error(e)   => format!("⚠ {}", e),
+            Self::Error(_)   => "⚠ 校验错误".into(),
         }
+    }
+    
+    /// 获取详细错误消息（用于状态栏显示）
+    pub fn error_message(&self) -> Option<String> {
+        match self {
+            Self::Error(e) => Some(e.clone()),
+            _ => None,
+        }
+    }
+}
+
+// ─── ElementTab (标签页) ────────────────────────────────────────────────────
+
+/// 标签页类型：元素定位或窗口元素定位
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElementTab {
+    Element,      // 元素定位（默认）
+    WindowElement, // 窗口元素定位
+}
+
+impl Default for ElementTab {
+    fn default() -> Self {
+        ElementTab::Element
     }
 }
 

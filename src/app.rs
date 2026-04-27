@@ -11,7 +11,7 @@ use crate::{
     capture,
     capture_overlay::CaptureOverlay,
     highlight,
-    model::{AppConfig, DetailedValidationResult, HierarchyNode, Operator, SegmentValidationResult, ValidationResult, WindowInfo},
+    model::{AppConfig, DetailedValidationResult, ElementTab, HierarchyNode, Operator, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo},
     mouse_hook::{self, CaptureMode},
     xpath,
 };
@@ -44,13 +44,21 @@ struct PersistedCapture {
     hierarchy:     Vec<HierarchyNode>,
     selected_node: Option<usize>,
     xpath_text:    String,
+    window_info:   Option<WindowInfo>,
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 pub struct SelectorApp {
+    /// 元素名称（用户自定义，用于本地速查）
+    element_name:      String,
+    /// 当前激活的标签页
+    active_tab:        ElementTab,
+    
     hierarchy:      Vec<HierarchyNode>,
     selected_node:  Option<usize>,
     window_info:    Option<WindowInfo>,
+    /// 窗口属性过滤器（用于窗口元素模式）
+    window_filters: Vec<PropertyFilter>,
 
     available_windows: Vec<WindowInfo>,
     show_window_panel: bool,
@@ -60,6 +68,7 @@ pub struct SelectorApp {
     element_xpath:   String,         // Element XPath only
     xpath_error:     Option<String>,
     custom_xpath:    bool,
+    custom_window_xpath: bool,       // 是否自定义窗口选择器
     show_simplified: bool,
 
     validation:    ValidationResult,
@@ -101,16 +110,25 @@ impl SelectorApp {
             .unwrap_or_default()
             .join("last_capture.json");
 
-        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath) = if save_path.exists() {
+        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info) = if save_path.exists() {
             match std::fs::read_to_string(&save_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<PersistedCapture>(&s).ok())
             {
                 Some(c) => {
                     info!("Restored {} nodes from last_capture.json", c.hierarchy.len());
-                    let xpath_result = xpath::generate(&c.hierarchy);
+                    // 如果 window_info 为 None，从 hierarchy 的第一个节点提取
+                    let window_info = c.window_info.or_else(|| {
+                        c.hierarchy.first().map(|node| WindowInfo {
+                            title: node.name.clone(),
+                            class_name: node.class_name.clone(),
+                            process_id: node.process_id,
+                            process_name: String::new(), // 无法从 hierarchy 获取
+                        })
+                    });
+                    let xpath_result = xpath::generate(&c.hierarchy, window_info.as_ref());
                     let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
-                    (c.hierarchy, c.selected_node, xpath, xpath_result.window_selector, xpath_result.element_xpath)
+                    (c.hierarchy, c.selected_node, xpath, xpath_result.window_selector, xpath_result.element_xpath, window_info)
                 }
                 None => {
                     info!("Failed to parse last_capture.json, using mock");
@@ -124,9 +142,12 @@ impl SelectorApp {
 
         let n = hierarchy.len();
         Self {
+            element_name: String::new(),
+            active_tab: ElementTab::Element,
             hierarchy,
             selected_node,
-            window_info: None,
+            window_info,
+            window_filters: Vec::new(),
             available_windows: Vec::new(),
             show_window_panel: true,
             xpath_text,
@@ -134,6 +155,7 @@ impl SelectorApp {
             element_xpath,
             xpath_error: None,
             custom_xpath: false,
+            custom_window_xpath: false,
             show_simplified: config.show_simplified,
             validation: ValidationResult::Idle,
             detailed_validation: None,
@@ -152,12 +174,13 @@ impl SelectorApp {
         }
     }
 
-    fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String, String, String) {
+    fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String, String, String, Option<WindowInfo>) {
         let result = capture::mock();
-        let xpath_result = xpath::generate(&result.hierarchy);
+        let window_info = result.window_info.clone();
+        let xpath_result = xpath::generate(&result.hierarchy, window_info.as_ref());
         // Combined for display
         let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
-        (result.hierarchy, Some(3), xpath, xpath_result.window_selector, xpath_result.element_xpath)
+        (result.hierarchy, Some(3), xpath, xpath_result.window_selector, xpath_result.element_xpath, window_info)
     }
 
     fn save_to_file(&self) {
@@ -167,6 +190,7 @@ impl SelectorApp {
             hierarchy:     self.hierarchy.clone(),
             selected_node: self.selected_node,
             xpath_text:    self.xpath_text.clone(),
+            window_info:   self.window_info.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&data) {
             let _ = std::fs::write(&path, json);
@@ -208,10 +232,16 @@ impl SelectorApp {
         };
         
         // Generate element XPath from element hierarchy (nodes after Window)
-        let element_xpath = if self.show_simplified {
-            xpath::generate_simplified_elements(&self.hierarchy)
+        // 跳过 hierarchy[0]（窗口根节点），因为窗口选择器已经单独处理
+        let element_nodes = if self.hierarchy.len() > 1 {
+            &self.hierarchy[1..]
         } else {
-            xpath::generate_elements(&self.hierarchy)
+            &self.hierarchy[0..0]  // empty slice
+        };
+        let element_xpath = if self.show_simplified {
+            xpath::generate_simplified_elements(element_nodes)
+        } else {
+            xpath::generate_elements(element_nodes)
         };
         
         // Update all three fields
@@ -220,6 +250,34 @@ impl SelectorApp {
         self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation  = ValidationResult::Idle;
+    }
+
+    /// 从窗口信息初始化过滤器
+    fn init_window_filters_from_info(&mut self) {
+        if let Some(ref win) = self.window_info {
+            self.window_filters = vec![
+                PropertyFilter::new("Name", &win.title),
+                PropertyFilter::new("ClassName", &win.class_name),
+                PropertyFilter::new("ProcessName", &win.process_name),
+            ];        }
+    }
+
+    /// 从窗口过滤器重新生成窗口选择器
+    fn rebuild_window_selector(&mut self) {
+        let predicates: Vec<String> = self.window_filters
+            .iter()
+            .filter_map(|f| f.predicate())
+            .collect();        
+        if predicates.is_empty() {
+            self.window_selector = "Window".to_string();
+        } else {
+            self.window_selector = format!("Window[{}]", predicates.join(" and "));
+        }
+        
+        // 更新组合 XPath
+        self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+        self.xpath_error = xpath::lint(&self.xpath_text);
+        self.validation = ValidationResult::Idle;
     }
 
     fn push_history(&mut self) {
@@ -383,165 +441,29 @@ impl SelectorApp {
             });
     }
 
-    fn draw_xpath_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("xpath_bar")
-            .resizable(false)
+    /// 绘制顶部控制栏：元素名称输入框 + 按钮
+    fn draw_top_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("top_bar")
+            .exact_height(44.0)
             .frame(
                 Frame::none()
                     .fill(Color32::from_gray(248))
-                    .inner_margin(Margin::symmetric(10.0, 6.0))
+                    .inner_margin(Margin::symmetric(12.0, 8.0))
                     .stroke(Stroke::new(1.0, C_BORDER)),
             )
             .show(ctx, |ui| {
-                // Force TextEdit bg to match panel
-                ui.style_mut().visuals.extreme_bg_color = Color32::from_gray(248);
-
-                // Top row: label + controls
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("XPath").color(C_MUTED).size(11.0).strong());
-                    if let Some(err) = &self.xpath_error {
-                        ui.label(RichText::new(format!("⚠ {}", err)).color(C_ERR).size(10.5));
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        // History combo
-                        if !self.history.is_empty() {
-                            egui::ComboBox::from_id_salt("history_combo")
-                                .selected_text("⏷ 历史")
-                                .width(64.0)
-                                .show_ui(ui, |ui| {
-                                    let mut chosen = None;
-                                    for (i, h) in self.history.iter().enumerate() {
-                                        let label = if h.len() > 52 {
-                                            format!("{}…", &h[..52])
-                                        } else {
-                                            h.clone()
-                                        };
-                                        if ui.selectable_label(false, label).clicked() {
-                                            chosen = Some(i);
-                                        }
-                                    }
-                                    if let Some(i) = chosen {
-                                        self.xpath_text   = self.history[i].clone();
-                                        self.custom_xpath = true;
-                                        self.xpath_error  = xpath::lint(&self.xpath_text);
-                                    }
-                                });
-                        }
-                        // Reset custom
-                        if self.custom_xpath {
-                            ui.add_space(4.0);
-                            if ui.small_button("↺ 重置").on_hover_text("回到自动生成的 XPath").clicked() {
-                                self.custom_xpath = false;
-                                self.rebuild_xpath();
-                            }
-                            ui.label(RichText::new("[自定义]").color(C_WARN).size(10.0));
-                        }
-                        // Simplified toggle
-                        let simp_txt = if self.show_simplified { "🔲 完整" } else { "🔳 精简" };
-                        if ui.small_button(simp_txt).on_hover_text("切换精简/完整 XPath").clicked() {
-                            self.show_simplified        = !self.show_simplified;
-                            self.config.show_simplified = self.show_simplified;
-                            self.custom_xpath           = false;
-                            self.rebuild_xpath();
-                        }
-                        // Validation details toggle
-                        let val_txt = if self.config.show_validation_details { "📊 详情" } else { "📈 简洁" };
-                        if ui.small_button(val_txt).on_hover_text("切换验证详情显示").clicked() {
-                            self.config.show_validation_details = !self.config.show_validation_details;
-                        }
-                        // Three copy buttons
-                        if ui.small_button("📋 窗口").on_hover_text("复制窗口选择器").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.window_selector.clone());
-                            self.status_msg = "窗口选择器已复制到剪贴板".to_string();
-                        }
-                        if ui.small_button("📋 元素").on_hover_text("复制元素 XPath").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.element_xpath.clone());
-                            self.status_msg = "元素 XPath 已复制到剪贴板".to_string();
-                        }
-                        if ui.small_button("📋 组合").on_hover_text("复制组合格式（逗号分隔）").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.xpath_text.clone());
-                            self.status_msg = "组合 XPath 已复制到剪贴板".to_string();
-                        }
-                    });
-                });
-
-                ui.add_space(3.0);
-
-                // Window selector row
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("🪟 窗口:").color(C_MUTED).size(10.0).monospace());
+                    // 元素名称输入框
+                    ui.label(RichText::new("元素名称:").color(C_MUTED).size(11.5));
                     ui.add_space(4.0);
-                    ui.label(RichText::new(&self.window_selector).font(egui::FontId::monospace(10.5)).color(Color32::from_gray(60)));
-                });
-                
-                ui.add_space(2.0);
-
-                // Element XPath row (editable)
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("🔗 元素:").color(C_MUTED).size(10.0).monospace());
-                    ui.add_space(4.0);
-                });
-                
-                let edit_resp = ui.add(
-                    TextEdit::multiline(&mut self.element_xpath)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_rows(2)
-                        .desired_width(ui.available_width())
-                        .hint_text("/ControlType[@Attr='val']")
-                        .text_color(C_MONO_FG)
-                        .frame(true),
-                );
-                if edit_resp.changed() {
-                    self.custom_xpath = true;
-                    // Update combined text
-                    self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
-                    self.xpath_error  = xpath::lint(&self.xpath_text);
-                    self.validation   = ValidationResult::Idle;
-                }
-                if let Some(err) = &self.xpath_error {
-                    edit_resp.on_hover_text(RichText::new(format!("⚠ {}", err)).color(C_ERR));
-                }
-            });
-    }
-
-    fn draw_status_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(46.0)
-            .frame(
-                Frame::none()
-                    .fill(Color32::from_gray(245))
-                    .inner_margin(Margin::symmetric(10.0, 7.0))
-                    .stroke(Stroke::new(1.0, C_BORDER)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let msg_color = match &self.validation {
-                        ValidationResult::Found { .. }              => C_OK,
-                        ValidationResult::NotFound | ValidationResult::Error(_) => C_ERR,
-                        ValidationResult::Running                   => C_WARN,
-                        _                                           => C_MUTED,
-                    };
-                    ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
-
+                    ui.add(
+                        TextEdit::singleline(&mut self.element_name)
+                            .desired_width(160.0)
+                            .hint_text("输入名称便于速查"),
+                    );
+                    
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        // Exit
-                        if ui.add(action_btn("退出", 64.0, Color32::from_gray(50))).clicked() {
-                            self.save_to_file();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        ui.add_space(4.0);
-                        // Save
-                        if ui.add(
-                            egui::Button::new(RichText::new("💾 保存").color(Color32::WHITE).size(12.0))
-                                .fill(C_TITLE_BG)
-                                .min_size(Vec2::new(68.0, 28.0)),
-                        ).clicked() {
-                            self.push_history();
-                            self.save_to_file();
-                            self.status_msg = "已保存 XPath 到历史记录".to_string();
-                        }
-                        ui.add_space(10.0);
-                        // Validate
+                        // 校验元素按钮
                         let val_label = self.validation.label();
                         let val_color = match &self.validation {
                             ValidationResult::Found { .. }              => C_OK,
@@ -549,26 +471,28 @@ impl SelectorApp {
                             _                                           => Color32::from_gray(50),
                         };
                         if ui.add(
-                            egui::Button::new(RichText::new(&val_label).color(val_color).size(11.5))
+                            egui::Button::new(RichText::new(&val_label).color(val_color).size(12.0))
                                 .stroke(Stroke::new(1.0, val_color))
-                                .min_size(Vec2::new(110.0, 28.0)),
-                        ).on_hover_text("F7 — 用当前 XPath 在屏幕上查找元素").clicked() {
+                                .min_size(Vec2::new(100.0, 28.0)),
+                        ).on_hover_text("F7 — 校验当前XPath是否有效").clicked() {
                             self.do_validate();
                         }
-                        ui.add_space(4.0);
-                        // Capture
+                        
+                        ui.add_space(8.0);
+                        
+                        // 重新捕获按钮
                         let (cap_label, cap_color) = match &self.capture_state {
                             CaptureState::WaitingClick { deadline } => {
                                 let s = deadline.saturating_duration_since(Instant::now()).as_secs();
-                                (format!("⏱ 等待点击 {}s", s), C_WARN)
+                                (format!("等待 {}s", s), C_WARN)
                             }
                             CaptureState::Capturing => ("捕获中…".to_string(), C_WARN),
-                            CaptureState::Idle      => ("重新捕获  F4".to_string(), Color32::from_gray(50)),
+                            CaptureState::Idle      => ("重新捕获 F4".to_string(), Color32::from_gray(50)),
                         };
                         if ui.add(
-                            egui::Button::new(RichText::new(&cap_label).color(cap_color).size(11.5))
-                                .min_size(Vec2::new(110.0, 28.0)),
-                        ).on_hover_text("F4 — 点击屏幕上任意控件进行捕获").clicked()
+                            egui::Button::new(RichText::new(&cap_label).color(cap_color).size(12.0))
+                                .min_size(Vec2::new(100.0, 28.0)),
+                        ).on_hover_text("F4 — 点击屏幕控件进行捕获").clicked()
                             && self.capture_state == CaptureState::Idle
                         {
                             self.start_capture();
@@ -578,76 +502,201 @@ impl SelectorApp {
             });
     }
 
-    // ── Left panel: window list + element tree ─────────────────────────────────
-
-    fn draw_left_panel(&mut self, ui: &mut Ui) {
-        // ── Window selection ──────────────────────────────────────────────────
-        if self.show_window_panel {
-            panel_header(ui, "🪟  窗口选择");
-            ui.add_space(2.0);
-
-            ui.horizontal(|ui| {
-                if ui.small_button("🔄 刷新").on_hover_text("重新加载窗口列表").clicked() {
-                    self.available_windows = capture::list_windows();
-                    self.status_msg = format!("已加载 {} 个窗口", self.available_windows.len());
+    /// 绘制 XPath 预览内容（根据标签页切换，嵌入中央面板）
+    fn draw_xpath_preview_content(&mut self, ui: &mut Ui) {
+        // 使用 Frame 包裹预览区域
+        Frame::none()
+            .fill(Color32::from_gray(252))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .stroke(Stroke::new(1.0, C_BORDER))
+            .rounding(Rounding::same(4.0))
+            .show(ui, |ui| {
+                match self.active_tab {
+                    ElementTab::Element => self.draw_element_xpath_content(ui),
+                    ElementTab::WindowElement => self.draw_window_xpath_content(ui),
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("隐藏窗口面板").clicked() {
-                        self.show_window_panel = false;
-                    }
+            });
+    }
+
+    /// 元素模式：XPath预览内容
+    fn draw_element_xpath_content(&mut self, ui: &mut Ui) {
+        // 元素 XPath 行（可编辑）
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("元素 XPath:").color(C_MUTED).size(11.0));
+            ui.add_space(4.0);
+            if ui.small_button("复制").on_hover_text("复制元素 XPath").clicked() {
+                ui.output_mut(|o| o.copied_text = self.element_xpath.clone());
+                self.status_msg = "元素 XPath 已复制到剪贴板".to_string();
+            }
+            if self.custom_xpath {
+                if ui.small_button("重置").on_hover_text("回到自动生成的 XPath").clicked() {
+                    self.custom_xpath = false;
+                    self.rebuild_xpath();
+                }
+            }
+            if let Some(err) = &self.xpath_error {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("⚠ {}", err)).color(C_ERR).size(10.5));
+            }
+        });
+        
+        let edit_resp = ui.add(
+            TextEdit::multiline(&mut self.element_xpath)
+                .font(egui::TextStyle::Monospace)
+                .desired_rows(2)
+                .desired_width(ui.available_width())
+                .hint_text("/ControlType[@Attr='val']")
+                .text_color(C_MONO_FG)
+                .frame(true),
+        );
+        if edit_resp.changed() {
+            self.custom_xpath = true;
+            self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+            self.xpath_error = xpath::lint(&self.xpath_text);
+            self.validation = ValidationResult::Idle;
+        }
+    }
+
+    /// 窗口元素模式：XPath预览内容
+    fn draw_window_xpath_content(&mut self, ui: &mut Ui) {
+        // 窗口选择器（可编辑）
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
+            ui.add_space(4.0);
+            if ui.small_button("复制").on_hover_text("复制窗口选择器").clicked() {
+                ui.output_mut(|o| o.copied_text = self.window_selector.clone());
+                self.status_msg = "窗口选择器已复制到剪贴板".to_string();
+            }
+            if self.custom_window_xpath {
+                if ui.small_button("重置").on_hover_text("回到自动生成的窗口选择器").clicked() {
+                    self.custom_window_xpath = false;
+                    self.init_window_filters_from_info();
+                    self.rebuild_xpath();
+                }
+                ui.label(RichText::new("[自定义]").color(C_WARN).size(10.0));
+            }
+        });
+        
+        let edit_resp = ui.add(
+            TextEdit::multiline(&mut self.window_selector)
+                .font(egui::TextStyle::Monospace)
+                .desired_rows(2)
+                .desired_width(ui.available_width())
+                .hint_text("Window[@Name='...' and @ClassName='...']")
+                .text_color(C_MONO_FG)
+                .frame(true),
+        );
+        if edit_resp.changed() {
+            self.custom_window_xpath = true;
+            self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+            self.xpath_error = xpath::lint(&self.xpath_text);
+            self.validation = ValidationResult::Idle;
+        }
+    }
+
+    /// 绘制底部按钮区域
+    fn draw_bottom_xpath_buttons(&mut self, ctx: &egui::Context) {
+         
+        egui::TopBottomPanel::bottom("bottom_buttons")
+            .exact_height(52.0)
+            .frame(
+                Frame::none()
+                    .fill(Color32::from_gray(245))
+                    .inner_margin(Margin::symmetric(12.0, 10.0))
+                    .stroke(Stroke::new(1.0, C_BORDER)),
+            )
+            .show(ctx, |ui| {
+
+                ui.horizontal_centered(|ui| {
+                    // 状态消息
+                    let msg_color = match &self.validation {
+                        ValidationResult::Found { .. }              => C_OK,
+                        ValidationResult::NotFound | ValidationResult::Error(_) => C_ERR,
+                        ValidationResult::Running                   => C_WARN,
+                        _                                           => C_MUTED,
+                    };
+                    ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
+
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        // 历史记录下拉
+                        if !self.history.is_empty() {
+                            egui::ComboBox::from_id_salt("history_combo_bottom")
+                                .selected_text(format!("历史 ({})", self.history.len()))
+                                .width(90.0)
+                                .show_ui(ui, |ui| {
+                                    let mut chosen = None;
+                                    for (i, h) in self.history.iter().enumerate() {
+                                        let label = if h.len() > 40 {
+                                            format!("{}…", &h[..40])
+                                        } else {
+                                            h.clone()
+                                        };                                        if ui.selectable_label(false, label).clicked() {
+                                            chosen = Some(i);
+                                        }
+                                    }
+                                    if let Some(i) = chosen {
+                                        self.xpath_text = self.history[i].clone();
+                                        self.custom_xpath = true;
+                                        self.xpath_error = xpath::lint(&self.xpath_text);
+                                    }
+                                });
+                        }
+                        
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // 确定按钮
+                            if ui.add(
+                                egui::Button::new(RichText::new("确定").color(Color32::WHITE).size(12.0))
+                                    .fill(C_OK)
+                                    .min_size(Vec2::new(80.0, 30.0)),
+                            ).clicked() {
+                                self.push_history();
+                                self.save_to_file();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            
+                            ui.add_space(8.0);
+                            
+                            // 取消按钮
+                            if ui.add(
+                                egui::Button::new(RichText::new("取消").color(Color32::from_gray(50)).size(12.0))
+                                    .min_size(Vec2::new(80.0, 30.0)),
+                            ).clicked() {
+                                self.save_to_file();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                    });
                 });
             });
-            ui.add_space(2.0);
 
-            if self.available_windows.is_empty() {
-                ui.label(RichText::new("点击刷新加载窗口列表").color(C_MUTED).italics().size(10.5));
-            } else {
-                let max_h = (self.available_windows.len() as f32 * 22.0).min(160.0).max(44.0);
-                ScrollArea::vertical()
-                    .id_salt("win_scroll")
-                    .max_height(max_h)
-                    .show(ui, |ui| {
-                        let wins: Vec<WindowInfo> = self.available_windows.clone();
-                        for win in &wins {
-                            let is_sel = self.window_info.as_ref() == Some(win);
-                            let title  = truncate_str(&win.title, 36);
-                            let resp   = ui.selectable_label(
-                                is_sel,
-                                RichText::new(format!("{} (pid:{})", title, win.process_id)).size(11.0),
-                            );
-                            if resp.clicked() {
-                                self.window_info = Some(win.clone());
-                                self.status_msg  = format!("已选择窗口: {}", win.title);
-                            }
-                            resp.on_hover_text(format!(
-                                "标题: {}\n类名: {}\n进程ID: {}",
-                                win.title, win.class_name, win.process_id
-                            ));
-                        }
-                    });
-            }
+                
+             egui::TopBottomPanel::bottom("bottom_xpath")
+            // .exact_height(52.0)
+            .frame(
+                Frame::none()
+                    .fill(Color32::from_gray(245))
+                    .inner_margin(Margin::symmetric(12.0, 10.0))
+                    .stroke(Stroke::new(1.0, C_BORDER)),
+            )
+            .show(ctx, |ui| {
 
-            // Current window
-            ui.add_space(2.0);
-            ui.separator();
-            ui.add_space(1.0);
-            if let Some(ref w) = self.window_info {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("当前:").color(C_MUTED).size(9.5));
-                    ui.label(RichText::new(truncate_str(&w.title, 28)).color(C_TARGET_FG).strong().size(10.0));
-                });
-            } else {
-                ui.label(RichText::new("当前窗口: 未设置").color(C_MUTED).italics().size(9.5));
-            }
-            ui.add_space(4.0);
-        } else {
-            // Show a small button to re-open the window panel
-            if ui.small_button("🪟").on_hover_text("显示窗口面板").clicked() {
-                self.show_window_panel = true;
-            }
-            ui.add_space(2.0);
+                // ── XPath 预览区域（根据标签页切换内容）──────────────────────────────
+                self.draw_xpath_preview_content(ui);
+                 });
+    }
+
+
+    // ── Left panel: 根据标签页显示不同内容 ────────────────────────────────────
+
+    fn draw_left_panel(&mut self, ui: &mut Ui) {
+        match self.active_tab {
+            ElementTab::Element => self.draw_element_tree(ui),
+            ElementTab::WindowElement => self.draw_window_tree(ui),
         }
+    }
 
+    /// 元素模式：显示元素层级树
+    fn draw_element_tree(&mut self, ui: &mut Ui) {
         // ── Element tree ──────────────────────────────────────────────────────
         panel_header(ui, "📂  元素层级结构");
         ui.add_space(2.0);
@@ -693,6 +742,32 @@ impl SelectorApp {
                 );
                 ui.add_space(12.0);
             });
+    }
+
+    /// 窗口元素模式：显示窗口信息摘要
+    fn draw_window_tree(&mut self, ui: &mut Ui) {
+        panel_header(ui, "🪟  窗口信息");
+        ui.add_space(4.0);
+
+        if let Some(ref win) = self.window_info {
+            // 窗口信息摘要
+            egui::Frame::none()
+                .fill(Color32::from_rgb(239, 246, 255))
+                .rounding(Rounding::same(4.0))
+                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        prop_row(ui, "标题", &win.title);
+                        prop_row(ui, "类名", if win.class_name.is_empty() { "(空)" } else { &win.class_name });
+                        prop_row(ui, "进程名", if win.process_name.is_empty() { "(空)" } else { &win.process_name });
+                        prop_row(ui, "进程ID", &win.process_id.to_string());
+                    });
+                });
+        } else {
+            ui.label(RichText::new("尚未选择窗口").color(C_MUTED).italics());
+            ui.add_space(4.0);
+            ui.label(RichText::new("请先捕获元素").color(C_MUTED).size(10.5));
+        }
     }
 
     /// Recursive tree drawing using egui CollapsingHeader.
@@ -841,9 +916,17 @@ impl SelectorApp {
         }
     }
 
-    // ── Right panel: properties ───────────────────────────────────────────────
+    // ── Right panel: 根据标签页显示不同属性编辑器 ────────────────────────────────────
 
     fn draw_right_panel(&mut self, ui: &mut Ui) {
+        match self.active_tab {
+            ElementTab::Element => self.draw_element_properties(ui),
+            ElementTab::WindowElement => self.draw_window_properties(ui),
+        }
+    }
+
+    /// 元素模式：显示元素属性编辑
+    fn draw_element_properties(&mut self, ui: &mut Ui) {
         panel_header(ui, "⚙  元素属性");
 
         ScrollArea::vertical()
@@ -856,59 +939,6 @@ impl SelectorApp {
                     return;
                 };
                 if sel_idx >= self.hierarchy.len() { return; }
-
-                // ── Window info ───────────────────────────────────────────────
-                ui.add_space(6.0);
-                egui::CollapsingHeader::new(
-                    RichText::new("🪟  窗口信息").color(C_MUTED).size(11.0)
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    egui::Frame::none()
-                        .fill(Color32::from_rgb(248, 250, 252))
-                        .stroke(Stroke::new(0.5, C_BORDER))
-                        .rounding(Rounding::same(4.0))
-                        .inner_margin(Margin::symmetric(10.0, 6.0))
-                        .show(ui, |ui| {
-                            if let Some(ref win) = self.window_info {
-                                prop_row(ui, "标题", &win.title);
-                                prop_row(ui, "类名", if win.class_name.is_empty() { "(空)" } else { &win.class_name });
-                                prop_row(ui, "PID",  &win.process_id.to_string());
-                            } else {
-                                ui.label(RichText::new("未设置").color(C_MUTED).italics().size(10.5));
-                            }
-                        });
-                });
-
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // ── Breadcrumb / ancestor trail ───────────────────────────────
-                egui::CollapsingHeader::new(
-                    RichText::new("🔗  层级追溯").color(C_MUTED).size(11.0)
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    for i in 0..=sel_idx {
-                        let ancestor = &self.hierarchy[i];
-                        let is_current = i == sel_idx;
-                        let indent = 4.0 + (i as f32 * 12.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(indent);
-                            let txt = format!("• {}", ancestor.tree_label());
-                            if is_current {
-                                ui.label(RichText::new(&txt).color(C_TARGET_FG).strong().size(10.5));
-                            } else {
-                                ui.label(RichText::new(&txt).color(C_MUTED).size(10.0));
-                            }
-                        });
-                    }
-                });
-
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
 
                 // ── Node summary ──────────────────────────────────────────────
                 {
@@ -1046,6 +1076,112 @@ impl SelectorApp {
                 ui.add_space(8.0);
             });
     }
+
+    /// 窗口元素模式：显示窗口属性过滤器编辑
+    fn draw_window_properties(&mut self, ui: &mut Ui) {
+        panel_header(ui, "⚙  窗口属性过滤器");
+        
+        ScrollArea::vertical()
+            .id_salt("window_prop_scroll")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                // 确保窗口过滤器已初始化
+                if self.window_filters.is_empty() && self.window_info.is_some() {
+                    self.init_window_filters_from_info();
+                }
+                
+                if self.window_info.is_none() {
+                    ui.add_space(24.0);
+                    ui.label(RichText::new("← 请先选择窗口").color(C_MUTED).italics());
+                    return;
+                }
+                
+                // ── 属性过滤器表格 ────────────────────────────────────
+                egui::Frame::none()
+                    .fill(C_PANEL_HDR)
+                    .inner_margin(Margin::symmetric(4.0, 2.0))
+                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(22.0);
+                            col_label(ui, "属性名", 100.0);
+                            col_label(ui, "运算符", 80.0);
+                            col_label(ui, "值", 0.0);
+                        });
+                    });
+
+                ui.add_space(2.0);
+
+                let filter_count = self.window_filters.len();
+                let mut dirty = false;
+                for fi in 0..filter_count {
+                    let alt = fi % 2 == 0;
+                    let row_color = if alt {
+                        Color32::from_rgb(252, 252, 255)
+                    } else {
+                        Color32::from_rgb(245, 247, 253)
+                    };                    egui::Frame::none()
+                        .fill(row_color)
+                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                        .show(ui, |ui| {
+                            let filter = &mut self.window_filters[fi];
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut filter.enabled, "").changed() { dirty = true; }
+
+                                ui.add_sized(
+                                    Vec2::new(100.0, 20.0),
+                                    egui::Label::new(RichText::new(&filter.name.clone()).size(12.0)),
+                                );
+
+                                let old_op = filter.operator.clone();
+                                egui::ComboBox::from_id_salt(format!("win_op_{}", fi))
+                                    .selected_text(filter.operator.label())
+                                    .width(76.0)
+                                    .show_ui(ui, |ui| {
+                                        for op in Operator::all() {
+                                            ui.selectable_value(&mut filter.operator, op.clone(), op.label());
+                                        }
+                                    });
+                                if filter.operator != old_op { dirty = true; }
+
+                                let edit = TextEdit::singleline(&mut filter.value)
+                                    .desired_width(ui.available_width() - 4.0)
+                                    .font(egui::TextStyle::Monospace)
+                                    .hint_text("—");
+                                if ui.add(edit).changed() {
+                                    filter.enabled = !filter.value.is_empty();
+                                    dirty = true;
+                                }
+                            });
+                        });
+                }
+                
+                if dirty {
+                    self.custom_window_xpath = true;
+                    self.rebuild_window_selector();
+                }
+                
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                
+                // ── 窗口选择器预览 ─────────────────────────────────────
+                ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
+                ui.add_space(2.0);
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(248, 250, 252))
+                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .rounding(Rounding::same(4.0))
+                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&self.window_selector)
+                                .font(egui::FontId::monospace(11.0))
+                                .color(C_MONO_FG),
+                        );
+                    });
+            });
+    }
 }
 
 // ─── eframe::App impl ────────────────────────────────────────────────────────
@@ -1061,6 +1197,7 @@ impl eframe::App for SelectorApp {
                 hierarchy:     self.hierarchy.clone(),
                 selected_node: self.selected_node,
                 xpath_text:    self.xpath_text.clone(),
+                window_info:   self.window_info.clone(),
             };
             if let Ok(json) = serde_json::to_string(&data) {
                 storage.set_string("last_capture", json);
@@ -1141,12 +1278,51 @@ impl eframe::App for SelectorApp {
 
         // ── Panels ────────────────────────────────────────────────────────────
         self.draw_titlebar(ctx);
-        self.draw_xpath_bar(ctx);
-        self.draw_status_bar(ctx);
+        self.draw_top_bar(ctx);
+        // draw_xpath_bar removed - XPath preview moved to bottom
+        // ── Bottom panel: buttons only ──────────────────────────────
+        self.draw_bottom_xpath_buttons(ctx);
 
         egui::CentralPanel::default()
             .frame(Frame::none().fill(Color32::from_gray(250)))
             .show(ctx, |ui| {
+                
+                ui.add_space(6.0);
+
+                // ── 标签页切换区域 ──────────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    // 标签页切换
+                    let element_active = self.active_tab == ElementTab::Element;
+                    let window_active = self.active_tab == ElementTab::WindowElement;
+                    
+                    if ui.selectable_label(element_active, RichText::new("元素").size(12.0)).clicked() {
+                        self.active_tab = ElementTab::Element;
+                    }
+                    ui.add_space(4.0);
+                    if ui.selectable_label(window_active, RichText::new("窗口元素").size(12.0)).clicked() {
+                        self.active_tab = ElementTab::WindowElement;
+                    }
+                    
+                    ui.add_space(16.0);
+                    
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // 自定义XPath开关
+                        ui.checkbox(&mut self.custom_xpath, "使用自定义XPath")
+                            .on_hover_text("启用自定义XPath编辑模式");
+                    });
+                });
+                
+                // ui.add_space(6.0);
+                // ui.separator();
+                // ui.add_space(4.0);
+                
+                // // ── XPath 预览区域（根据标签页切换内容）──────────────────────────────
+                // self.draw_xpath_preview_content(ui);
+                
+                // ui.add_space(6.0);
+                ui.separator();
+                // ui.add_space(4.0);
+                
                 // ── Manual two-column split with a 1-px draggable divider ──────
                 // This avoids egui SidePanel's wide interactive resize handle.
 
@@ -1226,7 +1402,16 @@ impl eframe::App for SelectorApp {
                 );
                 right_ui.set_clip_rect(right_rect);
                 self.draw_right_panel(&mut right_ui);
+
+                // ui.add_space(6.0);
+                // ui.separator();
+                // ui.add_space(4.0);
+                
+                // ── XPath 预览区域（根据标签页切换内容）──────────────────────────────
+                //self.draw_xpath_preview_content(ui);
             });
+        
+
     }
 }
 

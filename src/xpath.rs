@@ -1,26 +1,53 @@
 // src/xpath.rs
-use crate::model::{HierarchyNode, XPathResult};
+use crate::model::{HierarchyNode, XPathResult, WindowInfo};
 
 /// Build the complete XPath result from the captured hierarchy.
 /// The hierarchy now starts from the Window node.
 /// Returns:
 ///   - window_selector: XPath-like string for the window (first node)
 ///   - element_xpath: XPath for elements inside the window (starts with /)
-pub fn generate(nodes: &[HierarchyNode]) -> XPathResult {
+pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>) -> XPathResult {
     if nodes.is_empty() {
         panic!("Hierarchy must not be empty");
     }
     
-    // First node is always the Window
-    let window_selector = nodes[0].xpath_segment();
+    // First node is the window/app root - generate window selector separately
+    // 窗口选择器单独生成，包含 ClassName, Name, ProcessName 等关键属性
+    let window_node = &nodes[0];
+    let window_selector = generate_window_selector(window_node, window_info);
     
-    // Generate element XPath from nodes after Window (index 1+)
+    // Element XPath should start from nodes[1] (after the window root)
+    // 元素 XPath 从窗口节点之后开始，跳过窗口根节点
     let element_nodes = &nodes[1..];
     let element_xpath = generate_element_xpath(element_nodes);
     
     XPathResult {
         window_selector,
         element_xpath,
+    }
+}
+
+/// Generate window selector with essential properties for window identification.
+/// Always uses "Window" as the tag for consistency with UI Automation window search.
+fn generate_window_selector(node: &HierarchyNode, window_info: Option<&WindowInfo>) -> String {
+    // 窗口选择器始终使用 Window 标签，因为 find_window_by_selector 会匹配多种窗口类型
+    let mut predicates: Vec<String> = node.filters
+        .iter()
+        .filter(|f| f.enabled && matches!(f.name.as_str(), "ClassName" | "Name"))
+        .filter_map(|f| f.predicate())
+        .collect();
+    
+    // 添加 ProcessName（来自 window_info）
+    if let Some(info) = window_info {
+        if !info.process_name.is_empty() {
+            predicates.push(format!("@ProcessName='{}'", info.process_name));
+        }
+    }
+    
+    if predicates.is_empty() {
+        "Window".to_string()
+    } else {
+        format!("Window[{}]", predicates.join(" and "))
     }
 }
 
@@ -71,8 +98,9 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
     
     included.iter().enumerate().map(|(i, &node)| {
         if i == 0 {
-            // First element node: always use /
-            format!("/{}", node.xpath_segment())
+            // 第一个元素节点：使用 // 从窗口内部任意层级搜索
+            // 因为窗口选择器已经定位到窗口，元素可能在任意深度
+            format!("//{}", node.xpath_segment())
         } else {
             // Check if we skipped any intermediate nodes
             let prev_node = included[i - 1];
@@ -109,9 +137,12 @@ pub fn lint(xpath: &str) -> Option<String> {
         let window_part = &s[..comma_pos];
         let element_part = s[comma_pos + 2..].trim();
         
-        // Validate window selector (should start with Window)
-        if !window_part.starts_with("Window") {
-            return Some("窗口选择器必须以 Window 开头".into());
+        // Validate window selector (should start with a control type like Window, Pane, etc.)
+        // 允许各种根节点类型，因为有些应用（如微信）的顶层节点是 Pane
+        let valid_root_types = ["Window", "Pane", "Document", "Application", "Desktop"];
+        let has_valid_root = valid_root_types.iter().any(|t| window_part.starts_with(t));
+        if !has_valid_root && !window_part.contains("[@") {
+            return Some("窗口选择器格式无效".into());
         }
         
         // Validate element XPath (should start with /)
@@ -182,7 +213,7 @@ mod tests {
             node("Window", "main", ""),
             node("Button", "btnOk", "OK")
         ];
-        let result = generate(&nodes);
+        let result = generate(&nodes, None);
         
         // Window selector should not start with //
         assert!(!result.window_selector.starts_with("//"));
@@ -249,7 +280,7 @@ mod tests {
             HierarchyNode::new("Button", "", "mmui::XImage", "", 1, ElementRect::default(), 0),
         ];
 
-        let result = generate(&nodes);
+        let result = generate(&nodes, None);
         
         // Verify window selector
         assert!(result.window_selector.starts_with("Window"), "Window selector must start with Window");
@@ -283,7 +314,7 @@ mod tests {
         let mut nodes = nodes;
         nodes[2].included = false;
         
-        let result = generate(&nodes);
+        let result = generate(&nodes, None);
         
         // Should have // because Pane was skipped
         assert!(result.element_xpath.contains("//Button"), "Should use // when intermediate node skipped");
@@ -302,7 +333,7 @@ mod tests {
             HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0),
         ];
 
-        let result = generate(&nodes);
+        let result = generate(&nodes, None);
         
         // Check that first() is used for position 1
         assert!(result.element_xpath.contains("first()"), "Should use first() for position 1");
@@ -436,7 +467,7 @@ mod tests {
             );
         }
 
-        let result = generate(&nodes);
+        let result = generate(&nodes, None);
         
         // Count / vs // to verify optimization
         let single_slash_count = result.element_xpath.matches('/').count();
