@@ -11,7 +11,7 @@ use crate::{
     capture,
     capture_overlay::CaptureOverlay,
     highlight,
-    model::{AppConfig, DetailedValidationResult, ElementTab, HierarchyNode, Operator, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo},
+    model::{AppConfig, DetailedValidationResult, ElementTab, HighlightInfo, HierarchyNode, Operator, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo},
     mouse_hook::{self, CaptureMode},
     xpath,
 };
@@ -299,15 +299,18 @@ impl SelectorApp {
         self.overlay.show();
     }
 
-    fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode) {
+    fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode, ctx: &egui::Context) {
+        // Immediately hide highlight window to prevent interference
+        highlight::hide();
+            
         mouse_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
-
+    
         if let CaptureMode::Batch = mode {
             self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
         }
-
+    
         let result = capture::capture_at(x, y);
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
@@ -316,7 +319,7 @@ impl SelectorApp {
             let window_idx = result.hierarchy.iter()
                 .position(|n| n.control_type == "Window")
                 .unwrap_or(0);
-            
+                
             // Debug: log window info
             if let Some(ref win) = result.window_info {
                 info!("Window info extracted: class='{}', name='{}', process='{}', pid={}", 
@@ -324,16 +327,16 @@ impl SelectorApp {
             } else {
                 info!("No window info extracted from hierarchy");
             }
-            
+                
             // Extract element hierarchy (nodes after Window) for tree display
             let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
                 result.hierarchy[window_idx + 1..].to_vec()
             } else {
                 Vec::new()
             };
-            
+                
             let n = element_hierarchy.len();
-            
+                
             self.selected_node = n.checked_sub(1);
             self.window_info = result.window_info.clone();
             let window_hint = result.window_info
@@ -344,9 +347,7 @@ impl SelectorApp {
                 "已捕获 {} 层层级 — 坐标 ({}, {}){}",
                 n, result.cursor_x, result.cursor_y, window_hint
             );
-            if let Some(last) = element_hierarchy.last() {
-                highlight::flash(&last.rect, 800);
-            }
+            // No highlight flash after capture - user requested highlight to disappear
             // Expand all nodes in the new tree
             self.node_expanded = vec![true; n];
             self.hierarchy = element_hierarchy;
@@ -358,6 +359,10 @@ impl SelectorApp {
         self.pending_save  = true;
         self.save_to_file();
         info!("capture done: {}", self.xpath_text);
+            
+        // Restore cursor to default and focus main window
+        ctx.set_cursor_icon(egui::CursorIcon::Default);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     fn do_validate(&mut self) {
@@ -397,7 +402,9 @@ impl SelectorApp {
         let result = capture::capture_at(x, y);
         if result.error.is_none() {
             if let Some(last) = result.hierarchy.last() {
-                highlight::flash(&last.rect, 300);
+                // Update highlight - persistent display, no flashing
+                let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
+                highlight::update_highlight(&highlight_info);
             }
         }
     }
@@ -1220,20 +1227,26 @@ impl eframe::App for SelectorApp {
         // Capture wait logic
         if let CaptureState::WaitingClick { deadline } = &self.capture_state {
             if Instant::now() > *deadline {
+                // Timeout: hide highlight, restore cursor
+                highlight::hide();
                 mouse_hook::deactivate_capture();
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获超时，已取消".to_string();
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
             } else if escape {
+                // Cancel: hide highlight, restore cursor
+                highlight::hide();
                 mouse_hook::deactivate_capture();
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg = "捕获已取消".to_string();
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
             } else if let Some(event) = mouse_hook::poll_click() {
                 if event.is_down {
                     let mode = event.capture_mode();
                     if mode != CaptureMode::None {
-                        self.finish_capture_at(event.x, event.y, mode);
+                        self.finish_capture_at(event.x, event.y, mode, ctx);
                     }
                 }
             }
@@ -1255,7 +1268,9 @@ impl eframe::App for SelectorApp {
                 }
             }
         } else {
-            self.last_mouse_move    = None;
+            // Not in capture mode: ensure highlight is hidden
+            highlight::hide();
+            self.last_mouse_move = None;
             self.last_highlight_pos = None;
         }
 

@@ -1,62 +1,69 @@
 // src/highlight.rs
 //
-// Draws a red highlight rectangle over the target element's bounding box.
-// Windows: creates a layered, click-through WS_EX_LAYERED window.
-// Other platforms: no-op stub.
+// 元素高亮显示 - 使用两个独立窗口：
+// 1. 标签窗口：显示元素类型，宽度自适应文字
+// 2. 高亮框窗口：纯边框，中空透明
 
-use crate::model::ElementRect;
+use crate::model::{ElementRect, HighlightInfo};
 use log::error;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/// Show a highlight rectangle for `duration_ms` milliseconds, then hide it.
-/// Runs the flash in a background thread so it never blocks the UI.
 pub fn flash(rect: &ElementRect, duration_ms: u64) {
-    #[cfg(target_os = "windows")]
-    windows_impl::flash(rect, duration_ms);
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        debug!(
-            "highlight::flash (stub) rect=({},{},{},{})",
-            rect.x, rect.y, rect.width, rect.height
-        );
-    }
+    let info = HighlightInfo::new(rect.clone(), "");
+    flash_with_info(&info, duration_ms);
 }
 
-/// Show a persistent highlight (call hide() to remove).
+pub fn flash_with_info(info: &HighlightInfo, duration_ms: u64) {
+    #[cfg(target_os = "windows")]
+    windows_impl::flash_with_info(info, duration_ms);
+
+    #[cfg(not(target_os = "windows"))]
+    log::debug!("highlight::flash_with_info (stub)");
+}
+
+pub fn hide() {
+    #[cfg(target_os = "windows")]
+    windows_impl::hide();
+
+    #[cfg(not(target_os = "windows"))]
+    log::debug!("highlight::hide (stub)");
+}
+
+pub fn update_highlight(info: &HighlightInfo) {
+    #[cfg(target_os = "windows")]
+    windows_impl::update_highlight(info);
+
+    #[cfg(not(target_os = "windows"))]
+    log::debug!("highlight::update_highlight (stub)");
+}
+
 #[allow(dead_code)]
 pub fn show(rect: &ElementRect) -> HighlightHandle {
     #[cfg(target_os = "windows")]
     {
-        windows_impl::show(rect)
+        windows_impl::show(rect, "")
     }
     #[cfg(not(target_os = "windows"))]
     {
-        debug!("highlight::show (stub)");
         HighlightHandle { active: Arc::new(AtomicBool::new(true)) }
     }
 }
 
-/// Move an existing highlight window to a new position.
-/// Returns true if successful, false if the highlight is not active.
 #[allow(dead_code)]
-pub fn move_to(rect: &ElementRect) -> bool {
+pub fn show_with_info(info: &HighlightInfo) -> HighlightHandle {
     #[cfg(target_os = "windows")]
     {
-        windows_impl::move_to(rect)
+        windows_impl::show(&info.rect, &info.control_type_cn)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        debug!("highlight::move_to (stub)");
-        false
+        HighlightHandle { active: Arc::new(AtomicBool::new(true)) }
     }
 }
 
-/// Opaque handle; dropping it hides the highlight.
-#[allow(dead_code)]
 pub struct HighlightHandle {
     active: Arc<AtomicBool>,
 }
@@ -77,185 +84,415 @@ mod windows_impl {
         Win32::{
             Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
             Graphics::Gdi::{
-                BeginPaint, CreatePen, DeleteObject, EndPaint,
-                GetStockObject, PAINTSTRUCT, PS_SOLID, SelectObject,
-                NULL_BRUSH, Rectangle, CreateSolidBrush,
+                BeginPaint, DeleteObject, EndPaint, GetStockObject,
+                PAINTSTRUCT, SelectObject, Rectangle, TextOutW,
+                CreateSolidBrush, GetTextExtentPoint32W, DEFAULT_GUI_FONT,
             },
-            UI::{
-                WindowsAndMessaging::{
-                    CreateWindowExW, DefWindowProcW, DestroyWindow,
-                    GetMessageW, PostQuitMessage, RegisterClassExW,
-                    SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-                    TranslateMessage, DispatchMessageW,
-                    HWND_TOPMOST, LWA_ALPHA,
-                    SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
-                    WM_DESTROY, WM_PAINT, WNDCLASSEXW,
-                    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-                    // WS_EX_TRANSPARENT, WS_POPUP, GetClientRect,
-                    WS_POPUP, GetClientRect,
-                },
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow,
+                PostQuitMessage, PostMessageW, RegisterClassExW, SetWindowPos,
+                ShowWindow, PeekMessageW, TranslateMessage, DispatchMessageW,
+                HWND_TOPMOST, WM_DESTROY, WM_PAINT, WM_CLOSE, WNDCLASSEXW,
+                WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
+                WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
+                SetLayeredWindowAttributes, LWA_COLORKEY, GetClientRect,
+                PM_REMOVE, WM_QUIT,
             },
             System::LibraryLoader::GetModuleHandleW,
         },
     };
 
-    const BORDER: i32 = 3;
-    const CLASS_NAME: &str = "ElemSelectorHighlight\0";
+    // ─── 常量 ────────────────────────────────────────────────────────────────
+    const BORDER_WIDTH: i32 = 3;       // 边框宽度
+    const LABEL_PADDING: i32 = 4;      // 标签内边距
+    
+    // 颜色 (BGR格式)
+    const HIGHLIGHT_COLOR: u32 = 0x2E7D32;  // 绿色 - 边框和标签背景
+    const TEXT_COLOR: u32 = 0xFFFFFF;        // 白色文字
+    const TRANSPARENT_KEY: u32 = 0x00FFFF;   // Cyan - 透明色键
+    
+    // 窗口类名
+    const BORDER_CLASS: &str = "ElemSelectorBorder\0";
+    const LABEL_CLASS: &str = "ElemSelectorLabel\0";
+    
+    // 存储两个窗口的 HWND
+    static BORDER_HWND: AtomicI32 = AtomicI32::new(0);
+    static LABEL_HWND: AtomicI32 = AtomicI32::new(0);
+    
+    // 线程本地存储标签文字
+    thread_local! {
+        static LABEL_TEXT: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    }
 
-    pub fn flash(rect: &ElementRect, duration_ms: u64) {
-        let r = rect.clone();
-        log::info!("highlight::flash called at ({}, {}, {}, {})", r.x, r.y, r.width, r.height);
+    // ─── 公共函数 ─────────────────────────────────────────────────────────────
+    
+    pub fn update_highlight(info: &HighlightInfo) {
+        hide_internal();
+        
+        let r = info.rect.clone();
+        let label = info.control_type_cn.clone();
+        
         thread::spawn(move || {
-            if let Some(hwnd) = create_highlight_window(&r) {
-                log::info!("highlight window created successfully");
-                unsafe { let _ = ShowWindow(hwnd, SW_SHOW); };
+            LABEL_TEXT.with(|cell| *cell.borrow_mut() = label.clone());
+            
+            // 创建两个窗口
+            let border_hwnd = create_border_window(&r);
+            let label_hwnd = create_label_window(&r, &label);
+            
+            if let (Some(bh), Some(lh)) = (border_hwnd, label_hwnd) {
+                BORDER_HWND.store(bh.0 as i32, Ordering::SeqCst);
+                LABEL_HWND.store(lh.0 as i32, Ordering::SeqCst);
                 
-                // Run message pump for duration_ms
-                let start = std::time::Instant::now();
-                let duration = std::time::Duration::from_millis(duration_ms);
-                while start.elapsed() < duration {
-                    unsafe {
-                        let mut msg = std::mem::zeroed();
-                        let ret = GetMessageW(&mut msg, None, 0, 0);
-                        if ret.0 > 0 {
-                            let _ = TranslateMessage(&msg);
-                            let _ = DispatchMessageW(&msg);
-                        } else {
-                            break;
-                        }
-                    }
-                    // Small sleep to prevent 100% CPU
-                    thread::sleep(std::time::Duration::from_millis(10));
+                unsafe {
+                    let _ = ShowWindow(bh, SW_SHOW);
+                    let _ = ShowWindow(lh, SW_SHOW);
                 }
                 
-                unsafe { let _ = DestroyWindow(hwnd); };
-                log::info!("highlight window destroyed");
-            } else {
-                log::error!("failed to create highlight window");
+                // 消息循环
+                while BORDER_HWND.load(Ordering::SeqCst) != 0 {
+                    unsafe {
+                        let mut msg = std::mem::zeroed();
+                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                    }
+                    thread::sleep(std::time::Duration::from_millis(30));
+                }
+                
+                BORDER_HWND.store(0, Ordering::SeqCst);
+                LABEL_HWND.store(0, Ordering::SeqCst);
+                unsafe {
+                    let _ = DestroyWindow(bh);
+                    let _ = DestroyWindow(lh);
+                }
             }
         });
     }
 
+    pub fn flash_with_info(info: &HighlightInfo, duration_ms: u64) {
+        hide_internal();
+        
+        let r = info.rect.clone();
+        let label = info.control_type_cn.clone();
+        
+        thread::spawn(move || {
+            LABEL_TEXT.with(|cell| *cell.borrow_mut() = label.clone());
+            
+            let border_hwnd = create_border_window(&r);
+            let label_hwnd = create_label_window(&r, &label);
+            
+            if let (Some(bh), Some(lh)) = (border_hwnd, label_hwnd) {
+                BORDER_HWND.store(bh.0 as i32, Ordering::SeqCst);
+                LABEL_HWND.store(lh.0 as i32, Ordering::SeqCst);
+                
+                unsafe {
+                    let _ = ShowWindow(bh, SW_SHOW);
+                    let _ = ShowWindow(lh, SW_SHOW);
+                }
+                
+                let start = std::time::Instant::now();
+                let duration = std::time::Duration::from_millis(duration_ms);
+                while start.elapsed() < duration && BORDER_HWND.load(Ordering::SeqCst) != 0 {
+                    unsafe {
+                        let mut msg = std::mem::zeroed();
+                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                    }
+                    thread::sleep(std::time::Duration::from_millis(16));
+                }
+                
+                BORDER_HWND.store(0, Ordering::SeqCst);
+                LABEL_HWND.store(0, Ordering::SeqCst);
+                unsafe {
+                    let _ = DestroyWindow(bh);
+                    let _ = DestroyWindow(lh);
+                }
+            }
+        });
+    }
+
+    pub fn hide() {
+        hide_internal();
+    }
+    
+    fn hide_internal() {
+        let border_val = BORDER_HWND.load(Ordering::SeqCst);
+        let label_val = LABEL_HWND.load(Ordering::SeqCst);
+        
+        if border_val != 0 {
+            BORDER_HWND.store(0, Ordering::SeqCst);
+            unsafe { let _ = PostMessageW(HWND(border_val as _), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+        }
+        if label_val != 0 {
+            LABEL_HWND.store(0, Ordering::SeqCst);
+            unsafe { let _ = PostMessageW(HWND(label_val as _), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+
     #[allow(dead_code)]
-    pub fn show(rect: &ElementRect) -> HighlightHandle {
+    pub fn show(rect: &ElementRect, control_type_cn: &str) -> HighlightHandle {
         let active = Arc::new(AtomicBool::new(true));
         let active2 = active.clone();
         let r = rect.clone();
+        let label = control_type_cn.to_string();
 
         thread::spawn(move || {
-            if let Some(hwnd) = create_highlight_window(&r) {
-                unsafe { let _ = ShowWindow(hwnd, SW_SHOW); };
-                // Simple message pump - wait until handle is dropped
-                while active2.load(Ordering::SeqCst) {
+            LABEL_TEXT.with(|cell| *cell.borrow_mut() = label.clone());
+            
+            let border_hwnd = create_border_window(&r);
+            let label_hwnd = create_label_window(&r, &label);
+            
+            if let (Some(bh), Some(lh)) = (border_hwnd, label_hwnd) {
+                BORDER_HWND.store(bh.0 as i32, Ordering::SeqCst);
+                LABEL_HWND.store(lh.0 as i32, Ordering::SeqCst);
+                
+                unsafe {
+                    let _ = ShowWindow(bh, SW_SHOW);
+                    let _ = ShowWindow(lh, SW_SHOW);
+                }
+                
+                while active2.load(Ordering::SeqCst) && BORDER_HWND.load(Ordering::SeqCst) != 0 {
+                    unsafe {
+                        let mut msg = std::mem::zeroed();
+                        let has_msg = PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE);
+                        if has_msg.as_bool() {
+                            if msg.message == WM_QUIT { break; }
+                            let _ = TranslateMessage(&msg);
+                            let _ = DispatchMessageW(&msg);
+                        }
+                    }
                     thread::sleep(std::time::Duration::from_millis(30));
                 }
-                unsafe { let _ = DestroyWindow(hwnd); };
+                
+                BORDER_HWND.store(0, Ordering::SeqCst);
+                LABEL_HWND.store(0, Ordering::SeqCst);
+                unsafe {
+                    let _ = DestroyWindow(bh);
+                    let _ = DestroyWindow(lh);
+                }
             }
         });
 
         HighlightHandle { active }
     }
 
-    pub fn move_to(_rect: &ElementRect) -> bool {
-        // Not implemented - use flash() instead for real-time highlight
-        false
-    }
-
-    fn create_highlight_window(rect: &ElementRect) -> Option<HWND> {
-        let class: Vec<u16> = CLASS_NAME.encode_utf16().collect();
-
+    // ─── 边框窗口 ──────────────────────────────────────────────────────────────
+    
+    fn create_border_window(rect: &ElementRect) -> Option<HWND> {
+        let class: Vec<u16> = BORDER_CLASS.encode_utf16().collect();
+        
         unsafe {
-            // Register class (idempotent — ignore ERROR_CLASS_ALREADY_EXISTS).
             let h_instance = GetModuleHandleW(None).unwrap_or_default();
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(highlight_wnd_proc),
+                lpfnWndProc: Some(border_wnd_proc),
                 lpszClassName: PCWSTR(class.as_ptr()),
                 hInstance: h_instance.into(),
-                hbrBackground: CreateSolidBrush(COLORREF(0xFFFFFF)), // White background
                 ..Default::default()
             };
-            let _ = RegisterClassExW(&wc); // ignore failure (already registered)
-
+            let _ = RegisterClassExW(&wc);
+            
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,  // Removed WS_EX_TRANSPARENT
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
-                rect.x - BORDER,
-                rect.y - BORDER,
-                rect.width  + BORDER * 2,
-                rect.height + BORDER * 2,
+                rect.x, rect.y, rect.width, rect.height,
                 None, None, None, None,
             );
-
+            
             match hwnd {
                 Ok(h) => {
-                    // Use only alpha blending - make the window 70% opaque
-                    // This allows the red border drawn by GDI to be visible
-                    // DO NOT use LWA_COLORKEY as it makes the entire window transparent
-                    let _ = SetLayeredWindowAttributes(h, COLORREF(0), 180, LWA_ALPHA);
-                    
-                    // Force window to top and show it
-                    let _ = SetWindowPos(
-                        h, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE,
-                    );
-                    
-                    log::info!("Highlight window created at ({}, {}, {}, {}), alpha set to 180", 
-                               rect.x - BORDER, rect.y - BORDER,
-                               rect.width + BORDER * 2, rect.height + BORDER * 2);
-                    
+                    // 使用颜色键: Cyan 区域透明
+                    let _ = SetLayeredWindowAttributes(h, COLORREF(TRANSPARENT_KEY), 0, LWA_COLORKEY);
+                    let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                     Some(h)
                 }
                 Err(e) => {
-                    error!("CreateWindowEx highlight failed: {e}");
+                    error!("创建边框窗口失败: {e}");
                     None
                 }
             }
         }
     }
-
-    unsafe extern "system" fn highlight_wnd_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
+    
+    unsafe extern "system" fn border_wnd_proc(
+        hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
     ) -> LRESULT {
         match msg {
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
-
-                // Get client area
+                
+                // 绘制绿色边框 (中空)
+                // 整个窗口填充 Cyan (透明)，只绘制边框
+                let bg_brush = CreateSolidBrush(COLORREF(TRANSPARENT_KEY));
+                let border_brush = CreateSolidBrush(COLORREF(HIGHLIGHT_COLOR));
+                
+                // 填充中心为透明色 (Cyan)
+                let old_bg = SelectObject(hdc, bg_brush);
                 let mut rc = RECT::default();
                 if GetClientRect(hwnd, &mut rc).is_ok() {
-                    // Draw semi-transparent red fill
-                    let red_brush = CreateSolidBrush(COLORREF(0x0000FF)); // Red BGR
-                    if !red_brush.is_invalid() {
-                        let old_brush = SelectObject(hdc, red_brush);
-                        let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
-                        SelectObject(hdc, old_brush);
-                        let _ = DeleteObject(red_brush);
-                    }
-                    
-                    // Draw red border (5 pixels)
-                    let pen = CreatePen(PS_SOLID, 5, COLORREF(0x0000FF)); // Red BGR
-                    if !pen.is_invalid() {
-                        let old_pen = SelectObject(hdc, pen);
-                        let brush = GetStockObject(NULL_BRUSH);
-                        let old_brush = SelectObject(hdc, brush);
-                        let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
-                        SelectObject(hdc, old_pen);
-                        SelectObject(hdc, old_brush);
-                        let _ = DeleteObject(pen);
-                    }
+                    let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
                 }
+                
+                // 绘制边框四条边 (绿色)
+                let old_border = SelectObject(hdc, border_brush);
+                // 上边
+                let _ = Rectangle(hdc, 0, 0, rc.right, BORDER_WIDTH);
+                // 下边
+                let _ = Rectangle(hdc, 0, rc.bottom - BORDER_WIDTH, rc.right, rc.bottom);
+                // 左边
+                let _ = Rectangle(hdc, 0, 0, BORDER_WIDTH, rc.bottom);
+                // 右边
+                let _ = Rectangle(hdc, rc.right - BORDER_WIDTH, 0, rc.right, rc.bottom);
+                
+                SelectObject(hdc, old_bg);
+                SelectObject(hdc, old_border);
+                let _ = DeleteObject(bg_brush);
+                let _ = DeleteObject(border_brush);
                 
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
+            WM_CLOSE => {
+                BORDER_HWND.store(0, Ordering::SeqCst);
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
             WM_DESTROY => {
+                BORDER_HWND.store(0, Ordering::SeqCst);
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    // ─── 标签窗口 ──────────────────────────────────────────────────────────────
+    
+    fn create_label_window(rect: &ElementRect, label: &str) -> Option<HWND> {
+        let class: Vec<u16> = LABEL_CLASS.encode_utf16().collect();
+        
+        // 计算标签尺寸
+        let (label_width, label_height) = estimate_label_size(label);
+        
+        unsafe {
+            let h_instance = GetModuleHandleW(None).unwrap_or_default();
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(label_wnd_proc),
+                lpszClassName: PCWSTR(class.as_ptr()),
+                hInstance: h_instance.into(),
+                ..Default::default()
+            };
+            let _ = RegisterClassExW(&wc);
+            
+            // 标签位置：在高亮框上方，紧挨着无间隙
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                PCWSTR(class.as_ptr()),
+                PCWSTR::null(),
+                WS_POPUP,
+                rect.x,  // 左侧与高亮框对齐
+                rect.y - label_height,  // 紧挨高亮框顶部，无间隙
+                label_width,
+                label_height,
+                None, None, None, None,
+            );
+            
+            match hwnd {
+                Ok(h) => {
+                    // 标签窗口使用 alpha 透明度，完全可见
+                    // 不使用 LWA_COLORKEY，整个窗口都是实色的
+                    use windows::Win32::UI::WindowsAndMessaging::LWA_ALPHA;
+                    let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+                    let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    Some(h)
+                }
+                Err(e) => {
+                    error!("创建标签窗口失败: {e}");
+                    None
+                }
+            }
+        }
+    }
+    
+    fn estimate_label_size(label: &str) -> (i32, i32) {
+        // 估算：中文 ~14px，英文 ~8px
+        let mut width = 0;
+        for c in label.chars() {
+            width += if c.is_ascii() { 8 } else { 14 };
+        }
+        (width + LABEL_PADDING * 2, 18 + LABEL_PADDING)
+    }
+    
+    unsafe extern "system" fn label_wnd_proc(
+        hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
+    ) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                
+                // 使用小字体
+                let font = GetStockObject(DEFAULT_GUI_FONT);
+                let old_font = SelectObject(hdc, font);
+                
+                // 绘制绿色背景
+                let bg_brush = CreateSolidBrush(COLORREF(HIGHLIGHT_COLOR));
+                let old_bg = SelectObject(hdc, bg_brush);
+                
+                let mut rc = RECT::default();
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    // 填充绿色背景 (无边框)
+                    let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+                }
+                
+                // 绘制白色文字
+                use windows::Win32::Graphics::Gdi::{SetBkColor, SetTextColor};
+                let _ = SetBkColor(hdc, COLORREF(HIGHLIGHT_COLOR));  // 绿色背景
+                let _ = SetTextColor(hdc, COLORREF(TEXT_COLOR));     // 白色文字
+                
+                let label = LABEL_TEXT.with(|cell| cell.borrow().clone());
+                if !label.is_empty() {
+                    let label_wide: Vec<u16> = label.encode_utf16().collect();
+                    
+                    // 计算文字尺寸
+                    let mut text_size = windows::Win32::Foundation::SIZE { cx: 0, cy: 0 };
+                    let _ = GetTextExtentPoint32W(hdc, &label_wide, &mut text_size);
+                    
+                    // 计算居中位置（上下左右都居中）
+                    let window_width = rc.right - rc.left;
+                    let window_height = rc.bottom - rc.top;
+                    let x = (window_width - text_size.cx) / 2;
+                    let y = (window_height - text_size.cy) / 2;
+                    
+                    let _ = TextOutW(hdc, x, y, &label_wide);
+                }
+                
+                SelectObject(hdc, old_bg);
+                SelectObject(hdc, old_font);
+                let _ = DeleteObject(bg_brush);
+                
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                LABEL_HWND.store(0, Ordering::SeqCst);
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                LABEL_HWND.store(0, Ordering::SeqCst);
                 PostQuitMessage(0);
                 LRESULT(0)
             }

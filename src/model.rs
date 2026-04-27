@@ -401,6 +401,78 @@ impl Default for ElementTab {
     }
 }
 
+// ─── HighlightInfo ──────────────────────────────────────────────────────────
+
+/// Information needed for highlight window display.
+#[derive(Debug, Clone)]
+pub struct HighlightInfo {
+    /// Element rectangle for positioning
+    pub rect: ElementRect,
+    /// Element control type (English, e.g., "Button", "Edit")
+    pub control_type: String,
+    /// Element control type in Chinese (e.g., "按钮", "可编辑文本")
+    pub control_type_cn: String,
+}
+
+impl HighlightInfo {
+    pub fn new(rect: ElementRect, control_type: &str) -> Self {
+        Self {
+            rect,
+            control_type: control_type.to_string(),
+            control_type_cn: control_type_to_chinese(control_type),
+        }
+    }
+}
+
+/// Convert English control type to Chinese description.
+pub fn control_type_to_chinese(control_type: &str) -> String {
+    match control_type {
+        "Button"       => "按钮",
+        "Calendar"     => "日历",
+        "CheckBox"     => "复选框",
+        "ComboBox"     => "下拉框",
+        "Custom"       => "自定义控件",
+        "DataGrid"     => "数据网格",
+        "DataItem"     => "数据项",
+        "Document"     => "文档",
+        "Edit"         => "可编辑文本",
+        "Group"        => "分组",
+        "Header"       => "表头",
+        "HeaderItem"   => "表头项",
+        "Hyperlink"    => "超链接",
+        "Image"        => "图片",
+        "List"         => "列表",
+        "ListItem"     => "列表项",
+        "MenuBar"      => "菜单栏",
+        "Menu"         => "菜单",
+        "MenuItem"     => "菜单项",
+        "Pane"         => "面板",
+        "ProgressBar"  => "进度条",
+        "RadioButton"  => "单选按钮",
+        "ScrollBar"    => "滚动条",
+        "SemanticZoom" => "语义缩放",
+        "Separator"    => "分隔符",
+        "Slider"       => "滑块",
+        "Spinner"      => "数值调节钮",
+        "SplitButton"  => "拆分按钮",
+        "StatusBar"    => "状态栏",
+        "Tab"          => "选项卡",
+        "TabItem"      => "选项卡项",
+        "Table"        => "表格",
+        "Text"         => "文本",
+        "Thumb"        => "缩略图",
+        "TitleBar"     => "标题栏",
+        "ToolBar"      => "工具栏",
+        "ToolTip"      => "提示",
+        "Tree"         => "树形控件",
+        "TreeItem"     => "树项",
+        "Window"       => "窗口",
+        "Desktop"      => "桌面",
+        "Application"  => "应用程序",
+        _               => control_type,  // Return original if no translation
+    }.to_string()
+}
+
 // ─── AppConfig (persisted) ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
