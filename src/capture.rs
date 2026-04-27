@@ -297,16 +297,18 @@ pub mod uia {
         node.is_enabled = is_enabled;
         node.is_offscreen = is_offscreen;
         
-        // Add extended property filters
+        // Add extended property filters (only UIA standard properties, not human-readable ones)
         if !node.framework_id.is_empty() {
             node.filters.push(PropertyFilter::new("FrameworkId", &node.framework_id));
         }
         if !node.help_text.is_empty() {
             node.filters.push(PropertyFilter::new("HelpText", &node.help_text));
         }
-        if !node.localized_control_type.is_empty() {
-            node.filters.push(PropertyFilter::new("LocalizedControlType", &node.localized_control_type));
-        }
+        // LocalizedControlType is human-readable, not a standard UIA property for XPath
+        // Do NOT add it to filters by default
+        // if !node.localized_control_type.is_empty() {
+        //     node.filters.push(PropertyFilter::new("LocalizedControlType", &node.localized_control_type));
+        // }
         
         Some(node)
     }
