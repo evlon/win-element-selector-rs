@@ -6,70 +6,154 @@
 
 ## 1. 配置脚本优化
 
-**状态：** 📋 规划中  
+**状态：** ✅ 已完成（核心部分）  
 **优先级：** ⭐⭐⭐ 高
 
-### 目标
-实现一个准确、可用且高可读性的配置脚本格式，整合窗口选择器与元素选择器。
+### 已完成功能
+- ✅ **窗口选择器与元素 XPath 分离方案**
+  - 窗口选择器：`Window[@Name='...' and @ClassName='...']`
+  - 元素 XPath：`//Button[@AutomationId='btnSend']`
+  - 两阶段验证：先定位窗口，再在窗口内搜索元素
 
-### 核心需求
-- **窗口 + 元素一体化选择语法**
-  - 将窗口信息（title/class/pid）与 XPath 表达式整合
-  - 生成更短、性能更好的选择器
-  
-- **高可读性**
-  - 脚本格式对人类友好，易于理解和维护
-  - 支持注释和结构化数据
+- ✅ 窗口信息提取（title/class/pid/process_name）
 
-- **性能优化**
-  - 利用窗口预筛选加速元素定位
-  - 避免全局搜索，减少 UIA 调用次数
+- ✅ XPath 生成与校验功能
+  - 支持 `position()`、`first()`、`last()` 函数
+  - 语法校验与错误提示
 
-### 示例格式（待讨论）
-```yaml
-window:
-  title: "微信"
-  class: "mmui::MainWindow"
-  
-element:
-  xpath: "//Button[@AutomationId='btnSend']"
-  # 或更简洁的语法
-  selector: "Button#btnSend"
-```
+- ✅ 层级树可视化展示
+
+- ✅ 属性过滤器编辑（支持 12 种运算符）
+
+- ✅ 标签页切换（元素模式 / 窗口元素模式）
+
+- ✅ 复制按钮和历史记录管理
+
+### 待优化
+- 📋 配置脚本导出功能（YAML / JSON 格式）
+- 📋 批量元素配置管理
 
 ---
 
 ## 2. HTTP 服务化
 
-**状态：** 📋 规划中  
+**状态：** 🔄 进行中  
 **优先级：** ⭐⭐⭐ 高
 
 ### 目标
-将当前桌面程序改造为后台服务，开放 HTTP API 供外部脚本调用。
+将当前桌面程序改造为后台服务，开放 HTTP API 供 Node.js SDK 调用。
 
-### 核心功能
-- **RESTful API 设计**
-  ```
-  POST /api/capture          # 捕获当前鼠标下的元素
-  POST /api/validate         # 验证 XPath 表达式
-  GET  /api/element          # 获取元素信息
-  POST /api/window/list      # 列出可用窗口
-  ```
+### 核心 API（4 个接口）
 
-- **后台服务模式**
-  - 最小化到系统托盘
-  - 开机自启动选项
-  - 低资源占用
+#### GET /api/element
+根据 XPath 获取元素信息，包含坐标计算。
 
-- **多语言 SDK**
-  - Python SDK
-  - Node.js SDK
-  - PowerShell 模块
+**请求参数：**
+```json
+{
+  "window": { "title": "微信", "className": "mmui::MainWindow" },
+  "xpath": "//Button[@AutomationId='btnSend']",
+  "options": { "randomRange": 0.55 }
+}
+```
 
-### 技术选型（待评估）
-- Actix-web
-- Axum
-- Warp
+**响应：**
+```json
+{
+  "found": true,
+  "element": {
+    "rect": { "x": 800, "y": 600, "width": 80, "height": 30 },
+    "center": { "x": 840, "y": 615 },
+    "centerRandom": { "x": 838, "y": 612 },
+    "controlType": "Button",
+    "name": "发送",
+    "isEnabled": true
+  }
+}
+```
+
+#### POST /api/window/list
+列出当前所有可用窗口。
+
+**响应：**
+```json
+{
+  "windows": [
+    { "title": "微信", "className": "mmui::MainWindow", "processId": 12345, "processName": "Weixin" },
+    { "title": "Chrome", "className": "Chrome_WidgetWin_1", "processId": 67890, "processName": "chrome" }
+  ]
+}
+```
+
+#### POST /api/mouse/move
+拟人化移动鼠标到目标坐标。
+
+**请求：**
+```json
+{
+  "target": { "x": 840, "y": 615 },
+  "options": {
+    "humanize": true,
+    "trajectory": "bezier",
+    "duration": 600
+  }
+}
+```
+
+#### POST /api/mouse/click
+拟人化点击元素。
+
+**请求：**
+```json
+{
+  "window": { "title": "微信" },
+  "xpath": "//Button[@AutomationId='btnSend']",
+  "options": {
+    "humanize": true,
+    "randomRange": 0.55,
+    "pauseAfter": 800
+  }
+}
+```
+
+### Node.js SDK（优先开发）
+
+```typescript
+import { ElementSelector } from '@element-selector/sdk';
+
+const client = new ElementSelector({ host: 'localhost', port: 8080 });
+
+// 1. 获取元素信息（含坐标）
+const element = await client.getElement({
+  window: { title: "微信" },
+  xpath: "//Button[@AutomationId='btnSend']"
+});
+console.log(element.center);        // { x: 840, y: 615 }
+console.log(element.centerRandom);  // { x: 838, y: 612 }
+
+// 2. 列出窗口
+const windows = await client.listWindows();
+
+// 3. 拟人化移动鼠标
+await client.mouseMove({
+  target: element.centerRandom,
+  humanize: true,
+  trajectory: 'bezier',
+  duration: 600
+});
+
+// 4. 拟人化点击元素
+await client.mouseClick({
+  window: { title: "微信" },
+  xpath: "//Button[@AutomationId='btnSend']",
+  humanize: true,
+  randomRange: 0.55
+});
+```
+
+### 技术选型
+- Actix-web（Rust 后端）
+- TypeScript（Node.js SDK）
 
 ---
 
@@ -112,8 +196,8 @@ API 需支持获取元素在多显示器环境下的精确屏幕坐标。
 
 ## 4. 拟人化鼠标模拟
 
-**状态：** 📋 规划中  
-**优先级：** ⭐⭐ 中
+**状态：** 🔄 设计中（与 HTTP 服务同步开发）  
+**优先级：** ⭐⭐⭐ 高
 
 ### 目标
 实现更自然的鼠标行为，模拟真实用户操作，避免被反自动化检测。
@@ -121,13 +205,13 @@ API 需支持获取元素在多显示器环境下的精确屏幕坐标。
 ### 核心功能
 
 #### 4.1 随机移动轨迹
-- **贝塞尔曲线/样条插值**
-  - 生成平滑的曲线轨迹
-  - 避免直线移动（明显是机器人）
+- **贝塞尔曲线轨迹**
+  - 三次贝塞尔曲线生成平滑轨迹
+  - 控制点随机扰动，模拟人手抖动
 
-- **随机扰动**
-  - 在轨迹上添加微小的随机偏移
-  - 模拟人手抖动
+- **缓动函数**
+  - 启动时加速，到达目标前减速（ease-in-out）
+  - 符合 Fitts's Law 人体工学模型
 
 #### 4.2 智能定位
 - **目标区域随机选择**
@@ -135,61 +219,60 @@ API 需支持获取元素在多显示器环境下的精确屏幕坐标。
   - 避免总是点击元素中心点
 
 - **边界安全**
-  - 确保点击位置不会超出元素边界
-  - 考虑元素的可点击区域（排除 padding 等）
+  - 确保点击位置不超出元素边界
 
 #### 4.3 行为模拟
-- **加速/减速曲线**
-  - 启动时加速，到达目标前减速
-  - 符合 Fitts's Law 人体工学模型
+- **点击停顿**
+  - 点击前/后随机停顿时间（可配置）
 
-- **点击后空闲移动**
-  - 点击完成后，继续模拟随机的鼠标空闲移动
-  - 随机停顿时间（200ms - 2000ms）
+### 坐标计算规则
+```typescript
+// 中心坐标
+center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
 
-- **滚动模拟**
-  - 支持鼠标滚轮操作
-  - 随机滚动速度和距离
-
-### API 设计（示例）
-```python
-# Python SDK 示例
-mouse.click_element(
-    window={"title": "微信"},
-    xpath="//Button[@AutomationId='btnSend']",
-    humanize=True,           # 启用拟人化
-    random_range=0.55,       # 50%-60% 范围
-    trajectory="bezier",     # 贝塞尔曲线轨迹
-    pause_after=1000         # 点击后停顿 1 秒
-)
+// 随机坐标（50%-60% 范围）
+// rangePercent = 0.55 表示在中心 55% 范围内随机
+centerRandom = {
+  x: center.x + random(-width * 0.55 / 2, width * 0.55 / 2),
+  y: center.y + random(-height * 0.55 / 2, height * 0.55 / 2)
+}
 ```
 
 ### 技术实现
-- **Windows API**
-  - `SendInput` - 模拟鼠标输入
-  - `mouse_event` - 传统方式（兼容旧系统）
-
-- **轨迹算法**
-  - 三次贝塞尔曲线
-  - Perlin 噪声（随机扰动）
+- `SendInput` - Windows 鼠标输入模拟
+- 三次贝塞尔曲线算法
 
 ---
 
-## 开发路线图（建议）
+## 开发路线图
 
-### Phase 1: 核心功能增强（当前 - 3 个月）
-1. ✅ 窗口信息可视化展示（已完成）
-2. 🔄 配置脚本优化（进行中）
-3. 📋 复制按钮和脚本生成功能
+### Phase 1: 核心功能增强 ✅ 已完成
+1. ✅ 窗口信息可视化展示
+2. ✅ 窗口选择器与 XPath 分离
+3. ✅ XPath 生成与校验功能
+4. ✅ 层级树可视化
+5. ✅ 属性过滤器编辑
+6. ✅ 标签页切换（元素/窗口元素模式）
+7. ✅ 复制按钮和历史记录
 
-### Phase 2: 服务化改造（3 - 6 个月）
-1. 📋 HTTP 服务架构设计
-2. 📋 RESTful API 实现
-3. 📋 Python SDK 开发
+### Phase 2: HTTP 服务 + Node.js SDK（当前阶段）
+**目标时间：1-2 个月**
 
-### Phase 3: 高级特性（6 - 12 个月）
+1. 🔄 HTTP 服务架构（Actix-web）
+2. 📋 实现 4 个核心 API
+   - GET /api/element
+   - POST /api/window/list
+   - POST /api/mouse/move
+   - POST /api/mouse/click
+3. 📋 Node.js SDK 开发
+4. 📋 拟人化鼠标模块
+   - 贝塞尔曲线轨迹生成
+   - 随机坐标计算
+5. 📋 示例代码与文档
+
+### Phase 3: 高级特性（后续规划）
 1. 📋 多屏支持
-2. 📋 拟人化鼠标模拟
+2. 📋 配置导出功能
 3. 📋 图像识别辅助定位
 
 ---
@@ -198,12 +281,12 @@ mouse.click_element(
 
 > 在此记录团队成员的建议和反馈...
 
-- [ ] 配置脚本的格式选择：YAML / JSON / 自定义 DSL？
-- [ ] HTTP 服务是否需要认证机制？
-- [ ] 拟人化鼠标是否需要录制/回放功能？
-- [ ] 是否支持 Linux/macOS 跨平台？
+- [x] 配置脚本采用窗口+元素分离方案 ✅ 已实现
+- [ ] HTTP 服务认证机制（可选，本地服务可暂不实现）
+- [ ] 是否支持 Linux/macOS 跨平台？（暂不考虑，专注 Windows）
 
 ---
 
-**最后更新：** 2026-04-25  
-**维护人：** AI Assistant
+**最后更新：** 2026-04-28  
+**维护人：** AI Assistant  
+**当前阶段：** Phase 2 - HTTP 服务 + Node.js SDK 开发
