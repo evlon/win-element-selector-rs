@@ -433,7 +433,11 @@ impl XPathOptimizer {
         let parts: Vec<&str> = class_name.split_whitespace().collect();
         for part in &parts {
             if !self.has_dynamic_state(part) && !self.has_random_hash(part) && part.len() >= 3 {
-                return part.to_string();
+                // 进一步提取哈希前的部分
+                let clean = self.extract_before_hash(part);
+                if !clean.is_empty() && clean.len() >= 3 {
+                    return clean;
+                }
             }
         }
         
@@ -441,8 +445,10 @@ impl XPathOptimizer {
         for sep in ["___", "__", "_"] {
             if let Some(pos) = class_name.find(sep) {
                 let prefix = &class_name[..pos];
-                if prefix.len() >= 3 {
-                    return prefix.to_string();
+                // 移除可能的重复词（如 temp-dialogue-btn_temp-dialogue-btn）
+                let clean = self.remove_duplicate_parts(prefix);
+                if !clean.is_empty() && clean.len() >= 3 {
+                    return clean;
                 }
             }
         }
@@ -454,6 +460,36 @@ impl XPathOptimizer {
         } else {
             String::new()
         }
+    }
+    
+    /// 提取哈希分隔符前的部分
+    fn extract_before_hash(&self, part: &str) -> String {
+        for sep in ["___", "__", "_"] {
+            if let Some(pos) = part.find(sep) {
+                return part[..pos].to_string();
+            }
+        }
+        part.to_string()
+    }
+    
+    /// 移除重复的命名部分（如 temp-dialogue-btn_temp-dialogue-btn → temp-dialogue-btn）
+    fn remove_duplicate_parts(&self, prefix: &str) -> String {
+        // 检测并移除重复的 _ 分隔的词
+        let parts: Vec<&str> = prefix.split('_').collect();
+        if parts.len() >= 2 {
+            // 检查是否有重复部分
+            let mut unique_parts: Vec<&str> = Vec::new();
+            for part in &parts {
+                if !unique_parts.contains(part) {
+                    unique_parts.push(part);
+                }
+            }
+            // 如果去重后比原来少，说明有重复
+            if unique_parts.len() < parts.len() {
+                return unique_parts.join("-");
+            }
+        }
+        prefix.to_string()
     }
     
     /// 检测 Name 的有意义前缀长度
@@ -925,5 +961,85 @@ mod tests {
         
         // 应有简化的属性
         assert!(result.summary.simplified_attrs > 0 || result.summary.removed_dynamic_attrs > 0);
+    }
+    
+    // ── 元宝聊天窗口实际案例测试 ──────────────────────────────────────────────────────
+    
+    #[test]
+    fn test_yuanbao_real_xpath_optimization() {
+        let optimizer = XPathOptimizer::new();
+        
+        // 模拟元宝聊天窗口捕获的层级结构
+        // 关键问题节点：最后一个 Group 的 ClassName 含动态状态词和随机哈希
+        let hierarchy = vec![
+            // Chrome 稳定层（Chrome_WidgetWin_1 是稳定框架类名）
+            HierarchyNode::new("Pane", "", "Chrome_WidgetWin_1", "元宝 - 轻松工作 多点生活 | Chat", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "BrowserRootView", "元宝 - 轻松工作 多点生活 | Chat - Web 内容", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "NonClientView", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "EmbeddedBrowserFrameView", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "BrowserView", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "SidebarContentsSplitView", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "View", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "MultiContentsView", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Pane", "", "View", "", 0, ElementRect::default(), 0),
+            // Document 有 AutomationId
+            HierarchyNode::new("Document", "RootWebArea", "", "元宝 - 轻松工作 多点生活 | Chat", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Group", "", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Group", "", "chat_mainPage__wilLn mainPageCtrl chat_mainPageWin__yRJfh", "", 0, ElementRect::default(), 0),
+            // 问题节点：含随机哈希 ___BOp4 和动态状态 t-popup-open
+            HierarchyNode::new(
+                "Group", "", 
+                "temp-dialogue-btn_temp-dialogue-btn___BOp4 winFolder_options__ZJ07f t-popup-open",
+                "新建对话", 
+                1, 
+                ElementRect::default(), 
+                0
+            ),
+        ];
+        
+        let result = optimizer.optimize(&hierarchy);
+        
+        // 打印优化结果
+        println!("\n=== 元宝窗口优化测试 ===");
+        println!("移除动态属性: {}", result.summary.removed_dynamic_attrs);
+        println!("简化属性: {}", result.summary.simplified_attrs);
+        println!("使用锚点: {}", result.summary.used_anchor);
+        if result.summary.used_anchor {
+            println!("锚点描述: {}", result.summary.anchor_description.unwrap_or_default());
+        }
+        
+        // 验证优化效果
+        // 1. 应检测到锚点（Document 有 AutomationId 'RootWebArea'）
+        assert!(result.summary.used_anchor, "应检测到 Document[@AutomationId='RootWebArea'] 作为锚点");
+        
+        // 2. 应有动态属性被移除或简化
+        assert!(result.summary.removed_dynamic_attrs > 0 || result.summary.simplified_attrs > 0,
+            "应有属性被优化");
+        
+        // 3. 检查叶子节点的 ClassName 处理
+        let leaf_node = &result.hierarchy.last().unwrap();
+        let class_filter = leaf_node.filters.iter()
+            .find(|f| f.name == "ClassName")
+            .unwrap();
+        
+        println!("叶子节点 ClassName 状态: enabled={}, operator={}, value='{}'",
+            class_filter.enabled, class_filter.operator.label(), class_filter.value);
+        
+        // ClassName 应被简化为 starts-with 前缀（因为含动态特征）
+        if class_filter.enabled {
+            // 若启用，应使用 starts-with（不能用精确匹配）
+            assert_ne!(class_filter.operator, Operator::Equals,
+                "动态ClassName不应使用精确匹配");
+            // 前缀应不含哈希和状态词
+            assert!(!class_filter.value.contains("___"), "前缀不应含哈希分隔符");
+            assert!(!class_filter.value.contains("t-popup"), "前缀不应含动态状态词");
+        }
+        
+        // 4. 生成优化后的 XPath 片段
+        println!("\n优化后 XPath 片段:");
+        for (i, node) in result.hierarchy.iter().enumerate() {
+            let segment = node.xpath_segment();
+            println!("  [{}] {}", i, segment);
+        }
     }
 }
