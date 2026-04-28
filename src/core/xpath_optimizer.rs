@@ -163,21 +163,88 @@ impl XPathOptimizer {
         
         // Phase 1: 锚点识别
         let anchor = self.find_anchor(hierarchy);
+        let anchor_idx = anchor.as_ref().map(|(idx, _)| *idx);
         
         // Phase 2: 逐节点优化分析
         let optimizations = self.analyze_nodes(hierarchy);
         
-        // Phase 3: 应用优化到 hierarchy
-        let optimized_hierarchy = self.apply_optimizations(hierarchy, &optimizations);
+        // Phase 3: 应用优化到 hierarchy（锚点间接定位：简化为锚点+叶子节点）
+        let optimized_hierarchy = if let Some(anchor_pos) = anchor_idx {
+            self.apply_anchor_based_optimization(hierarchy, anchor_pos, &optimizations)
+        } else {
+            self.apply_optimizations(hierarchy, &optimizations)
+        };
         
         // Phase 4: 生成摘要
         let summary = self.generate_summary(&optimizations, &anchor, hierarchy);
         
         OptimizationResult {
             hierarchy: optimized_hierarchy,
-            anchor_index: anchor.map(|(idx, _)| idx),
+            anchor_index: anchor_idx,
             summary,
         }
+    }
+    
+    /// 锚点间接定位：只保留锚点和叶子节点
+    fn apply_anchor_based_optimization(
+        &self,
+        hierarchy: &[HierarchyNode],
+        anchor_pos: usize,
+        optimizations: &[NodeOptimization],
+    ) -> Vec<HierarchyNode> {
+        let leaf_pos = hierarchy.len() - 1;
+        
+        // 只保留锚点和叶子节点
+        let mut result = Vec::with_capacity(2);
+        
+        // 1. 锚点节点（使用原始属性，确保唯一性）
+        let anchor_node = &hierarchy[anchor_pos];
+        let mut anchor_optimized = anchor_node.clone();
+        
+        // 锚点使用完整属性（AutomationId 优先）
+        for filter in &mut anchor_optimized.filters {
+            if filter.name == "AutomationId" && !anchor_node.automation_id.is_empty() {
+                filter.enabled = true;
+                filter.operator = Operator::Equals;
+                filter.value = anchor_node.automation_id.clone();
+            } else if filter.name == "ClassName" && !anchor_node.class_name.is_empty() {
+                filter.enabled = true;
+                filter.operator = Operator::Equals;
+                filter.value = anchor_node.class_name.clone();
+            } else {
+                filter.enabled = false;  // 简化：只用关键属性
+            }
+        }
+        anchor_optimized.included = true;
+        result.push(anchor_optimized);
+        
+        // 2. 叶子节点（应用优化策略）
+        let leaf_node = &hierarchy[leaf_pos];
+        let leaf_opt = &optimizations[leaf_pos];
+        let mut leaf_optimized = leaf_node.clone();
+        
+        // 应用 ClassName 策略
+        for filter in &mut leaf_optimized.filters {
+            if filter.name == "ClassName" {
+                Self::apply_class_strategy(filter, &leaf_opt.class_strategy);
+                break;
+            }
+        }
+        
+        // 应用 Name 策略
+        if let Some(ref name_strategy) = leaf_opt.name_strategy {
+            for filter in &mut leaf_optimized.filters {
+                if filter.name == "Name" {
+                    Self::apply_name_strategy(filter, name_strategy);
+                    break;
+                }
+            }
+        }
+        
+        leaf_optimized.included = true;
+        result.push(leaf_optimized);
+        
+        result
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -924,11 +991,16 @@ mod tests {
         
         let result = optimizer.optimize(&hierarchy);
         
+        // 锚点优化后，hierarchy 应只有 2 个节点（锚点+叶子）
+        println!("优化后节点数: {}", result.hierarchy.len());
+        assert_eq!(result.hierarchy.len(), 2, "应简化为锚点+叶子节点");
+        
         // 检查优化摘要
         assert!(result.summary.simplified_attrs > 0, "Should have simplified attributes");
+        assert!(result.summary.used_anchor, "应使用锚点定位");
         
-        // 检查叶子节点的 ClassName 被简化为前缀
-        let leaf_opt = &result.hierarchy[2];
+        // 检查叶子节点（优化后是最后一个节点，索引 1）
+        let leaf_opt = result.hierarchy.last().unwrap();
         let class_filter = leaf_opt.filters.iter()
             .find(|f| f.name == "ClassName")
             .unwrap();

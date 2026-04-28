@@ -245,12 +245,16 @@ impl SelectorApp {
             "Window".to_string()
         };
         
-        // Generate element XPath from element hierarchy (nodes after Window)
-        // 跳过 hierarchy[0]（窗口根节点），因为窗口选择器已经单独处理
-        let element_nodes = if self.hierarchy.len() > 1 {
-            &self.hierarchy[1..]
+        // Generate element XPath from element hierarchy
+        // 正常情况：跳过 hierarchy[0]（窗口根节点），因为窗口选择器已经单独处理
+        // 锚点优化后：hierarchy[0] 是锚点节点，不应跳过
+        let (element_nodes, _use_anchor_xpath) = if self.optimization_summary.is_some() && self.hierarchy.len() == 2 {
+            // 锚点优化：hierarchy = [锚点节点, 叶子节点]
+            (&self.hierarchy[..], true)  // 使用全部节点
+        } else if self.hierarchy.len() > 1 {
+            (&self.hierarchy[1..], false)
         } else {
-            &self.hierarchy[0..0]  // empty slice
+            (&self.hierarchy[0..0], false)  // empty slice
         };
         let element_xpath = if self.show_simplified {
             xpath::generate_simplified_elements(element_nodes)
