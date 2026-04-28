@@ -18,6 +18,11 @@ class FluentChain {
         this.humanizeEnabled = false;
         this.humanizeOptions = {};
         this.debugMode = false;
+        // ═══════════════════════════════════════════════════════════════════════════
+        // 重试机制
+        // ═══════════════════════════════════════════════════════════════════════════
+        this.retryCount = 0;
+        this.retryDelay = 0;
         this.client = client;
         this.screenshotManager = new screenshot_1.ScreenshotManager();
     }
@@ -241,6 +246,159 @@ class FluentChain {
         return this;
     }
     // ═══════════════════════════════════════════════════════════════════════════
+    // 断言操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    /**
+     * 断言元素存在
+     */
+    async assertExists(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`assertExists("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (!result.found) {
+            await this.failWithScreenshot(`Assertion failed: element does not exist: ${xpath}`, 'assertExists', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        this.log(`  → assertion passed`);
+        return this;
+    }
+    /**
+     * 断言元素不存在
+     */
+    async assertNotExists(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`assertNotExists("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (result.found) {
+            await this.failWithScreenshot(`Assertion failed: element exists when it should not: ${xpath}`, 'assertNotExists', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        this.log(`  → assertion passed`);
+        return this;
+    }
+    /**
+     * 断言元素文本内容
+     */
+    async assertText(xpath, expectedText) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`assertText("${xpath}", "${expectedText}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (!result.found || !result.element) {
+            await this.failWithScreenshot(`Assertion failed: element not found: ${xpath}`, 'assertText', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        const actualText = result.element.name;
+        if (actualText !== expectedText) {
+            await this.failWithScreenshot(`Assertion failed: text mismatch. Expected "${expectedText}", got "${actualText}"`, 'assertText', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        this.log(`  → assertion passed`);
+        return this;
+    }
+    /**
+     * 断言元素可见
+     */
+    async assertVisible(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`assertVisible("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (!result.found || !result.element) {
+            await this.failWithScreenshot(`Assertion failed: element not found: ${xpath}`, 'assertVisible', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        // 检查可见性（通过 rect 是否有效判断）
+        const elem = result.element;
+        if (elem.rect.width <= 0 || elem.rect.height <= 0) {
+            await this.failWithScreenshot(`Assertion failed: element is not visible: ${xpath}`, 'assertVisible', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        this.log(`  → assertion passed`);
+        return this;
+    }
+    /**
+     * 断言元素可用
+     */
+    async assertEnabled(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`assertEnabled("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (!result.found || !result.element) {
+            await this.failWithScreenshot(`Assertion failed: element not found: ${xpath}`, 'assertEnabled', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        // isEnabled 属性检查
+        if (!result.element.isEnabled) {
+            await this.failWithScreenshot(`Assertion failed: element is not enabled: ${xpath}`, 'assertEnabled', { windowSelector: this.currentWindowSelector, xpath });
+        }
+        this.log(`  → assertion passed`);
+        return this;
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 条件操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    /**
+     * 检查元素是否存在
+     * @returns true 如果元素存在，否则 false
+     */
+    async exists(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`exists("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        this.log(`  → ${result.found ? 'exists' : 'not exists'}`);
+        return result.found;
+    }
+    /**
+     * 尝试查找元素（不失败）
+     * @returns 元素信息如果找到，否则 null
+     */
+    async tryFind(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`tryFind("${xpath}")`);
+        const result = await this.client.getElement({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (result.found && result.element) {
+            this.currentElement = result.element;
+            this.log(`  → found`);
+            return result.element;
+        }
+        this.log(`  → not found (no error)`);
+        return null;
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
     // 查询操作
     // ═══════════════════════════════════════════════════════════════════════════
     /**
@@ -250,6 +408,35 @@ class FluentChain {
         await this.executePrefixActions();
         return this.currentElement;
     }
+    /**
+     * 设置重试机制
+     * @param count 重试次数
+     * @param delayMs 重试间隔 (ms)
+     */
+    retry(count, delayMs = 1000) {
+        this.retryCount = count;
+        this.retryDelay = delayMs;
+        return this;
+    }
+    /**
+     * 带重试的执行
+     */
+    async executeWithRetry(action) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= this.retryCount; attempt++) {
+            try {
+                return await action();
+            }
+            catch (err) {
+                lastError = err;
+                if (attempt < this.retryCount) {
+                    this.log(`  → retry ${attempt + 1}/${this.retryCount} after ${this.retryDelay}ms`);
+                    await new Promise(r => setTimeout(r, this.retryDelay));
+                }
+            }
+        }
+        throw lastError;
+    }
     // ═══════════════════════════════════════════════════════════════════════════
     // 执行
     // ═══════════════════════════════════════════════════════════════════════════
@@ -257,12 +444,20 @@ class FluentChain {
      * 执行整条链
      */
     async run() {
-        await this.executePrefixActions();
-        for (const action of this.actions) {
-            if (action.type === 'window' || action.type === 'find' || action.type === 'humanize') {
-                continue;
+        const executeChain = async () => {
+            await this.executePrefixActions();
+            for (const action of this.actions) {
+                if (action.type === 'window' || action.type === 'find' || action.type === 'humanize') {
+                    continue;
+                }
+                await this.executeAction(action);
             }
-            await this.executeAction(action);
+        };
+        if (this.retryCount > 0) {
+            await this.executeWithRetry(executeChain);
+        }
+        else {
+            await executeChain();
         }
     }
     // ═══════════════════════════════════════════════════════════════════════════

@@ -92,9 +92,51 @@ export declare class FluentChain {
      */
     key(keyName: string): this;
     /**
+     * 断言元素存在
+     */
+    assertExists(xpath: string): Promise<this>;
+    /**
+     * 断言元素不存在
+     */
+    assertNotExists(xpath: string): Promise<this>;
+    /**
+     * 断言元素文本内容
+     */
+    assertText(xpath: string, expectedText: string): Promise<this>;
+    /**
+     * 断言元素可见
+     */
+    assertVisible(xpath: string): Promise<this>;
+    /**
+     * 断言元素可用
+     */
+    assertEnabled(xpath: string): Promise<this>;
+    /**
+     * 检查元素是否存在
+     * @returns true 如果元素存在，否则 false
+     */
+    exists(xpath: string): Promise<boolean>;
+    /**
+     * 尝试查找元素（不失败）
+     * @returns 元素信息如果找到，否则 null
+     */
+    tryFind(xpath: string): Promise<ElementInfo | null>;
+    /**
      * 获取元素信息
      */
     inspect(): Promise<ElementInfo | null>;
+    private retryCount;
+    private retryDelay;
+    /**
+     * 设置重试机制
+     * @param count 重试次数
+     * @param delayMs 重试间隔 (ms)
+     */
+    retry(count: number, delayMs?: number): this;
+    /**
+     * 带重试的执行
+     */
+    private executeWithRetry;
     /**
      * 执行整条链
      */
