@@ -1,4 +1,4 @@
-import { SDKConfig, HealthStatus, WindowInfo, ElementQueryParams, ElementResponse, MoveResult, ClickParams, ClickResult, IdleMotionParams, IdleMotionStatus, StopResult, Point, MoveOptions, TypeOptions, TypeResult } from './types';
+import { SDKConfig, HealthStatus, WindowInfo, ElementQueryParams, ElementResponse, ElementInfo, MoveResult, ClickParams, ClickResult, IdleMotionParams, IdleMotionStatus, StopResult, Point, MoveOptions, TypeOptions, TypeResult } from './types';
 export declare class HttpClient {
     private client;
     constructor(config: SDKConfig);
@@ -28,6 +28,17 @@ export declare class HttpClient {
      */
     focusElement(windowSelector: string, xpath: string): Promise<{
         success: boolean;
+        error?: string;
+    }>;
+    /**
+     * 获取所有匹配元素
+     * @param params 查询参数
+     * @returns 所有匹配的元素列表
+     */
+    getAllElements(params: ElementQueryParams): Promise<{
+        found: boolean;
+        elements: ElementInfo[];
+        total: number;
         error?: string;
     }>;
     handleError(error: unknown): Error;

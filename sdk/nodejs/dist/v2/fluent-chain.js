@@ -65,6 +65,61 @@ class FluentChain {
         return this;
     }
     // ═══════════════════════════════════════════════════════════════════════════
+    // 多元素查找和提取
+    // ═══════════════════════════════════════════════════════════════════════════
+    /**
+     * 查找所有匹配元素（返回数组，不执行后续操作）
+     */
+    async findAll(xpath) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`findAll("${xpath}")`);
+        const result = await this.client.getAllElements({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: types_1.DEFAULTS.click.randomRange,
+        });
+        if (!result.found) {
+            this.log(`  → not found`);
+            return [];
+        }
+        this.log(`  → found ${result.total} elements`);
+        return result.elements;
+    }
+    /**
+     * 提取元素属性数组
+     * @param attrs 要提取的属性列表 ['name', 'controlType', 'rect']
+     */
+    async extract(xpath, attrs) {
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => {
+            const result = {};
+            for (const attr of attrs) {
+                if (attr in elem) {
+                    result[attr] = elem[attr];
+                }
+            }
+            return result;
+        });
+    }
+    /**
+     * 提取元素文本列表
+     */
+    async extractList(xpath) {
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => elem.name);
+    }
+    /**
+     * 提取表格数据
+     * TODO: 需要更复杂的逻辑处理表格结构
+     */
+    async extractTable(xpath) {
+        // 简化实现：假设每行是一个元素
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => [elem.name]);
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
     // 点击操作
     // ═══════════════════════════════════════════════════════════════════════════
     /**
@@ -186,6 +241,7 @@ class FluentChain {
         });
         if (!result.found || !result.element) {
             await this.failWithScreenshot(`Element not found: ${xpath}`, 'find', { windowSelector: this.currentWindowSelector, xpath });
+            return; // process.exit 已调用，但 TypeScript 需要明确的 return
         }
         // result.element 已检查不为 null
         const element = result.element;
@@ -229,8 +285,10 @@ class FluentChain {
             trajectory: types_1.DEFAULTS.move.trajectory,
             duration,
         });
-        if (!result.success)
+        if (!result.success) {
             await this.failWithScreenshot(`${modeText} failed`, modeText);
+            return;
+        }
         this.log(`  → clicked at (${target.x}, ${target.y}), ${result.durationMs}ms`);
     }
     async executeType(text) {

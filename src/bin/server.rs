@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/window/focus-element", web::post().to(window::focus_element))
             // 元素查找
             .route("/api/element", web::get().to(element::get_element))
+            .route("/api/element/all", web::get().to(element::get_all_elements))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

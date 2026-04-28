@@ -94,7 +94,7 @@ fn default_random_range() -> f32 {
 }
 
 /// 元素信息（API 响应）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementInfo {
     pub rect: Rect,
     pub center: Point,

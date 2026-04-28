@@ -31,6 +31,15 @@ pub fn validate_selector_and_xpath_detailed(
     uia::validate_selector_and_xpath_detailed(window_selector, element_xpath)
 }
 
+/// Find all matching elements with detailed info
+pub fn find_all_elements_detailed(
+    window_selector: &str,
+    element_xpath: &str,
+    random_range: f32,
+) -> Vec<crate::api::types::ElementInfo> {
+    uia::find_all_elements_detailed(window_selector, element_xpath, random_range)
+}
+
 /// Enumerate all top-level windows on desktop.
 pub fn list_windows() -> Vec<WindowInfo> {
     uia::enumerate_windows()

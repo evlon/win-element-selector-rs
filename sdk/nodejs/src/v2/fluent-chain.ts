@@ -96,6 +96,70 @@ export class FluentChain {
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
+    // 多元素查找和提取
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * 查找所有匹配元素（返回数组，不执行后续操作）
+     */
+    async findAll(xpath: string): Promise<ElementInfo[]> {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        
+        this.log(`findAll("${xpath}")`);
+        
+        const result = await this.client.getAllElements({
+            windowSelector: this.currentWindowSelector,
+            xpath,
+            randomRange: DEFAULTS.click.randomRange,
+        });
+        
+        if (!result.found) {
+            this.log(`  → not found`);
+            return [];
+        }
+        
+        this.log(`  → found ${result.total} elements`);
+        return result.elements;
+    }
+    
+    /**
+     * 提取元素属性数组
+     * @param attrs 要提取的属性列表 ['name', 'controlType', 'rect']
+     */
+    async extract(xpath: string, attrs: string[]): Promise<Record<string, unknown>[]> {
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => {
+            const result: Record<string, unknown> = {};
+            for (const attr of attrs) {
+                if (attr in elem) {
+                    result[attr] = elem[attr as keyof ElementInfo];
+                }
+            }
+            return result;
+        });
+    }
+    
+    /**
+     * 提取元素文本列表
+     */
+    async extractList(xpath: string): Promise<string[]> {
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => elem.name);
+    }
+    
+    /**
+     * 提取表格数据
+     * TODO: 需要更复杂的逻辑处理表格结构
+     */
+    async extractTable(xpath: string): Promise<string[][]> {
+        // 简化实现：假设每行是一个元素
+        const elements = await this.findAll(xpath);
+        return elements.map(elem => [elem.name]);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
     // 点击操作
     // ═══════════════════════════════════════════════════════════════════════════
     

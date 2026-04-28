@@ -4,9 +4,26 @@
 
 use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 
 use super::types::{ElementQuery, ElementResponse, ElementInfo, Rect, Point};
 use super::super::model::ValidationResult;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 多元素查找响应类型
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AllElementsResponse {
+    /// 是否找到元素
+    pub found: bool,
+    /// 元素列表
+    pub elements: Vec<ElementInfo>,
+    /// 总数量
+    pub total: usize,
+    /// 错误信息
+    pub error: Option<String>,
+}
 
 /// GET /api/element
 /// 根据窗口选择器和 XPath 获取元素信息及坐标
@@ -125,4 +142,66 @@ fn calculate_random_center(rect: &Rect, range_percent: f32) -> Point {
     let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
     
     Point::new(center.x + offset_x, center.y + offset_y)
+}
+
+/// GET /api/element/all
+/// 根据窗口选择器和 XPath 获取所有匹配元素
+pub async fn get_all_elements(query: web::Query<ElementQuery>) -> impl Responder {
+    info!(
+        "API: /api/element/all window_selector='{}' xpath='{}' random_range={}",
+        query.window_selector, query.xpath, query.random_range
+    );
+    
+    let window_selector = query.window_selector.clone();
+    let xpath = query.xpath.clone();
+    let random_range = query.random_range;
+    
+    let result = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+        }
+        
+        super::super::capture::find_all_elements_detailed(
+            &window_selector,
+            &xpath,
+            random_range,
+        )
+    })
+    .await;
+    
+    match result {
+        Ok(elements) => {
+            let total = elements.len();
+            if total > 0 {
+                info!("Found {} elements", total);
+                HttpResponse::Ok().json(AllElementsResponse {
+                    found: true,
+                    elements,
+                    total,
+                    error: None,
+                })
+            } else {
+                warn!("No elements found");
+                HttpResponse::Ok().json(AllElementsResponse {
+                    found: false,
+                    elements: vec![],
+                    total: 0,
+                    error: Some("未找到匹配元素".to_string()),
+                })
+            }
+        }
+        Err(e) => {
+            warn!("Spawn blocking error: {}", e);
+            HttpResponse::InternalServerError().json(AllElementsResponse {
+                found: false,
+                elements: vec![],
+                total: 0,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+    }
 }

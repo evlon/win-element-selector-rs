@@ -6,6 +6,7 @@ import {
     WindowInfo,
     ElementQueryParams,
     ElementResponse,
+    ElementInfo,
     MoveParams,
     MoveResult,
     ClickParams,
@@ -135,6 +136,22 @@ export class HttpClient {
         const response = await this.client.post<{ success: boolean; error?: string }>('/api/window/focus-element', {
             windowSelector,
             xpath,
+        });
+        return response.data;
+    }
+    
+    /**
+     * 获取所有匹配元素
+     * @param params 查询参数
+     * @returns 所有匹配的元素列表
+     */
+    async getAllElements(params: ElementQueryParams): Promise<{ found: boolean; elements: ElementInfo[]; total: number; error?: string }> {
+        const response = await this.client.get<{ found: boolean; elements: ElementInfo[]; total: number; error?: string }>('/api/element/all', {
+            params: {
+                windowSelector: params.windowSelector,
+                xpath: params.xpath,
+                randomRange: params.randomRange ?? DEFAULTS.click.randomRange,
+            },
         });
         return response.data;
     }

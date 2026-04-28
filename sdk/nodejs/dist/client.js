@@ -112,6 +112,21 @@ class HttpClient {
         });
         return response.data;
     }
+    /**
+     * 获取所有匹配元素
+     * @param params 查询参数
+     * @returns 所有匹配的元素列表
+     */
+    async getAllElements(params) {
+        const response = await this.client.get('/api/element/all', {
+            params: {
+                windowSelector: params.windowSelector,
+                xpath: params.xpath,
+                randomRange: params.randomRange ?? types_1.DEFAULTS.click.randomRange,
+            },
+        });
+        return response.data;
+    }
     handleError(error) {
         if (axios_1.default.isAxiosError(error)) {
             const axiosError = error;

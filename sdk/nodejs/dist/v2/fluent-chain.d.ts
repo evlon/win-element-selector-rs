@@ -30,6 +30,24 @@ export declare class FluentChain {
      */
     find(xpath: string): this;
     /**
+     * 查找所有匹配元素（返回数组，不执行后续操作）
+     */
+    findAll(xpath: string): Promise<ElementInfo[]>;
+    /**
+     * 提取元素属性数组
+     * @param attrs 要提取的属性列表 ['name', 'controlType', 'rect']
+     */
+    extract(xpath: string, attrs: string[]): Promise<Record<string, unknown>[]>;
+    /**
+     * 提取元素文本列表
+     */
+    extractList(xpath: string): Promise<string[]>;
+    /**
+     * 提取表格数据
+     * TODO: 需要更复杂的逻辑处理表格结构
+     */
+    extractTable(xpath: string): Promise<string[][]>;
+    /**
      * 点击当前元素
      */
     click(): this;

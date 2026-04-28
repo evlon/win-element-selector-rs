@@ -934,6 +934,63 @@ pub mod windows_impl {
             _             => false,
         }
     }
+
+    /// Find all matching elements and return their detailed info
+    /// Used for findAll API
+    pub fn find_all_elements_detailed(
+        window_selector: &str,
+        element_xpath: &str,
+        random_range: f32,
+    ) -> Vec<crate::api::types::ElementInfo> {
+        use crate::api::types::{ElementInfo, Rect, Point};
+        use rand::Rng;
+        
+        let auto = get_automation().ok().unwrap();
+        let window_element = find_window_by_selector(&auto, window_selector);
+        
+        if window_element.is_none() {
+            return vec![];
+        }
+        
+        let window = window_element.unwrap();
+        let (elements, _) = match find_by_xpath_detailed(&auto, &window, element_xpath) {
+            Ok(result) => result,
+            Err(_) => return vec![],
+        };
+        
+        let mut rng = rand::thread_rng();
+        
+        elements.iter().filter_map(|elem| {
+            let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
+            if rect.is_none() {
+                return None;
+            }
+            let r = rect.unwrap();
+            let api_rect = Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            };
+            let center = api_rect.center();
+            
+            // Calculate random center
+            let half_range_w = api_rect.width as f32 * random_range / 2.0;
+            let half_range_h = api_rect.height as f32 * random_range / 2.0;
+            let offset_x = rng.gen_range(-half_range_w..half_range_w) as i32;
+            let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
+            let center_random = Point::new(center.x + offset_x, center.y + offset_y);
+            
+            Some(ElementInfo {
+                rect: api_rect,
+                center,
+                center_random,
+                control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                name: get_bstr(unsafe { elem.CurrentName() }),
+                is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+            })
+        }).collect()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -984,6 +1041,24 @@ pub mod mock_impl {
             ],
             total_duration_ms: 50,
         }
+    }
+
+    pub fn find_all_elements_detailed(
+        _window_selector: &str,
+        _element_xpath: &str,
+        _random_range: f32,
+    ) -> Vec<crate::api::types::ElementInfo> {
+        use crate::api::types::{ElementInfo, Rect, Point};
+        vec![
+            ElementInfo {
+                rect: Rect { x: 200, y: 300, width: 120, height: 30 },
+                center: Point { x: 260, y: 315 },
+                center_random: Point { x: 262, y: 317 },
+                control_type: "Button".to_string(),
+                name: "Mock Button".to_string(),
+                is_enabled: true,
+            }
+        ]
     }
 }
 
