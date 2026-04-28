@@ -17,30 +17,11 @@ async function main() {
         console.log('服务状态:', health);
         console.log();
 
-        // 2. 获取窗口列表
-        console.log('=== 2. 窗口列表 ===');
-        const windows = await sdk.listWindows();
-        console.log(`找到 ${windows.length} 个窗口`);
-        windows.slice(0, 5).forEach(w => {
-            console.log(`  - ${w.title} (${w.processName})`);
-        });
-        console.log();
-
-        // 3. 查找记事本窗口
-        // **重要**: 使用精确的窗口选择器，包含 title + className + processName
-        console.log('=== 3. 激活窗口 ===');
-        const notepadWindow = windows.find(w => w.processName === 'Notepad');
-        
-        if (!notepadWindow) {
-            console.log('请先打开一个记事本窗口！');
-            return;
-        }
-        
-        // 构建精确的窗口选择器
+           // 构建精确的窗口选择器
         const windowSelector = {
-            title: notepadWindow.title,
-            className: notepadWindow.className,
-            processName: notepadWindow.processName,
+            title: "Untitled - Notepad",
+            className: "Notepad",
+            processName:"Notepad",
         };        
         console.log('窗口选择器:', windowSelector);
         
@@ -52,7 +33,7 @@ async function main() {
         // 4. 查找元素
         console.log('=== 4. 查找元素 ===');
         const element = await sdk.getElement({
-            windowSelector: `Window[@Name='${notepadWindow.title}' and @ClassName='${notepadWindow.className}']`,
+            windowSelector: `/Window[@Name='Untitled - Notepad' and @ClassName='Notepad']`,
             xpath: '//Document',  // 记事本的编辑区域
             randomRange: 0.55
         });
