@@ -14,6 +14,7 @@ use element_selector::core::model::{
     ValidationResult, WindowInfo,
 };
 use element_selector::core::xpath;
+use element_selector::core::XPathOptimizer;
 use element_selector::capture;
 
 // 引用同目录的 GUI 模块
@@ -103,6 +104,9 @@ pub struct SelectorApp {
     left_panel_width: f32,
     /// True while the user is dragging the divider.
     divider_dragging: bool,
+    
+    /// 优化结果摘要（用于 UI 显示）
+    optimization_summary: Option<element_selector::core::OptimizationSummary>,
 }
 
 impl SelectorApp {
@@ -180,6 +184,7 @@ impl SelectorApp {
             node_expanded: vec![true; n],
             left_panel_width: 300.0,
             divider_dragging: false,
+            optimization_summary: None,
         }
     }
 
@@ -297,6 +302,45 @@ impl SelectorApp {
         self.history.truncate(20);
     }
 
+    /// 执行智能优化
+    fn do_optimize(&mut self) {
+        if self.hierarchy.is_empty() {
+            self.status_msg = "没有元素可优化".to_string();
+            return;
+        }
+        
+        // 1. 执行优化
+        let optimizer = XPathOptimizer::new();
+        let result = optimizer.optimize(&self.hierarchy);
+        
+        // 2. 更新 hierarchy
+        self.hierarchy = result.hierarchy;
+        self.optimization_summary = Some(result.summary.clone());
+        
+        // 3. 重新生成 XPath
+        self.custom_xpath = false;
+        self.rebuild_xpath();
+        
+        // 4. 更新状态消息
+        let summary = &result.summary;
+        self.status_msg = format!(
+            "智能优化完成：移除 {} 个动态属性，简化 {} 个属性{}",
+            summary.removed_dynamic_attrs,
+            summary.simplified_attrs,
+            if summary.used_anchor {
+                format!("，使用锚点 {}", summary.anchor_description.as_ref().unwrap_or(&String::new()))
+            } else {
+                String::new()
+            }
+        );
+        
+        // 5. 自动验证
+        self.do_validate();
+        
+        // 6. 保存
+        self.save_to_file();
+    }
+
     // ── Actions ───────────────────────────────────────────────────────────────
 
     fn start_capture(&mut self) {
@@ -364,6 +408,7 @@ impl SelectorApp {
         self.capture_state = CaptureState::Idle;
         self.custom_xpath  = false;
         self.validation    = ValidationResult::Idle;
+        self.optimization_summary = None;
         self.rebuild_xpath();
         self.pending_save  = true;
         self.save_to_file();
@@ -544,11 +589,29 @@ impl SelectorApp {
                 ui.output_mut(|o| o.copied_text = self.element_xpath.clone());
                 self.status_msg = "元素 XPath 已复制到剪贴板".to_string();
             }
+            if ui.small_button("智能优化").on_hover_text("自动优化XPath，移除动态属性，使用锚点定位").clicked() {
+                self.do_optimize();
+            }
             if self.custom_xpath {
                 if ui.small_button("重置").on_hover_text("回到自动生成的 XPath").clicked() {
                     self.custom_xpath = false;
+                    self.optimization_summary = None;
                     self.rebuild_xpath();
                 }
+            }
+            // 显示优化摘要
+            if let Some(ref summary) = self.optimization_summary {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "优化：移除 {} / 简化 {} {}",
+                        summary.removed_dynamic_attrs,
+                        summary.simplified_attrs,
+                        if summary.used_anchor { "锚点" } else { "" }
+                    ))
+                    .color(C_OK)
+                    .size(10.0)
+                );
             }
             if let Some(err) = &self.xpath_error {
                 ui.add_space(4.0);
