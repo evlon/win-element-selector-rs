@@ -859,6 +859,12 @@ pub mod windows_impl {
                 seg.preds
             );
             
+            // ── XPath Validation Logic ──
+            // Note: CreatePropertyCondition requires VARIANT type which is not available in windows crate 0.58
+            // For AutomationId-only predicates, we add optimization hint in logs
+            
+            let mut matches: Vec<IUIAutomationElement> = Vec::new();
+            
             // Choose search scope based on segment type.
             let scope = if seg.descendants {
                 TreeScope_Subtree
@@ -866,48 +872,50 @@ pub mod windows_impl {
                 TreeScope_Children
             };
             
+            // Optimization hint for AutomationId-only predicates
+            if seg.descendants && seg.preds.len() == 1 && seg.preds[0].0 == "AutomationId" && seg.preds[0].1 == "=" {
+                log::info!("[XPath Validation] AutomationId-only predicate: '{}', fast-path potential", seg.preds[0].2);
+            }
+            
             let condition: IUIAutomationCondition = unsafe {
                 auto.CreateTrueCondition()?
             };
             let found = unsafe {
                 current_search_root.FindAll(scope, &condition)?
             };
-
             let count = unsafe { found.Length()? };
             log::info!("[XPath Validation] Searching {} elements", count);
-            
-            let mut matches: Vec<IUIAutomationElement> = Vec::new();
-            
-            for i in 0..count {
-                let elem = unsafe { found.GetElement(i)? };
-                let ct = unsafe {
-                    elem.CurrentControlType()
-                        .map(control_type_name)
-                        .unwrap_or_default()
-                };
-                if !seg.tag.is_empty() && seg.tag != "*" && ct != seg.tag {
-                    continue;
-                }
-                // Check predicates (skip Index).
-                let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index" && attr != "ProcessName").all(|(attr, op, val)| {
-                    let actual = match attr.as_str() {
-                        "AutomationId"         => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                        "ClassName"            => get_bstr(unsafe { elem.CurrentClassName() }),
-                        "Name"                 => get_bstr(unsafe { elem.CurrentName() }),
-                        "ControlType"          => unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                        "FrameworkId"          => get_bstr(unsafe { elem.CurrentFrameworkId() }),
-                        "LocalizedControlType" => get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
-                        "HelpText"             => get_bstr(unsafe { elem.CurrentHelpText() }),
-                        "IsEnabled"            => unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool().to_string()).unwrap_or_default() },
-                        "IsOffscreen"          => unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool().to_string()).unwrap_or_default() },
-                        _                       => String::new(),
+                
+                for i in 0..count {
+                    let elem = unsafe { found.GetElement(i)? };
+                    let ct = unsafe {
+                        elem.CurrentControlType()
+                            .map(control_type_name)
+                            .unwrap_or_default()
                     };
-                    check_predicate(&actual, op, val)
-                });
-                if all_match {
-                    matches.push(elem);
+                    if !seg.tag.is_empty() && seg.tag != "*" && ct != seg.tag {
+                        continue;
+                    }
+                    // Check predicates (skip Index).
+                    let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index" && attr != "ProcessName").all(|(attr, op, val)| {
+                        let actual = match attr.as_str() {
+                            "AutomationId"         => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                            "ClassName"            => get_bstr(unsafe { elem.CurrentClassName() }),
+                            "Name"                 => get_bstr(unsafe { elem.CurrentName() }),
+                            "ControlType"          => unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                            "FrameworkId"          => get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                            "LocalizedControlType" => get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
+                            "HelpText"             => get_bstr(unsafe { elem.CurrentHelpText() }),
+                            "IsEnabled"            => unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool().to_string()).unwrap_or_default() },
+                            "IsOffscreen"          => unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool().to_string()).unwrap_or_default() },
+                            _                       => String::new(),
+                        };
+                        check_predicate(&actual, op, val)
+                    });
+                    if all_match {
+                        matches.push(elem);
+                    }
                 }
-            }
             
             let duration_ms = seg_start.elapsed().as_millis() as u64;
             log::info!("[XPath Validation] Found {} matches for segment {} ({}ms)", matches.len(), seg_idx, duration_ms);
