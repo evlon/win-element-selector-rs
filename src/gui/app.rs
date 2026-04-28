@@ -305,21 +305,51 @@ impl SelectorApp {
     /// 执行智能优化
     fn do_optimize(&mut self) {
         if self.hierarchy.is_empty() {
+            info!("[智能优化] hierarchy 为空，无法优化");
             self.status_msg = "没有元素可优化".to_string();
             return;
+        }
+        
+        info!("[智能优化] 开始优化，节点数: {}", self.hierarchy.len());
+        
+        // 打印优化前的状态
+        info!("[智能优化] 优化前 XPath: {}", self.element_xpath);
+        for (i, node) in self.hierarchy.iter().enumerate() {
+            info!("[智能优化] 优化前节点[{}] {} filters:", i, node.control_type);
+            for f in &node.filters {
+                if f.enabled {
+                    info!("  - {}: {} {}", f.name, f.operator.label(), f.value);
+                }
+            }
         }
         
         // 1. 执行优化
         let optimizer = XPathOptimizer::new();
         let result = optimizer.optimize(&self.hierarchy);
         
+        info!("[智能优化] 优化完成，移除 {} 个动态属性，简化 {} 个属性",
+            result.summary.removed_dynamic_attrs,
+            result.summary.simplified_attrs);
+        if result.summary.used_anchor {
+            info!("[智能优化] 使用锚点: {}", result.summary.anchor_description.clone().unwrap_or_default());
+        }
+        
         // 2. 更新 hierarchy
         self.hierarchy = result.hierarchy;
         self.optimization_summary = Some(result.summary.clone());
         
+        // 打印优化后的状态
+        info!("[智能优化] 优化后节点状态:");
+        for (i, node) in self.hierarchy.iter().enumerate() {
+            let segment = node.xpath_segment();
+            info!("[智能优化] 优化后节点[{}] {}", i, segment);
+        }
+        
         // 3. 重新生成 XPath
         self.custom_xpath = false;
         self.rebuild_xpath();
+        
+        info!("[智能优化] 优化后 XPath: {}", self.element_xpath);
         
         // 4. 更新状态消息
         let summary = &result.summary;
@@ -334,11 +364,15 @@ impl SelectorApp {
             }
         );
         
+        info!("[智能优化] 状态消息: {}", self.status_msg);
+        
         // 5. 自动验证
+        info!("[智能优化] 开始验证...");
         self.do_validate();
         
         // 6. 保存
         self.save_to_file();
+        info!("[智能优化] 已保存到 last_capture.json");
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
