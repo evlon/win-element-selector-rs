@@ -1,9 +1,8 @@
 // sdk/nodejs/src/v2/__tests__/fluent-chain.test.ts
 // FluentChain 单元测试
 
-import { FluentChain } from '../fluent-chain';
+import { FluentChain, ElementInfo } from '../fluent-chain';
 import { HttpClient } from '../../client';
-import { ElementInfo } from '../../types';
 
 // Mock HttpClient
 jest.mock('../../client');
