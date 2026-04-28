@@ -8,6 +8,12 @@ import { ScreenshotManager } from './screenshot';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// 性能统计结果
+export interface ProfileStats {
+    totalTime: number;
+    steps: { step: string; time: number; xpath?: string }[];
+}
+
 // 使用 types.ts 中定义的 ElementInfo
 export { ElementInfo } from '../types';
 
@@ -39,6 +45,9 @@ export class FluentChain {
     private humanizeEnabled: boolean = false;
     private humanizeOptions: { speed?: 'slow' | 'normal' | 'fast' } = {};
     private debugMode: boolean = false;
+    private profileEnabled: boolean = false;
+    private profileSteps: { step: string; time: number; xpath?: string }[] = [];
+    private profileStartTime: number = 0;
     
     constructor(client: HttpClient) {
         this.client = client;
@@ -64,6 +73,15 @@ export class FluentChain {
      */
     debug(): this {
         this.debugMode = true;
+        return this;
+    }
+    
+    /**
+     * 开启性能监控
+     */
+    profile(): this {
+        this.profileEnabled = true;
+        this.profileSteps = [];
         return this;
     }
     
@@ -539,6 +557,115 @@ export class FluentChain {
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
+    // 截图操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * 截取全屏
+     * @param outputPath 输出路径
+     */
+    async screenshot(outputPath?: string): Promise<string> {
+        this.log(`screenshot()`);
+        const path = await this.screenshotManager.capture(outputPath ?? `screenshot-${Date.now()}.png`);
+        this.log(`  → saved: ${path}`);
+        return path;
+    }
+    
+    /**
+     * 截取当前元素
+     * @param outputPath 输出路径
+     */
+    async screenshotElement(outputPath?: string): Promise<string> {
+        if (!this.currentElement) {
+            throw new Error('必须先调用 find() 找到元素');
+        }
+        
+        this.log(`screenshotElement()`);
+        // 截取元素区域 - 当前实现截取全屏
+        const path = await this.screenshotManager.capture(outputPath ?? `element-${Date.now()}.png`);
+        this.log(`  → saved: ${path}`);
+        return path;
+    }
+    
+    /**
+     * 自动命名截图
+     */
+    async screenshotAuto(): Promise<string> {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        return this.screenshot(`screenshots/${timestamp}.png`);
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 空闲移动操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    private idleRunning: boolean = false;
+    
+    /**
+     * 启动空闲移动
+     * @param options 空闲移动参数
+     */
+    async idle(options: { xpath: string; speed?: 'slow' | 'normal' | 'fast' }): Promise<this> {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        
+        this.log(`idle(xpath="${options.xpath}", speed=${options.speed ?? 'normal'})`);
+        
+        // 解析 windowSelector 为 WindowSelector 对象
+        const windowSelector: WindowSelector = this.parseWindowSelector(this.currentWindowSelector);
+        
+        await this.client.startIdleMotion({
+            window: windowSelector,
+            xpath: options.xpath,
+            speed: options.speed ?? 'normal',
+        });
+        
+        this.idleRunning = true;
+        this.log(`  → idle motion started`);
+        return this;
+    }
+    
+    /**
+     * 停止空闲移动
+     */
+    async stopIdle(): Promise<this> {
+        if (!this.idleRunning) {
+            this.log(`stopIdle() - not running, skipped`);
+            return this;
+        }
+        
+        this.log(`stopIdle()`);
+        const result = await this.client.stopIdleMotion();
+        this.idleRunning = false;
+        this.log(`  → idle motion stopped, duration ${result.durationMs}ms`);
+        return this;
+    }
+    
+    /**
+     * 解析 windowSelector 字符串为 WindowSelector 对象
+     */
+    private parseWindowSelector(selector: string): WindowSelector {
+        // 简单实现：假设格式为 "title:xxx className:xxx processName:xxx"
+        const parts = selector.split(' ').filter(p => p.includes(':'));
+        const result: WindowSelector = {};
+        
+        for (const part of parts) {
+            const [key, value] = part.split(':');
+            if (key === 'title') result.title = value;
+            else if (key === 'className') result.className = value;
+            else if (key === 'processName') result.processName = value;
+        }
+        
+        // 如果没有解析出任何属性，假设是 title
+        if (!result.title && !result.className && !result.processName) {
+            result.title = selector;
+        }
+        
+        return result;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
     // 查询操作
     // ═══════════════════════════════════════════════════════════════════════════
     
@@ -595,8 +722,12 @@ export class FluentChain {
     
     /**
      * 执行整条链
+     * @returns 如果开启 profile，返回性能统计；否则返回 void
      */
-    async run(): Promise<void> {
+    async run(): Promise<ProfileStats | void> {
+        this.profileStartTime = Date.now();
+        this.profileSteps = [];
+        
         const executeChain = async () => {
             await this.executePrefixActions();
             
@@ -604,7 +735,17 @@ export class FluentChain {
                 if (action.type === 'window' || action.type === 'find' || action.type === 'humanize') {
                     continue;
                 }
+                
+                const stepStart = Date.now();
                 await this.executeAction(action);
+                
+                if (this.profileEnabled) {
+                    this.profileSteps.push({
+                        step: action.type,
+                        time: Date.now() - stepStart,
+                        xpath: action.xpath,
+                    });
+                }
             }
         };        
         
@@ -612,6 +753,13 @@ export class FluentChain {
             await this.executeWithRetry(executeChain);
         } else {
             await executeChain();
+        }
+        
+        if (this.profileEnabled) {
+            return {
+                totalTime: Date.now() - this.profileStartTime,
+                steps: this.profileSteps,
+            };        
         }
     }
     

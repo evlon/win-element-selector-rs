@@ -18,6 +18,13 @@ class FluentChain {
         this.humanizeEnabled = false;
         this.humanizeOptions = {};
         this.debugMode = false;
+        this.profileEnabled = false;
+        this.profileSteps = [];
+        this.profileStartTime = 0;
+        // ═══════════════════════════════════════════════════════════════════════════
+        // 空闲移动操作
+        // ═══════════════════════════════════════════════════════════════════════════
+        this.idleRunning = false;
         // ═══════════════════════════════════════════════════════════════════════════
         // 重试机制
         // ═══════════════════════════════════════════════════════════════════════════
@@ -43,6 +50,14 @@ class FluentChain {
      */
     debug() {
         this.debugMode = true;
+        return this;
+    }
+    /**
+     * 开启性能监控
+     */
+    profile() {
+        this.profileEnabled = true;
+        this.profileSteps = [];
         return this;
     }
     // ═══════════════════════════════════════════════════════════════════════════
@@ -399,6 +414,96 @@ class FluentChain {
         return null;
     }
     // ═══════════════════════════════════════════════════════════════════════════
+    // 截图操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    /**
+     * 截取全屏
+     * @param outputPath 输出路径
+     */
+    async screenshot(outputPath) {
+        this.log(`screenshot()`);
+        const path = await this.screenshotManager.capture(outputPath ?? `screenshot-${Date.now()}.png`);
+        this.log(`  → saved: ${path}`);
+        return path;
+    }
+    /**
+     * 截取当前元素
+     * @param outputPath 输出路径
+     */
+    async screenshotElement(outputPath) {
+        if (!this.currentElement) {
+            throw new Error('必须先调用 find() 找到元素');
+        }
+        this.log(`screenshotElement()`);
+        // 截取元素区域 - 当前实现截取全屏
+        const path = await this.screenshotManager.capture(outputPath ?? `element-${Date.now()}.png`);
+        this.log(`  → saved: ${path}`);
+        return path;
+    }
+    /**
+     * 自动命名截图
+     */
+    async screenshotAuto() {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        return this.screenshot(`screenshots/${timestamp}.png`);
+    }
+    /**
+     * 启动空闲移动
+     * @param options 空闲移动参数
+     */
+    async idle(options) {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        this.log(`idle(xpath="${options.xpath}", speed=${options.speed ?? 'normal'})`);
+        // 解析 windowSelector 为 WindowSelector 对象
+        const windowSelector = this.parseWindowSelector(this.currentWindowSelector);
+        await this.client.startIdleMotion({
+            window: windowSelector,
+            xpath: options.xpath,
+            speed: options.speed ?? 'normal',
+        });
+        this.idleRunning = true;
+        this.log(`  → idle motion started`);
+        return this;
+    }
+    /**
+     * 停止空闲移动
+     */
+    async stopIdle() {
+        if (!this.idleRunning) {
+            this.log(`stopIdle() - not running, skipped`);
+            return this;
+        }
+        this.log(`stopIdle()`);
+        const result = await this.client.stopIdleMotion();
+        this.idleRunning = false;
+        this.log(`  → idle motion stopped, duration ${result.durationMs}ms`);
+        return this;
+    }
+    /**
+     * 解析 windowSelector 字符串为 WindowSelector 对象
+     */
+    parseWindowSelector(selector) {
+        // 简单实现：假设格式为 "title:xxx className:xxx processName:xxx"
+        const parts = selector.split(' ').filter(p => p.includes(':'));
+        const result = {};
+        for (const part of parts) {
+            const [key, value] = part.split(':');
+            if (key === 'title')
+                result.title = value;
+            else if (key === 'className')
+                result.className = value;
+            else if (key === 'processName')
+                result.processName = value;
+        }
+        // 如果没有解析出任何属性，假设是 title
+        if (!result.title && !result.className && !result.processName) {
+            result.title = selector;
+        }
+        return result;
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
     // 查询操作
     // ═══════════════════════════════════════════════════════════════════════════
     /**
@@ -442,15 +547,26 @@ class FluentChain {
     // ═══════════════════════════════════════════════════════════════════════════
     /**
      * 执行整条链
+     * @returns 如果开启 profile，返回性能统计；否则返回 void
      */
     async run() {
+        this.profileStartTime = Date.now();
+        this.profileSteps = [];
         const executeChain = async () => {
             await this.executePrefixActions();
             for (const action of this.actions) {
                 if (action.type === 'window' || action.type === 'find' || action.type === 'humanize') {
                     continue;
                 }
+                const stepStart = Date.now();
                 await this.executeAction(action);
+                if (this.profileEnabled) {
+                    this.profileSteps.push({
+                        step: action.type,
+                        time: Date.now() - stepStart,
+                        xpath: action.xpath,
+                    });
+                }
             }
         };
         if (this.retryCount > 0) {
@@ -458,6 +574,12 @@ class FluentChain {
         }
         else {
             await executeChain();
+        }
+        if (this.profileEnabled) {
+            return {
+                totalTime: Date.now() - this.profileStartTime,
+                steps: this.profileSteps,
+            };
         }
     }
     // ═══════════════════════════════════════════════════════════════════════════

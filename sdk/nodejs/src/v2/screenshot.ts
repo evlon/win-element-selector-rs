@@ -18,6 +18,25 @@ export class ScreenshotManager {
     }
     
     /**
+     * 通用截图方法
+     * @param outputPath 输出路径
+     */
+    async capture(outputPath: string): Promise<string> {
+        const filepath = path.resolve(outputPath);
+        
+        // 确保目录存在
+        const dir = path.dirname(filepath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        
+        // TODO: 调用服务端截图 API
+        await this.createPlaceholder(filepath, 'capture');
+        
+        return filepath;
+    }
+    
+    /**
      * 捕获失败截图
      * @param step 失败的步骤名称
      * @returns 截图文件路径

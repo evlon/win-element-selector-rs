@@ -2,6 +2,11 @@ export declare class ScreenshotManager {
     private screenshotDir;
     constructor(baseDir?: string);
     /**
+     * 通用截图方法
+     * @param outputPath 输出路径
+     */
+    capture(outputPath: string): Promise<string>;
+    /**
      * 捕获失败截图
      * @param step 失败的步骤名称
      * @returns 截图文件路径

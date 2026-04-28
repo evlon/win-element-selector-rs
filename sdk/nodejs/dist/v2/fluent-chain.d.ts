@@ -1,5 +1,13 @@
 import { HttpClient } from '../client';
 import { WindowSelector, ElementInfo } from '../types';
+export interface ProfileStats {
+    totalTime: number;
+    steps: {
+        step: string;
+        time: number;
+        xpath?: string;
+    }[];
+}
 export { ElementInfo } from '../types';
 export declare class FluentChain {
     private client;
@@ -10,6 +18,9 @@ export declare class FluentChain {
     private humanizeEnabled;
     private humanizeOptions;
     private debugMode;
+    private profileEnabled;
+    private profileSteps;
+    private profileStartTime;
     constructor(client: HttpClient);
     /**
      * 开启拟人化模式
@@ -21,6 +32,10 @@ export declare class FluentChain {
      * 开启调试模式
      */
     debug(): this;
+    /**
+     * 开启性能监控
+     */
+    profile(): this;
     /**
      * 激活窗口
      */
@@ -122,6 +137,37 @@ export declare class FluentChain {
      */
     tryFind(xpath: string): Promise<ElementInfo | null>;
     /**
+     * 截取全屏
+     * @param outputPath 输出路径
+     */
+    screenshot(outputPath?: string): Promise<string>;
+    /**
+     * 截取当前元素
+     * @param outputPath 输出路径
+     */
+    screenshotElement(outputPath?: string): Promise<string>;
+    /**
+     * 自动命名截图
+     */
+    screenshotAuto(): Promise<string>;
+    private idleRunning;
+    /**
+     * 启动空闲移动
+     * @param options 空闲移动参数
+     */
+    idle(options: {
+        xpath: string;
+        speed?: 'slow' | 'normal' | 'fast';
+    }): Promise<this>;
+    /**
+     * 停止空闲移动
+     */
+    stopIdle(): Promise<this>;
+    /**
+     * 解析 windowSelector 字符串为 WindowSelector 对象
+     */
+    private parseWindowSelector;
+    /**
      * 获取元素信息
      */
     inspect(): Promise<ElementInfo | null>;
@@ -139,8 +185,9 @@ export declare class FluentChain {
     private executeWithRetry;
     /**
      * 执行整条链
+     * @returns 如果开启 profile，返回性能统计；否则返回 void
      */
-    run(): Promise<void>;
+    run(): Promise<ProfileStats | void>;
     private executePrefixActions;
     private executeWindow;
     private executeFind;
