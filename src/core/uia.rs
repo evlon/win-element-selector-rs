@@ -494,6 +494,14 @@ pub mod windows_impl {
     }
 
     /// Enumerate all top-level windows on desktop.
+    /// Uses feature-based filtering instead of hardcoded class names.
+    /// 
+    /// Filtering features:
+    /// 1. Must be Window/Pane/Application control type
+    /// 2. Must have non-empty title
+    /// 3. Must have sufficient size (>= 100x100 pixels)
+    /// 4. Must not be shell system windows (class name pattern)
+    /// 5. Must not be UI sub-components (class name contains Host/View/List)
     pub fn enumerate_windows() -> Vec<WindowInfo> {
         let auto = match get_automation() {
             Ok(a) => a,
@@ -537,7 +545,7 @@ pub mod windows_impl {
                     .unwrap_or_default()
             };
 
-            // 支持多种窗口类型：Window, Pane, Document, Application 等
+            // 支持多种窗口类型：Window, Pane, Application
             // 这些都可能是应用的主窗口
             let valid_window_types = ["Window", "Pane", "Application"];
             
@@ -548,30 +556,55 @@ pub mod windows_impl {
 
                 // Only include windows with non-empty title
                 if !title.is_empty() {
-                    // 排除不需要的窗口类名
-                    let excluded_classes = [
-                        "Shell_TrayWnd",      // 任务栏
-                        "Progman",            // Program Manager
-                        "MSTaskSwWClass",     // 任务切换
-                        "WorkerW",            // 背景桌面 worker
-                        "Shell_SecondaryTrayWnd", // 第二任务栏
-                        "Windows.UI.Core.CoreWindow", // UWP后台窗口
-                        "Microsoft.UI.Xaml.Controls.TeachingTip", // 提示框
-                        "ShellTabWindowClass", // 资源管理器标签页
-                        "ProperTreeHost",    // 资源管理器文件树
-                        "DUIListView",        // 资源管理器文件列表
-                        "BrowserRootView",    // WebView子窗口
-                    ];
-                    
-                    if !excluded_classes.contains(&class.as_str()) {
-                        let process_name = get_process_name_by_id(pid);
-                        window_list.push(WindowInfo {
-                            title,
-                            class_name: class,
-                            process_id: pid,
-                            process_name,
-                        });
+                    // Get window rect for size checking
+                    let rect = unsafe {
+                        win.CurrentBoundingRectangle()
+                            .map(|r| (r.right - r.left, r.bottom - r.top))
+                            .unwrap_or((0, 0))
+                    };
+                    // Feature-based filtering (instead of hardcoded class names)
+                    // Feature 1: Size check - skip small windows (tooltips, menus)
+                    if rect.0 < 100 || rect.1 < 100 {
+                        continue;
                     }
+                    
+                    // Feature 2: Check if it's a shell system window
+                    // Pattern: class name starts with "Shell" (Shell_TrayWnd, ShellTabWindowClass, etc.)
+                    // or equals Progman/WorkerW (desktop components)
+                    let is_shell_window = class.starts_with("Shell") 
+                        || class == "Progman" 
+                        || class == "WorkerW";
+                    if is_shell_window {
+                        continue;
+                    }
+                    
+                    // Feature 3: Check if it's a UI sub-component
+                    // Pattern: class name contains common sub-control keywords
+                    // - Host (ProperTreeHost, etc.)
+                    // - View (BrowserRootView, but not Chrome_WidgetWin which is main window)
+                    // - List (DUIListView, etc.)
+                    // - Tab (ShellTabWindowClass, tab controls)
+                    // - Tip (TeachingTip, tooltips)
+                    // - Starts with Windows.UI/Microsoft.UI (UWP system windows)
+                    let is_sub_component = class.contains("Host") 
+                        || (class.contains("View") && !class.contains("Chrome_WidgetWin"))
+                        || class.contains("List") 
+                        || class.contains("Tab") 
+                        || class.contains("Tip") 
+                        || class.starts_with("Windows.UI") 
+                        || class.starts_with("Microsoft.UI");
+                    
+                    if is_sub_component {
+                        continue;
+                    }
+                    
+                    let process_name = get_process_name_by_id(pid);
+                    window_list.push(WindowInfo {
+                        title,
+                        class_name: class,
+                        process_id: pid,
+                        process_name,
+                    });
                 }
             }
         }
