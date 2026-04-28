@@ -555,6 +555,71 @@ pub mod windows_impl {
         window_list
     }
 
+    /// Activate (bring to front) a window by selector.
+    /// Returns true if successful, false if window not found or activation failed.
+    /// 
+    /// Uses UI Automation SetFocus() to activate the window element.
+    pub fn activate_window_by_selector(window_selector: &str) -> bool {
+        debug!("Activating window: {}", window_selector);
+        
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+
+        // Find the window element
+        let window_element = match find_window_by_selector(&auto, window_selector) {
+            Some(w) => w,
+            None => {
+                error!("Window not found for activation: {}", window_selector);
+                return false;
+            }
+        };
+
+        // Use SetFocus to activate the window (brings to foreground)
+        unsafe {
+            window_element.SetFocus().ok().is_some()
+        }
+    }
+
+    /// Activate window and set focus to a specific element.
+    /// First activates the window, then focuses the element.
+    pub fn activate_and_focus_element(window_selector: &str, xpath: &str) -> bool {
+        debug!("Activating window and focusing element: {} / {}", window_selector, xpath);
+        
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+
+        // Find and activate the window
+        let window_element = match find_window_by_selector(&auto, window_selector) {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // Activate window via SetFocus
+        unsafe {
+            if window_element.SetFocus().is_err() {
+                return false;
+            }
+        }
+        
+        // Small delay for window activation
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
+        // Find target element using find_by_xpath_detailed
+        match find_by_xpath_detailed(&auto, &window_element, xpath) {
+            Ok((elements, _)) if !elements.is_empty() => {
+                // Focus the first matching element
+                unsafe {
+                    elements[0].SetFocus().ok().is_some()
+                }
+            }
+            _ => false,
+        }
+    }
+
 
     /// Find target window by parsing window selector XPath.
     /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow']"

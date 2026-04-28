@@ -80,8 +80,10 @@ async fn main() -> anyhow::Result<()> {
         App::new()
             // 健康检查
             .route("/api/health", web::get().to(health_check))
-            // 窗口列表
+            // 窗口 API
             .route("/api/window/list", web::post().to(window::list_windows))
+            .route("/api/window/activate", web::post().to(window::activate_window))
+            .route("/api/window/focus-element", web::post().to(window::focus_element))
             // 元素查找
             .route("/api/element", web::get().to(element::get_element))
             // 鼠标移动

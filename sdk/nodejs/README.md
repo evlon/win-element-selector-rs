@@ -64,6 +64,68 @@ await sdk.click({
 });
 ```
 
+## Best Practices ⭐
+
+### 窗口激活的重要性
+
+**关键点**: 鼠标和键盘操作需要目标窗口处于前台并获得焦点。在执行 `click`、`type` 等操作前，应先激活目标窗口。
+
+```typescript
+// ❌ 错误方式：直接操作可能失败
+await sdk.click({ window: { title: '微信' }, xpath: '//Button' });
+await sdk.type('消息内容');  // 可能打字到其他窗口
+
+// ✅ 正确方式：先激活窗口
+const windows = await sdk.listWindows();
+const wechat = windows.find(w => w.title.includes('微信'));
+
+// 1. 使用精确的窗口选择器
+await sdk.activateWindow({
+    title: wechat.title,
+    className: wechat.className,
+    processName: wechat.processName
+});
+
+// 2. 再执行操作
+await sdk.click({ window: { title: wechat.title }, xpath: '//Edit' });
+await sdk.type('消息内容');  // 现在焦点在微信
+```
+
+### 使用安全操作方法
+
+SDK 提供了 `safeClick` 和 `safeType` 方法，自动处理窗口激活：
+
+```typescript
+// safeClick: 先激活窗口，再点击
+await sdk.safeClick({
+    window: { title: '微信', className: 'mmui::MainWindow' },
+    xpath: '//Edit'
+});
+
+// safeType: 先激活窗口并聚焦元素，再打字
+await sdk.safeType(
+    { title: '微信' },
+    '//Edit[@Name="输入"]',
+    '这是消息内容'
+);
+```
+
+### 窗口选择器精确性
+
+使用精确的窗口选择器可以提高操作成功率：
+
+```typescript
+// ❌ 不精确：只使用 className
+{ className: 'Notepad' }  // 可能匹配多个记事本窗口
+
+// ✅ 精确：使用 title + className + processName
+{
+    title: 'Untitled - Notepad',
+    className: 'Notepad',
+    processName: 'Notepad'
+}
+```
+
 ## Humanized Operations
 
 ```typescript
@@ -146,6 +208,10 @@ await sdk.stopIdleMotion();
 | `moveMouse(target, options?)` | 移动鼠标到指定位置 |
 | `click(params)` | 点击元素 |
 | `type(text, options?)` | 打字输入 |
+| `activateWindow(selector)` | **激活窗口**（使其成为前台窗口） |
+| `focusElement(selector, xpath)` | **激活窗口并聚焦元素** |
+| `safeClick(params)` | **安全点击**（先激活窗口再点击） |
+| `safeType(selector, xpath, text)` | **安全打字**（先聚焦再打字） |
 | `humanize(callback)` | 拟人化上下文执行操作 |
 | `startIdleMotion(params)` | 启动空闲移动 |
 | `stopIdleMotion()` | 停止空闲移动 |

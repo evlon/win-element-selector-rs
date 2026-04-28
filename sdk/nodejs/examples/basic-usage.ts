@@ -1,5 +1,5 @@
 // sdk/nodejs/examples/basic-usage.ts
-// 基本使用示例
+// 基本使用示例 - 展示安全操作流程
 
 import { ElementSelectorSDK } from '../src';
 
@@ -26,15 +26,33 @@ async function main() {
         });
         console.log();
 
-        // 3. 查找元素
-        console.log('=== 3. 查找元素 ===');
-        // 示例：查找记事本的编辑框
-        const windowSelector = "Window[@ClassName='Notepad']";
-        const xpath = "//Edit[@ClassName='Edit']";
+        // 3. 查找记事本窗口
+        // **重要**: 使用精确的窗口选择器，包含 title + className + processName
+        console.log('=== 3. 激活窗口 ===');
+        const notepadWindow = windows.find(w => w.processName === 'Notepad');
         
+        if (!notepadWindow) {
+            console.log('请先打开一个记事本窗口！');
+            return;
+        }
+        
+        // 构建精确的窗口选择器
+        const windowSelector = {
+            title: notepadWindow.title,
+            className: notepadWindow.className,
+            processName: notepadWindow.processName,
+        };        
+        console.log('窗口选择器:', windowSelector);
+        
+        // **关键**: 先激活窗口，确保它是前台窗口
+        const activateResult = await sdk.activateWindow(windowSelector);        console.log('激活结果:', activateResult.success ? '成功' : '失败');
+        console.log();
+
+        // 4. 查找元素
+        console.log('=== 4. 查找元素 ===');
         const element = await sdk.getElement({
-            windowSelector,
-            xpath,
+            windowSelector: `Window[@Name='${notepadWindow.title}' and @ClassName='${notepadWindow.className}']`,
+            xpath: '//Document',  // 记事本的编辑区域
             randomRange: 0.55
         });
         
@@ -42,14 +60,13 @@ async function main() {
             console.log('找到元素:');
             console.log(`  位置: (${element.element.rect.x}, ${element.element.rect.y})`);
             console.log(`  大小: ${element.element.rect.width} x ${element.element.rect.height}`);
-            console.log(`  中心: (${element.element.center.x}, ${element.element.center.y})`);
         } else {
             console.log('未找到元素:', element.error);
         }
         console.log();
 
-        // 4. 鼠标移动
-        console.log('=== 4. 鼠标移动 ===');
+        // 5. 鼠标移动
+        console.log('=== 5. 鼠标移动 ===');
         if (element.found && element.element) {
             const moveResult = await sdk.moveMouse(element.element.centerRandom, {
                 humanize: true,
@@ -61,11 +78,11 @@ async function main() {
         }
         console.log();
 
-        // 5. 点击元素
-        console.log('=== 5. 点击元素 ===');
-        const clickResult = await sdk.click({
-            window: { className: 'Notepad' },
-            xpath: '//Edit',
+        // 6. 安全点击 - 先激活窗口再点击
+        console.log('=== 6. 安全点击 ===');
+        const clickResult = await sdk.safeClick({
+            window: windowSelector,
+            xpath: '//Document',  // 点击编辑区域
             options: {
                 humanize: true,
                 randomRange: 0.55,
@@ -79,15 +96,22 @@ async function main() {
         }
         console.log();
 
-        // 6. 打字
-        console.log('=== 6. 打字 ===');
-        const typeResult = await sdk.type('Hello, 这是自动输入的测试文本！', {
-            charDelay: { min: 30, max: 80 }
-        });
+        // 7. 安全打字 - 先激活窗口并聚焦元素，再打字
+        console.log('=== 7. 安全打字 ===');
+        const typeResult = await sdk.safeType(
+            windowSelector,
+            '//Document',  // 记事本编辑区域
+            'Hello, 这是自动输入的测试文本！',
+            { charDelay: { min: 30, max: 80 } }
+        );
         console.log('打字结果:', typeResult.success ? '成功' : '失败');
         console.log(`  字符数: ${typeResult.charsTyped}`);
         console.log(`  耗时: ${typeResult.durationMs}ms`);
         console.log();
+
+        console.log('=== 完成 ===');
+        console.log('提示: 使用 safeClick 和 safeType 方法可以确保操作成功');
+        console.log('关键步骤: 1) 使用精确的窗口选择器  2) 先激活窗口  3) 再执行操作');
 
     } catch (error) {
         console.error('错误:', error);

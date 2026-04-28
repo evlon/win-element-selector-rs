@@ -88,6 +88,30 @@ class HttpClient {
         });
         return response.data;
     }
+    /**
+     * 激活指定窗口（使其成为前台窗口）
+     * @param windowSelector 窗口选择器 XPath
+     * @returns 激活结果
+     */
+    async activateWindow(windowSelector) {
+        const response = await this.client.post('/api/window/activate', {
+            windowSelector,
+        });
+        return response.data;
+    }
+    /**
+     * 激活窗口并使指定元素获得焦点
+     * @param windowSelector 窗口选择器 XPath
+     * @param xpath 元素 XPath
+     * @returns 操作结果
+     */
+    async focusElement(windowSelector, xpath) {
+        const response = await this.client.post('/api/window/focus-element', {
+            windowSelector,
+            xpath,
+        });
+        return response.data;
+    }
     handleError(error) {
         if (axios_1.default.isAxiosError(error)) {
             const axiosError = error;

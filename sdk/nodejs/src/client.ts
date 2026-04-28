@@ -113,6 +113,32 @@ export class HttpClient {
         return response.data;
     }
     
+    /**
+     * 激活指定窗口（使其成为前台窗口）
+     * @param windowSelector 窗口选择器 XPath
+     * @returns 激活结果
+     */
+    async activateWindow(windowSelector: string): Promise<{ success: boolean; error?: string }> {
+        const response = await this.client.post<{ success: boolean; windowSelector: string; error?: string }>('/api/window/activate', {
+            windowSelector,
+        });
+        return response.data;
+    }
+    
+    /**
+     * 激活窗口并使指定元素获得焦点
+     * @param windowSelector 窗口选择器 XPath
+     * @param xpath 元素 XPath
+     * @returns 操作结果
+     */
+    async focusElement(windowSelector: string, xpath: string): Promise<{ success: boolean; error?: string }> {
+        const response = await this.client.post<{ success: boolean; error?: string }>('/api/window/focus-element', {
+            windowSelector,
+            xpath,
+        });
+        return response.data;
+    }
+    
     handleError(error: unknown): Error {
         if (axios.isAxiosError(error)) {
             const axiosError = error as AxiosError<{ error?: string }>;

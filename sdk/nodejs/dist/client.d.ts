@@ -11,6 +11,25 @@ export declare class HttpClient {
     stopIdleMotion(): Promise<StopResult>;
     getIdleMotionStatus(): Promise<IdleMotionStatus>;
     typeText(text: string, options?: TypeOptions): Promise<TypeResult>;
+    /**
+     * 激活指定窗口（使其成为前台窗口）
+     * @param windowSelector 窗口选择器 XPath
+     * @returns 激活结果
+     */
+    activateWindow(windowSelector: string): Promise<{
+        success: boolean;
+        error?: string;
+    }>;
+    /**
+     * 激活窗口并使指定元素获得焦点
+     * @param windowSelector 窗口选择器 XPath
+     * @param xpath 元素 XPath
+     * @returns 操作结果
+     */
+    focusElement(windowSelector: string, xpath: string): Promise<{
+        success: boolean;
+        error?: string;
+    }>;
     handleError(error: unknown): Error;
 }
 //# sourceMappingURL=client.d.ts.map
