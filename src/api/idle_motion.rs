@@ -674,3 +674,115 @@ pub async fn get_idle_motion_status() -> impl Responder {
         last_activity_ms,
     })
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 单元测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    
+    /// 测试 IdleMotionState 默认值
+    #[test]
+    fn test_idle_motion_state_default() {
+        let state = IdleMotionState::default();
+        assert!(!state.active);
+        assert!(!state.paused);
+        assert!(state.params.is_none());
+        assert!(state.current_rect.is_none());
+        assert!(!state.server_moving_mouse);
+        assert!(state.started_at.is_none());
+        assert!(state.pause_reason.is_none());
+    }
+    
+    /// 测试 HumanInterventionConfig 默认值
+    #[test]
+    fn test_human_intervention_config_defaults() {
+        let config = HumanInterventionConfig {
+            enabled: true,
+            pause_on_mouse: true,
+            pause_on_keyboard: true,
+            resume_delay: 3000,
+        };
+        assert!(config.enabled);
+        assert!(config.pause_on_mouse);
+        assert!(config.pause_on_keyboard);
+        assert_eq!(config.resume_delay, 3000);
+    }
+    
+    /// 测试 PauseReason 序列化
+    #[test]
+    fn test_pause_reason_serialization() {
+        let reason = PauseReason::ApiCall;
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"api_call\"");
+        
+        let reason = PauseReason::HumanMouse;
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"human_mouse\"");
+    }
+    
+    /// 测试 Rect 随机点计算
+    #[test]
+    fn test_random_point_in_rect() {
+        let rect = Rect {
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 150,
+        };
+        
+        // 多次测试确保点在范围内
+        for _ in 0..100 {
+            let point = calculate_random_point_in_rect(&rect);
+            assert!(point.x >= rect.x && point.x <= rect.x + rect.width);
+            assert!(point.y >= rect.y && point.y <= rect.y + rect.height);
+        }
+    }
+    
+    /// 测试窗口选择器构建
+    #[test]
+    fn test_build_window_selector() {
+        let selector = WindowSelector {
+            title: Some("微信".to_string()),
+            class_name: Some("mmui::MainWindow".to_string()),
+            process_name: None,
+        };
+        
+        let result = build_window_selector(&selector);
+        assert_eq!(result, "Window[@Name='微信' and @ClassName='mmui::MainWindow']");
+        
+        // 空选择器
+        let empty_selector = WindowSelector {
+            title: None,
+            class_name: None,
+            process_name: None,
+        };
+        let result = build_window_selector(&empty_selector);
+        assert_eq!(result, "Window");
+    }
+    
+    /// 测试 IdleMotionParams 结构
+    #[test]
+    fn test_idle_motion_params_structure() {
+        let params = IdleMotionParams {
+            window_selector: "Window[@Name='Test']".to_string(),
+            xpath: "//Button".to_string(),
+            speed: "normal".to_string(),
+            move_interval: 800,
+            idle_timeout: 60000,
+            human_intervention: HumanInterventionConfig {
+                enabled: true,
+                pause_on_mouse: true,
+                pause_on_keyboard: true,
+                resume_delay: 3000,
+            },
+        };
+        
+        assert_eq!(params.speed, "normal");
+        assert_eq!(params.move_interval, 800);
+        assert_eq!(params.idle_timeout, 60000);
+    }
+}

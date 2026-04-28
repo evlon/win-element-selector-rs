@@ -34,14 +34,16 @@ fn default_max_delay() -> u64 { 150 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct TypeRequest {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, rename = "charDelay")]
     pub char_delay: Option<CharDelayConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TypeResponse {
     pub success: bool,
+    #[serde(rename = "charsTyped")]
     pub chars_typed: u32,
+    #[serde(rename = "durationMs")]
     pub duration_ms: u64,
     pub error: Option<String>,
 }
@@ -177,5 +179,77 @@ pub async fn type_text(body: web::Json<TypeRequest>) -> impl Responder {
                 error: Some(format!("内部错误: {}", e)),
             })
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 单元测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    /// 测试 CharDelayConfig 默认值
+    #[test]
+    fn test_char_delay_defaults() {
+        assert_eq!(default_min_delay(), 50);
+        assert_eq!(default_max_delay(), 150);
+    }
+    
+    /// 测试 TypeRequest 反序列化
+    #[test]
+    fn test_type_request_deserialization() {
+        let json = r#"{"text":"Hello"}"#;
+        let request: TypeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.text, "Hello");
+        assert!(request.char_delay.is_none());
+    }
+    
+    /// 测试 TypeRequest 带延迟参数
+    #[test]
+    fn test_type_request_with_delay() {
+        let json = r#"{"text":"Test","charDelay":{"min":30,"max":80}}"#;
+        let request: TypeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.text, "Test");
+        assert!(request.char_delay.is_some());
+        let delay = request.char_delay.unwrap();
+        assert_eq!(delay.min, 30);
+        assert_eq!(delay.max, 80);
+    }
+    
+    /// 测试 TypeResponse 序列化
+    #[test]
+    fn test_type_response_serialization() {
+        let response = TypeResponse {
+            success: true,
+            chars_typed: 10,
+            duration_ms: 500,
+            error: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("success"));
+        assert!(json.contains("charsTyped"));
+        assert!(json.contains("durationMs"));
+    }
+    
+    /// 测试空文本处理
+    #[test]
+    fn test_empty_text_handling() {
+        let request = TypeRequest {
+            text: String::new(),
+            char_delay: None,
+        };
+        assert!(request.text.is_empty());
+    }
+    
+    /// 测试 Unicode 文本
+    #[test]
+    fn test_unicode_text() {
+        let request = TypeRequest {
+            text: "中文测试🎉".to_string(),
+            char_delay: None,
+        };
+        assert_eq!(request.text.chars().count(), 5);
     }
 }
