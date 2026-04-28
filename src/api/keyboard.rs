@@ -12,13 +12,7 @@ use rand::Rng;
 use windows::Win32::{
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_UNICODE, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN,
-        VK_RETURN, VK_TAB, VK_ESCAPE, VK_HOME, VK_END,
-        VK_DELETE, VK_BACK, VK_INSERT, VK_PRIOR, VK_NEXT,
-        VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
-        VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
-        VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12,
+        KEYEVENTF_UNICODE, KEYEVENTF_KEYUP, VIRTUAL_KEY, KEYBD_EVENT_FLAGS,
     },
 };
 
@@ -136,7 +130,7 @@ fn execute_shortcut(keys_str: &str) -> anyhow::Result<()> {
                 ki: KEYBDINPUT {
                     wVk: VIRTUAL_KEY(mod_key),
                     wScan: 0,
-                    dwFlags: 0, // 按下
+                    dwFlags: KEYBD_EVENT_FLAGS(0), // 按下
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -151,7 +145,7 @@ fn execute_shortcut(keys_str: &str) -> anyhow::Result<()> {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(target_vk),
                 wScan: 0,
-                dwFlags: 0, // 按下
+                dwFlags: KEYBD_EVENT_FLAGS(0), // 按下
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -459,7 +453,7 @@ fn execute_key(key_name: &str) -> anyhow::Result<()> {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(vk),
                 wScan: 0,
-                dwFlags: 0,
+                dwFlags: KEYBD_EVENT_FLAGS(0),
                 time: 0,
                 dwExtraInfo: 0,
             },
