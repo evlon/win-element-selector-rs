@@ -4,10 +4,32 @@
 // 使用 actix-web 框架，独立于 GUI 应用运行
 
 use actix_web::{web, App, HttpServer, HttpResponse, Responder};
-use log::info;
+use clap::Parser;
+use log::{info, LevelFilter};
 
 // 从库模块导入
 use element_selector::api::{element, mouse, window};
+
+/// Element Selector Server - Windows UI Automation HTTP 服务
+/// 
+/// 提供元素查找、鼠标控制、窗口列表等 API 接口
+#[derive(Parser, Debug)]
+#[command(name = "element-selector-server")]
+#[command(version = "1.0.0")]
+#[command(about = "Windows UI Automation HTTP 服务", long_about = None)]
+struct Args {
+    /// 绑定的 IP 地址
+    #[arg(short, long, default_value = "127.0.0.1")]
+    bind: String,
+
+    /// 监听端口
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
+
+    /// 详细日志级别 (可多次使用: -v, -vv, -vvv)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
 
 /// 健康检查接口
 async fn health_check() -> impl Responder {
@@ -21,13 +43,25 @@ async fn health_check() -> impl Responder {
 /// 主入口
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
+    // 解析命令行参数
+    let args = Args::parse();
+
+    // 根据详细级别设置日志级别
+    let log_level = match args.verbose {
+        0 => LevelFilter::Info,
+        1 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    };
+
     // 初始化日志
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
+    .filter_level(log_level)
     .init();
-    
-    info!("element-selector-server starting on port 8080");
+
+    let bind_addr = format!("{}:{}", args.bind, args.port);
+    info!("element-selector-server starting on {}", bind_addr);
     
     // Windows: COM 必须在主线程初始化 (STA)
     #[cfg(target_os = "windows")]
@@ -55,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             // 鼠标点击
             .route("/api/mouse/click", web::post().to(mouse::click_mouse))
     })
-    .bind("127.0.0.1:8080")?
+    .bind(&bind_addr)?
     .run()
     .await?;
     
