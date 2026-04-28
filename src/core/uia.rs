@@ -511,13 +511,16 @@ pub mod windows_impl {
             Err(_) => return vec![],
         };
 
-        let windows = match unsafe { desktop.FindAll(TreeScope_Children, &condition) } {
+        let windows = match unsafe { desktop.FindAll(TreeScope_Descendants, &condition) } {
             Ok(w) => w,
             Err(_) => return vec![],
         };
 
         let count = match unsafe { windows.Length() } {
-            Ok(c) => c,
+            Ok(c) => {
+                debug!("enumerate_windows: found {} total elements (TreeScope_Descendants)", c);
+                c
+            },
             Err(_) => return vec![],
         };
 
@@ -534,20 +537,37 @@ pub mod windows_impl {
                     .unwrap_or_default()
             };
 
-            if ct == "Window" {
+            // 支持多种窗口类型：Window, Pane, Document, Application 等
+            // 这些都可能是应用的主窗口
+            let valid_window_types = ["Window", "Pane", "Application"];
+            
+            if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
                 let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
 
                 // Only include windows with non-empty title
                 if !title.is_empty() {
-                    let process_name = get_process_name_by_id(pid);
-                    window_list.push(WindowInfo {
-                        title,
-                        class_name: class,
-                        process_id: pid,
-                        process_name,
-                    });
+                    // 排除不需要的窗口类名
+                    let excluded_classes = [
+                        "Shell_TrayWnd",      // 任务栏
+                        "Progman",            // Program Manager
+                        "MSTaskSwWClass",     // 任务切换
+                        "WorkerW",            // 背景桌面 worker
+                        "Shell_SecondaryTrayWnd", // 第二任务栏
+                        "Windows.UI.Core.CoreWindow", // UWP后台窗口
+                        "Microsoft.UI.Xaml.Controls.TeachingTip", // 提示框
+                    ];
+                    
+                    if !excluded_classes.contains(&class.as_str()) {
+                        let process_name = get_process_name_by_id(pid);
+                        window_list.push(WindowInfo {
+                            title,
+                            class_name: class,
+                            process_id: pid,
+                            process_name,
+                        });
+                    }
                 }
             }
         }
