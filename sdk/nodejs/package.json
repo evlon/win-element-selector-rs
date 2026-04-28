@@ -1,6 +1,6 @@
 {
   "name": "element-selector-sdk",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Node.js SDK for element-selector-server with humanized UI automation",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,12 +24,12 @@
     "axios": "^1.6.0"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.0",
-    "jest": "^29.7.0",
-    "@types/jest": "^29.5.0",
-    "ts-jest": "^29.1.0",
-    "ts-node": "^10.9.0"
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.6.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=18.0.0"

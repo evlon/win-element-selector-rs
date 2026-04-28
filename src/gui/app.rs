@@ -1354,7 +1354,7 @@ impl eframe::App for SelectorApp {
                 const DRAG_ZONE_W: f32 = 5.0;  // invisible grab zone half-width each side
                 const GAP:         f32 = 8.0;  // breathing space on each side of divider
                 const LEFT_MIN:    f32 = 220.0;
-                const LEFT_MAX:    f32 = 480.0;
+                const LEFT_MAX:    f32 = 0.9 * 480.0; // 最大宽度的 90%
 
                 let full_rect = ui.available_rect_before_wrap();
                 let left_w    = self.left_panel_width.clamp(LEFT_MIN, LEFT_MAX);

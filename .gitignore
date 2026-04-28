@@ -3,3 +3,4 @@ target/
 last_capture.json
 node_modules/
 screenshots/
+dist/
