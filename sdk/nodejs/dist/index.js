@@ -45,16 +45,7 @@ class ElementSelectorSDK {
         return this.client.clickMouse(params);
     }
     async type(text, options) {
-        // 键盘 API 尚未在服务端实现
-        const charDelay = options?.charDelay ?? types_1.DEFAULTS.type.charDelay;
-        const avgDelay = (charDelay.min + charDelay.max) / 2;
-        const durationMs = text.length * avgDelay;
-        return {
-            success: true,
-            charsTyped: text.length,
-            durationMs,
-            error: null,
-        };
+        return this.client.typeText(text, options);
     }
     // ═══════════════════════════════════════════════════════════════════════════
     // 拟人上下文

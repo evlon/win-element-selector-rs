@@ -1,4 +1,4 @@
-import { SDKConfig, HealthStatus, WindowInfo, ElementQueryParams, ElementResponse, MoveResult, ClickParams, ClickResult, IdleMotionParams, IdleMotionStatus, StopResult, Point, MoveOptions } from './types';
+import { SDKConfig, HealthStatus, WindowInfo, ElementQueryParams, ElementResponse, MoveResult, ClickParams, ClickResult, IdleMotionParams, IdleMotionStatus, StopResult, Point, MoveOptions, TypeOptions, TypeResult } from './types';
 export declare class HttpClient {
     private client;
     constructor(config: SDKConfig);
@@ -10,6 +10,7 @@ export declare class HttpClient {
     startIdleMotion(params: IdleMotionParams): Promise<void>;
     stopIdleMotion(): Promise<StopResult>;
     getIdleMotionStatus(): Promise<IdleMotionStatus>;
+    typeText(text: string, options?: TypeOptions): Promise<TypeResult>;
     handleError(error: unknown): Error;
 }
 //# sourceMappingURL=client.d.ts.map

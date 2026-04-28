@@ -81,6 +81,13 @@ class HttpClient {
         const response = await this.client.get('/api/mouse/idle/status');
         return response.data;
     }
+    async typeText(text, options) {
+        const response = await this.client.post('/api/keyboard/type', {
+            text,
+            charDelay: options?.charDelay ?? types_1.DEFAULTS.type.charDelay,
+        });
+        return response.data;
+    }
     handleError(error) {
         if (axios_1.default.isAxiosError(error)) {
             const axiosError = error;

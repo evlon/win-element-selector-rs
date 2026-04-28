@@ -31,17 +31,7 @@ class HumanizeContext {
         return this.client.moveMouse(mergedParams.target, mergedParams.options);
     }
     async type(text, options) {
-        // 键盘 API 尚未在服务端实现
-        // 当前返回模拟结果
-        const charDelay = options?.charDelay ?? types_1.DEFAULTS.type.charDelay;
-        const avgDelay = (charDelay.min + charDelay.max) / 2;
-        const durationMs = text.length * avgDelay;
-        return {
-            success: true,
-            charsTyped: text.length,
-            durationMs,
-            error: null,
-        };
+        return this.client.typeText(text, options);
     }
     async getElement(params) {
         return this.client.getElement(params);

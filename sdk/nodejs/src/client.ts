@@ -15,6 +15,8 @@ import {
     StopResult,
     Point,
     MoveOptions,
+    TypeOptions,
+    TypeResult,
 } from './types';
 
 export class HttpClient {
@@ -100,6 +102,14 @@ export class HttpClient {
     
     async getIdleMotionStatus(): Promise<IdleMotionStatus> {
         const response = await this.client.get<IdleMotionStatus>('/api/mouse/idle/status');
+        return response.data;
+    }
+    
+    async typeText(text: string, options?: TypeOptions): Promise<TypeResult> {
+        const response = await this.client.post<TypeResult>('/api/keyboard/type', {
+            text,
+            charDelay: options?.charDelay ?? DEFAULTS.type.charDelay,
+        });
         return response.data;
     }
     

@@ -8,7 +8,7 @@ use clap::Parser;
 use log::{info, LevelFilter};
 
 // 从库模块导入
-use element_selector::api::{element, mouse, window, idle_motion};
+use element_selector::api::{element, mouse, window, idle_motion, keyboard};
 
 /// Element Selector Server - Windows UI Automation HTTP 服务
 /// 
@@ -92,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/mouse/idle/start", web::post().to(idle_motion::start_idle_motion))
             .route("/api/mouse/idle/stop", web::post().to(idle_motion::stop_idle_motion))
             .route("/api/mouse/idle/status", web::get().to(idle_motion::get_idle_motion_status))
+            // 键盘 API
+            .route("/api/keyboard/type", web::post().to(keyboard::type_text))
     })
     .bind(&bind_addr)?
     .run()

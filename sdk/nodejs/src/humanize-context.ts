@@ -41,18 +41,7 @@ export class HumanizeContext {
     }
     
     async type(text: string, options?: TypeOptions): Promise<TypeResult> {
-        // 键盘 API 尚未在服务端实现
-        // 当前返回模拟结果
-        const charDelay = options?.charDelay ?? DEFAULTS.type.charDelay;
-        const avgDelay = (charDelay.min + charDelay.max) / 2;
-        const durationMs = text.length * avgDelay;
-        
-        return {
-            success: true,
-            charsTyped: text.length,
-            durationMs,
-            error: null,
-        };
+        return this.client.typeText(text, options);
     }
     
     async getElement(params: ElementQueryParams): Promise<ElementResponse> {

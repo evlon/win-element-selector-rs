@@ -7,6 +7,7 @@ pub mod window;
 pub mod element;
 pub mod mouse;
 pub mod idle_motion;
+pub mod keyboard;
 
 // 重新导出类型
 pub use types::*;
