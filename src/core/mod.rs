@@ -7,8 +7,13 @@ pub mod model;
 pub mod xpath;
 pub mod error;
 pub mod uia;
+pub mod enum_windows;
 
 // Re-export commonly used types for convenience
 pub use model::*;
 pub use xpath::{generate, lint};
 pub use error::{SelectorError, Result};
+
+// Re-export fast window enumeration
+#[cfg(target_os = "windows")]
+pub use enum_windows::enumerate_windows_fast;

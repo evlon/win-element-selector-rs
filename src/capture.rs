@@ -41,6 +41,7 @@ pub fn find_all_elements_detailed(
 }
 
 /// Enumerate all top-level windows on desktop.
+/// Uses Win32 EnumWindows API - fast and matches Alt+Tab
 pub fn list_windows() -> Vec<WindowInfo> {
-    uia::enumerate_windows()
+    crate::core::enum_windows::enumerate_windows_fast()
 }
