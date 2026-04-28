@@ -2,6 +2,30 @@
 
 Node.js SDK for element-selector-server, providing humanized UI automation capabilities.
 
+## Features
+
+### 已完成功能 ✅
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| **HTTP 服务** | ✅ | Actix-web 服务端，支持 API 调用 |
+| **元素查找** | ✅ | XPath 选择器 + 窗口选择器 |
+| **拟人化鼠标** | ✅ | Bezier 曲线轨迹、随机延迟 |
+| **点击操作** | ✅ | 随机位置偏移、前后暂停 |
+| **键盘打字** | ✅ | 随机字符延迟、拟人化输入 |
+| **空闲移动** | ✅ | 在元素区域内随机移动鼠标 |
+| **人工干预检测** | ✅ | 用户操作自动暂停/恢复 |
+| **链式调用** | ✅ | ActionChain 执行序列操作 |
+| **humanize 上下文** | ✅ | 自动应用拟人化参数 |
+
+### 核心特性
+
+- **拟人化鼠标移动** - 使用 Bezier 曲线轨迹，模拟真实用户操作
+- **随机延迟** - 每次操作都有随机时间间隔
+- **空闲移动** - 在指定区域内持续移动鼠标，防止检测
+- **人工干预检测** - 检测用户鼠标/键盘操作，自动暂停自动化任务
+- **链式调用** - 支持流畅的链式 API 调用
+
 ## Installation
 
 ```bash
@@ -68,7 +92,18 @@ await sdk.humanize(async (ctx) => {
 });
 ```
 
-## Idle Motion (Requires Server Support)
+## Idle Motion
+
+空闲移动功能可在指定元素区域内自动移动鼠标，适用于长时间等待场景。
+
+### 特性
+
+- 在元素矩形区域内随机移动
+- 支持 slow/normal/fast 三种速度
+- 人工干预时自动暂停，静止后恢复
+- API 调用时自动暂停 → 执行 → 恢复
+
+### 示例
 
 ```typescript
 // Start idle motion
@@ -105,16 +140,44 @@ await sdk.stopIdleMotion();
 
 | Method | Description |
 |--------|-------------|
-| `health()` | Check server health status |
-| `listWindows()` | List all available windows |
-| `getElement(params)` | Find element by window selector and XPath |
-| `moveMouse(target, options?)` | Move mouse to target position |
-| `click(params)` | Click on element |
-| `type(text, options?)` | Type text (requires server support) |
-| `humanize(callback)` | Execute operations with humanized context |
-| `startIdleMotion(params)` | Start idle motion in element area |
-| `stopIdleMotion()` | Stop idle motion |
-| `getIdleMotionStatus()` | Get current idle motion status |
+| `health()` | 健康检查，返回服务器状态 |
+| `listWindows()` | 获取所有可见窗口列表 |
+| `getElement(params)` | 查找元素，返回位置和矩形 |
+| `moveMouse(target, options?)` | 移动鼠标到指定位置 |
+| `click(params)` | 点击元素 |
+| `type(text, options?)` | 打字输入 |
+| `humanize(callback)` | 拟人化上下文执行操作 |
+| `startIdleMotion(params)` | 启动空闲移动 |
+| `stopIdleMotion()` | 停止空闲移动 |
+| `getIdleMotionStatus()` | 获取空闲移动状态 |
+
+### WindowSelector
+
+```typescript
+interface WindowSelector {
+    title?: string;        // 窗口标题
+    className?: string;    // 窗口类名
+    processName?: string;  // 进程名
+}
+```
+
+### IdleMotionParams
+
+```typescript
+interface IdleMotionParams {
+    window: WindowSelector;    // 目标窗口
+    xpath: string;             // 元素 XPath
+    speed?: 'slow' | 'normal' | 'fast';
+    moveInterval?: number;     // 移动间隔 (ms)
+    idleTimeout?: number;      // 空闲超时 (ms)
+    humanIntervention?: {
+        enabled: boolean;
+        pauseOnMouse?: boolean;
+        pauseOnKeyboard?: boolean;
+        resumeDelay?: number;  // 恢复延迟 (ms)
+    }; 
+}
+```
 
 ## Configuration
 
@@ -188,7 +251,7 @@ cargo run --bin element-selector-server
 
 # 2. 运行示例（在 SDK 目录）
 cd sdk/nodejs
-n
+
 # 编译 TypeScript
 npm run build
 
@@ -197,6 +260,31 @@ npx ts-node examples/basic-usage.ts
 npx ts-node examples/humanize-demo.ts
 npx ts-node examples/idle-motion-demo.ts
 ```
+
+## Server
+
+SDK 需要配合 `element-selector-server` 使用:
+
+```bash
+# 启动服务器（默认端口 8080）
+cargo run --bin element-selector-server
+
+# 指定端口
+cargo run --bin element-selector-server -- --port 3000
+
+# Release 构建
+cargo build --release --bin element-selector-server
+```
+
+## Test Coverage
+
+| 模块 | 测试数 | 说明 |
+|------|--------|------|
+| types.test.ts | 7 | 类型定义测试 |
+| utils.test.ts | 7 | 工具函数测试 |
+| integration.test.ts | 4 | API 集成测试 |
+| Rust idle_motion | 6 | 服务端单元测试 |
+| Rust keyboard | 6 | 服务端单元测试 |
 
 ## License
 
