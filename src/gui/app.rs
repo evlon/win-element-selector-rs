@@ -1354,10 +1354,10 @@ impl eframe::App for SelectorApp {
                 const DRAG_ZONE_W: f32 = 5.0;  // invisible grab zone half-width each side
                 const GAP:         f32 = 8.0;  // breathing space on each side of divider
                 const LEFT_MIN:    f32 = 220.0;
-                const LEFT_MAX:    f32 = 0.9 * 480.0; // 最大宽度的 90%
 
                 let full_rect = ui.available_rect_before_wrap();
-                let left_w    = self.left_panel_width.clamp(LEFT_MIN, LEFT_MAX);
+                let left_max   = 0.9 * full_rect.width(); // 当前容器宽度的 90%
+                let left_w     = self.left_panel_width.clamp(LEFT_MIN, left_max);
 
                 // Pixel position of the divider centre line
                 let div_x = full_rect.min.x + left_w;
@@ -1384,7 +1384,7 @@ impl eframe::App for SelectorApp {
                     self.divider_dragging = true;
                     self.left_panel_width =
                         (self.left_panel_width + drag_resp.drag_delta().x)
-                            .clamp(LEFT_MIN, LEFT_MAX);
+                            .clamp(LEFT_MIN, left_max);
                 }
                 if drag_resp.drag_stopped() {
                     self.divider_dragging = false;
