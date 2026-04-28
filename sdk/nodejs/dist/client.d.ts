@@ -41,6 +41,22 @@ export declare class HttpClient {
         total: number;
         error?: string;
     }>;
+    /**
+     * 执行快捷键组合
+     * @param keys 快捷键字符串，如 "Ctrl+C", "Alt+F4"
+     */
+    executeShortcut(keys: string): Promise<{
+        success: boolean;
+        error?: string;
+    }>;
+    /**
+     * 执行单个按键
+     * @param key 按键名称，如 "Enter", "Tab", "Escape"
+     */
+    executeKey(key: string): Promise<{
+        success: boolean;
+        error?: string;
+    }>;
     handleError(error: unknown): Error;
 }
 //# sourceMappingURL=client.d.ts.map

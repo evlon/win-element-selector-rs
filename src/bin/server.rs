@@ -97,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/mouse/idle/status", web::get().to(idle_motion::get_idle_motion_status))
             // 键盘 API
             .route("/api/keyboard/type", web::post().to(keyboard::type_text))
+            .route("/api/keyboard/shortcut", web::post().to(keyboard::execute_shortcut_api))
+            .route("/api/keyboard/key", web::post().to(keyboard::execute_key_api))
     })
     .bind(&bind_addr)?
     .run()

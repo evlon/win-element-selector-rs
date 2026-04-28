@@ -200,7 +200,87 @@ export class FluentChain {
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
-    // 等待操作
+    // 等待元素操作
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * 等待元素出现（轮询检查）
+     * @param xpath 元素 XPath
+     * @param options timeout: 最大等待时间 (ms), interval: 检查间隔 (ms)
+     */
+    async waitFor(xpath: string, options?: { timeout?: number; interval?: number }): Promise<ElementInfo> {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        
+        const timeout = options?.timeout ?? 10000;
+        const interval = options?.interval ?? 500;
+        
+        this.log(`waitFor("${xpath}", timeout=${timeout}ms)`);
+        
+        const startTime = Date.now();
+        while (Date.now() - startTime < timeout) {
+            const result = await this.client.getElement({
+                windowSelector: this.currentWindowSelector,
+                xpath,
+                randomRange: DEFAULTS.click.randomRange,
+            });
+            
+            if (result.found && result.element) {
+                this.log(`  → element appeared after ${Date.now() - startTime}ms`);
+                this.currentElement = result.element;
+                return result.element;
+            }
+            
+            await new Promise(r => setTimeout(r, interval));
+        }
+        
+        await this.failWithScreenshot(
+            `Element did not appear within ${timeout}ms: ${xpath}`,
+            'waitFor',
+            { windowSelector: this.currentWindowSelector, xpath }
+        );
+        return null as never; // unreachable
+    }
+    
+    /**
+     * 等待元素消失（轮询检查）
+     */
+    async waitUntilGone(xpath: string, options?: { timeout?: number; interval?: number }): Promise<void> {
+        if (!this.currentWindowSelector) {
+            throw new Error('必须先调用 window() 激活窗口');
+        }
+        
+        const timeout = options?.timeout ?? 10000;
+        const interval = options?.interval ?? 500;
+        
+        this.log(`waitUntilGone("${xpath}", timeout=${timeout}ms)`);
+        
+        const startTime = Date.now();
+        while (Date.now() - startTime < timeout) {
+            const result = await this.client.getElement({
+                windowSelector: this.currentWindowSelector,
+                xpath,
+                randomRange: DEFAULTS.click.randomRange,
+            });
+            
+            if (!result.found) {
+                this.log(`  → element gone after ${Date.now() - startTime}ms`);
+                return;
+            }
+            
+            await new Promise(r => setTimeout(r, interval));
+        }
+        
+        await this.failWithScreenshot(
+            `Element did not disappear within ${timeout}ms: ${xpath}`,
+            'waitUntilGone',
+            { windowSelector: this.currentWindowSelector, xpath }
+        );
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 等待时间操作
     // ═══════════════════════════════════════════════════════════════════════════
     
     /**
@@ -319,8 +399,8 @@ export class FluentChain {
             case 'rightClick': await this.executeClick('right'); break;
             case 'type': await this.executeType(action.text!); break;
             case 'wait': await this.executeWait(action.duration!); break;
-            case 'shortcut': this.log(`shortcut("${action.text}") - TODO`); break;
-            case 'key': this.log(`key("${action.text}") - TODO`); break;
+            case 'shortcut': await this.executeShortcut(action.text!); break;
+            case 'key': await this.executeKey(action.text!); break;
         }
     }
     
@@ -357,6 +437,26 @@ export class FluentChain {
         this.log(`wait(${Math.round(duration)}ms)`);
         await new Promise(r => setTimeout(r, duration));
         this.log(`  → waited`);
+    }
+    
+    private async executeShortcut(keys: string): Promise<void> {
+        this.log(`shortcut("${keys}")`);
+        const result = await this.client.executeShortcut(keys);
+        if (!result.success) {
+            await this.failWithScreenshot(`Shortcut failed: ${keys}`, 'shortcut');
+            return;
+        }
+        this.log(`  → shortcut executed`);
+    }
+    
+    private async executeKey(keyName: string): Promise<void> {
+        this.log(`key("${keyName}")`);
+        const result = await this.client.executeKey(keyName);
+        if (!result.success) {
+            await this.failWithScreenshot(`Key failed: ${keyName}`, 'key');
+            return;
+        }
+        this.log(`  → key executed`);
     }
     
     private async failWithScreenshot(message: string, step: string, context?: { windowSelector?: string; xpath?: string }): Promise<void> {

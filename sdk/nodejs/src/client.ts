@@ -156,6 +156,28 @@ export class HttpClient {
         return response.data;
     }
     
+    /**
+     * 执行快捷键组合
+     * @param keys 快捷键字符串，如 "Ctrl+C", "Alt+F4"
+     */
+    async executeShortcut(keys: string): Promise<{ success: boolean; error?: string }> {
+        const response = await this.client.post<{ success: boolean; error?: string }>('/api/keyboard/shortcut', {
+            keys,
+        });
+        return response.data;
+    }
+    
+    /**
+     * 执行单个按键
+     * @param key 按键名称，如 "Enter", "Tab", "Escape"
+     */
+    async executeKey(key: string): Promise<{ success: boolean; error?: string }> {
+        const response = await this.client.post<{ success: boolean; error?: string }>('/api/keyboard/key', {
+            key,
+        });
+        return response.data;
+    }
+    
     handleError(error: unknown): Error {
         if (axios.isAxiosError(error)) {
             const axiosError = error as AxiosError<{ error?: string }>;

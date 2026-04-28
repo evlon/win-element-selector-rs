@@ -64,6 +64,22 @@ export declare class FluentChain {
      */
     type(text: string): this;
     /**
+     * 等待元素出现（轮询检查）
+     * @param xpath 元素 XPath
+     * @param options timeout: 最大等待时间 (ms), interval: 检查间隔 (ms)
+     */
+    waitFor(xpath: string, options?: {
+        timeout?: number;
+        interval?: number;
+    }): Promise<ElementInfo>;
+    /**
+     * 等待元素消失（轮询检查）
+     */
+    waitUntilGone(xpath: string, options?: {
+        timeout?: number;
+        interval?: number;
+    }): Promise<void>;
+    /**
      * 等待指定时间
      */
     wait(ms: number, randomMax?: number): this;
@@ -90,6 +106,8 @@ export declare class FluentChain {
     private executeClick;
     private executeType;
     private executeWait;
+    private executeShortcut;
+    private executeKey;
     private failWithScreenshot;
     private getHumanizedDuration;
     private getHumanizedCharDelay;
