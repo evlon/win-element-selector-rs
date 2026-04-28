@@ -11,6 +11,7 @@ use super::types::{
     Point,
 };
 use super::super::mouse_control;
+use super::idle_motion::with_auto_pause;
 
 /// POST /api/mouse/move
 /// 拟人化移动鼠标到目标坐标
@@ -24,43 +25,46 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
         options.humanize, options.trajectory, options.duration
     );
     
-    // 获取当前鼠标位置
-    let start_point = mouse_control::get_cursor_position();
-    
-    // 执行移动
-    let result = if options.humanize {
-        mouse_control::humanized_move(
-            start_point,
-            request.target,
-            options.duration,
-            &options.trajectory,
-        )
-    } else {
-        mouse_control::linear_move(start_point, request.target)
-    };
-    
-    match result {
-        Ok(_) => {
-            info!("Mouse moved successfully");
-            HttpResponse::Ok().json(MouseMoveResponse {
-                success: true,
+    // 使用 with_auto_pause 包装，自动暂停空闲移动
+    with_auto_pause(|| async {
+        // 获取当前鼠标位置
+        let start_point = mouse_control::get_cursor_position();
+        
+        // 执行移动
+        let result = if options.humanize {
+            mouse_control::humanized_move(
                 start_point,
-                end_point: request.target,
-                duration_ms: options.duration,
-                error: None,
-            })
+                request.target,
+                options.duration,
+                &options.trajectory,
+            )
+        } else {
+            mouse_control::linear_move(start_point, request.target)
+        };
+        
+        match result {
+            Ok(_) => {
+                info!("Mouse moved successfully");
+                HttpResponse::Ok().json(MouseMoveResponse {
+                    success: true,
+                    start_point,
+                    end_point: request.target,
+                    duration_ms: options.duration,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                warn!("Mouse move failed: {}", e);
+                HttpResponse::Ok().json(MouseMoveResponse {
+                    success: false,
+                    start_point,
+                    end_point: request.target,
+                    duration_ms: 0,
+                    error: Some(e.to_string()),
+                })
+            }
         }
-        Err(e) => {
-            warn!("Mouse move failed: {}", e);
-            HttpResponse::Ok().json(MouseMoveResponse {
-                success: false,
-                start_point,
-                end_point: request.target,
-                duration_ms: 0,
-                error: Some(e.to_string()),
-            })
-        }
-    }
+    }).await
 }
 
 /// POST /api/mouse/click
@@ -112,66 +116,71 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         // 计算随机点击点
                         let click_point = calculate_random_click_point(&rect_api, options.random_range);
                         
-                        // Step 3: 执行拟人化移动和点击
-                        let start_point = mouse_control::get_cursor_position();
+                        // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
+                        let click_point_copy = click_point;
+                        let options_copy = options.clone();
                         
-                        let move_result = if options.humanize {
-                            mouse_control::humanized_move(
-                                start_point,
-                                click_point,
-                                600, // 默认移动时间
-                                "bezier",
-                            )
-                        } else {
-                            mouse_control::linear_move(start_point, click_point)
-                        };
-                        
-                        if let Err(e) = move_result {
-                            warn!("Move to click position failed: {}", e);
-                            return HttpResponse::Ok().json(MouseClickResponse {
-                                success: false,
-                                click_point,
-                                element: None,
-                                error: Some(format!("移动失败: {}", e)),
-                            });
-                        }
-                        
-                        // 点击前停顿
-                        if options.pause_before > 0 {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(options.pause_before)).await;
-                        }
-                        
-                        // 执行点击
-                        let click_result = mouse_control::click_at(click_point);
-                        
-                        // 点击后停顿
-                        if options.pause_after > 0 {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(options.pause_after)).await;
-                        }
-                        
-                        match click_result {
-                            Ok(_) => {
-                                info!("Click executed successfully at ({}, {})", click_point.x, click_point.y);
-                                HttpResponse::Ok().json(MouseClickResponse {
-                                    success: true,
-                                    click_point,
-                                    element: Some(super::types::ClickedElement {
-                                        control_type: "Element".to_string(),
-                                        name: String::new(),
-                                    }),
-                                    error: None,
-                                })
-                            }
-                            Err(e) => {
-                                warn!("Click failed: {}", e);
-                                HttpResponse::Ok().json(MouseClickResponse {
+                        with_auto_pause(|| async {
+                            let start_point = mouse_control::get_cursor_position();
+                            
+                            let move_result = if options_copy.humanize {
+                                mouse_control::humanized_move(
+                                    start_point,
+                                    click_point_copy,
+                                    600,
+                                    "bezier",
+                                )
+                            } else {
+                                mouse_control::linear_move(start_point, click_point_copy)
+                            };
+                            
+                            if let Err(e) = move_result {
+                                warn!("Move to click position failed: {}", e);
+                                return HttpResponse::Ok().json(MouseClickResponse {
                                     success: false,
-                                    click_point,
+                                    click_point: click_point_copy,
                                     element: None,
-                                    error: Some(format!("点击失败: {}", e)),
-                                })
+                                    error: Some(format!("移动失败: {}", e)),
+                                });
                             }
-                        }
+                            
+                            // 点击前停顿
+                            if options_copy.pause_before > 0 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_before)).await;
+                            }
+                            
+                            // 执行点击
+                            let click_result = mouse_control::click_at(click_point_copy);
+                            
+                            // 点击后停顿
+                            if options_copy.pause_after > 0 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_after)).await;
+                            }
+                            
+                            match click_result {
+                                Ok(_) => {
+                                    info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
+                                    HttpResponse::Ok().json(MouseClickResponse {
+                                        success: true,
+                                        click_point: click_point_copy,
+                                        element: Some(super::types::ClickedElement {
+                                            control_type: "Element".to_string(),
+                                            name: String::new(),
+                                        }),
+                                        error: None,
+                                    })
+                                }
+                                Err(e) => {
+                                    warn!("Click failed: {}", e);
+                                    HttpResponse::Ok().json(MouseClickResponse {
+                                        success: false,
+                                        click_point: click_point_copy,
+                                        element: None,
+                                        error: Some(format!("点击失败: {}", e)),
+                                    })
+                                }
+                            }
+                        }).await
                     } else {
                         HttpResponse::Ok().json(MouseClickResponse {
                             success: false,

@@ -22,6 +22,7 @@ crossbeam-channel = "0.5"
 # HTTP 服务化依赖
 actix-web = "4"
 tokio     = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 rand      = "0.8"
 clap      = { version = "4", features = ["derive"] }
 
