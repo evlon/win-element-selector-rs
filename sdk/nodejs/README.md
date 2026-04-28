@@ -138,6 +138,66 @@ const sdk = new ElementSelectorSDK({
 | `typeOptions.charDelay.min` | `50` | Min char delay (ms) |
 | `typeOptions.charDelay.max` | `150` | Max char delay (ms) |
 
+## Testing
+
+### Run Tests
+
+```bash
+# 安装依赖
+npm install
+
+# 运行所有测试
+npm test
+
+# 运行特定测试
+npm test --testPathPattern=types       # 类型测试
+npm test --testPathPattern=utils       # 工具函数测试
+npm test --testPathPattern=integration  # 集成测试（需要服务器运行）
+```
+
+### Integration Tests
+
+集成测试需要 `element-selector-server` 服务运行:
+
+```bash
+# 1. 启动服务器（在项目根目录）
+cd ../..
+cargo run --bin element-selector-server
+
+# 2. 等待服务器启动（约 3 秒）
+# 3. 运行集成测试
+npm test --testPathPattern=integration
+```
+
+## Examples
+
+示例代码位于 `examples/` 目录:
+
+| 文件 | 说明 |
+|------|------|
+| `basic-usage.ts` | 基本使用：健康检查、窗口列表、元素查找、点击、打字 |
+| `humanize-demo.ts` | 拟人化操作：humanize 上下文、链式调用 |
+| `idle-motion-demo.ts` | 空闲移动：启动、监控状态、执行操作、停止 |
+
+### Run Examples
+
+```bash
+# 1. 启动服务器
+cd ../..
+cargo run --bin element-selector-server
+
+# 2. 运行示例（在 SDK 目录）
+cd sdk/nodejs
+n
+# 编译 TypeScript
+npm run build
+
+# 运行示例
+npx ts-node examples/basic-usage.ts
+npx ts-node examples/humanize-demo.ts
+npx ts-node examples/idle-motion-demo.ts
+```
+
 ## License
 
 MIT
