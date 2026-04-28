@@ -682,6 +682,8 @@ pub async fn get_idle_motion_status() -> impl Responder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Duration 在某些测试中可能需要，预留
+    #[allow(unused_imports)]
     use std::time::Duration;
     
     /// 测试 IdleMotionState 默认值

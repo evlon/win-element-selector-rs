@@ -33,7 +33,7 @@ async function main() {
         await sdk.chain()
             .humanize()                     // 开启拟人化
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -49,7 +49,7 @@ async function main() {
         const chain = sdk.chain()
             .profile()                      // 开启性能监控
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -67,7 +67,7 @@ async function main() {
         console.log('5. 元素信息查询...');
         const info = await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -86,7 +86,7 @@ async function main() {
         console.log('6. 等待元素示例...');
         const elem = await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -98,7 +98,7 @@ async function main() {
         console.log('7. 快捷键示例...');
         await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -115,7 +115,7 @@ async function main() {
         console.log('8. 断言示例...');
         await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -123,7 +123,7 @@ async function main() {
         
         await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })
@@ -135,7 +135,7 @@ async function main() {
         console.log('9. 数据提取示例...');
         const items = await sdk.chain()
             .window({
-                title: notepad.title,
+                // title: notepad.title,
                 className: notepad.className,
                 processName: notepad.processName,
             })

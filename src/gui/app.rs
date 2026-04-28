@@ -65,7 +65,11 @@ pub struct SelectorApp {
     /// 窗口属性过滤器（用于窗口元素模式）
     window_filters: Vec<PropertyFilter>,
 
+    /// 窗口列表（用于窗口选择面板，预留功能）
+    #[allow(dead_code)]
     available_windows: Vec<WindowInfo>,
+    /// 是否显示窗口选择面板（预留功能）
+    #[allow(dead_code)]
     show_window_panel: bool,
 
     xpath_text:      String,         // Combined display: "window_selector, element_xpath"
@@ -1476,6 +1480,8 @@ fn prop_row(ui: &mut Ui, key: &str, val: &str) {
     ui.add_space(2.0);
 }
 
+/// Truncate string to max chars with ellipsis（预留功能）
+#[allow(dead_code)]
 fn truncate_str(s: &str, max_chars: usize) -> String {
     let mut cs = s.chars();
     let collected: String = cs.by_ref().take(max_chars).collect();
