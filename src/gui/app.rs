@@ -1,4 +1,4 @@
-// src/app.rs
+// src/gui/app.rs
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -7,14 +7,19 @@ use eframe::egui::{
 };
 use log::info;
 
-use crate::{
-    capture,
-    capture_overlay::CaptureOverlay,
-    highlight,
-    model::{AppConfig, DetailedValidationResult, ElementTab, HighlightInfo, HierarchyNode, Operator, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo},
-    mouse_hook::{self, CaptureMode},
-    xpath,
+// 引用核心模块（通过 lib.rs 导出）
+use element_selector::core::model::{
+    AppConfig, DetailedValidationResult, ElementTab, HighlightInfo,
+    HierarchyNode, Operator, PropertyFilter, SegmentValidationResult,
+    ValidationResult, WindowInfo,
 };
+use element_selector::core::xpath;
+use element_selector::capture;
+
+// 引用同目录的 GUI 模块
+use super::capture_overlay::CaptureOverlay;
+use super::highlight;
+use super::mouse_hook::{self, CaptureMode};
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C_TITLE_BG:  Color32 = Color32::from_rgb(30,  58, 100);

@@ -1,10 +1,13 @@
-// src/error.rs
+// src/core/error.rs
+//
+// Core error types shared between GUI and HTTP API.
+
 use thiserror::Error;
 
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum SelectorError {
-    #[error("UI Automation 初始化失败: {0}")]
+    #[error("UI automation 初始化失败: {0}")]
     ComInit(String),
 
     #[error("无法创建 IUIAutomation 实例: {0}")]

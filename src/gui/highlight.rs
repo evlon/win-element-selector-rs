@@ -1,10 +1,10 @@
-// src/highlight.rs
+// src/gui/highlight.rs
 //
 // 元素高亮显示 - 使用两个独立窗口：
 // 1. 标签窗口：显示元素类型，宽度自适应文字
 // 2. 高亮框窗口：纯边框，中空透明
 
-use crate::model::{ElementRect, HighlightInfo};
+use element_selector::core::model::{ElementRect, HighlightInfo};
 use log::error;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;

@@ -37,123 +37,30 @@
 
 ## 2. HTTP 服务化
 
-**状态：** 🔄 进行中  
-**优先级：** ⭐⭐⭐ 高
+**状态:** ✅ 已完成（核心部分）
+**优先级:** ⭐⭐⭐ 高
 
-### 目标
-将当前桌面程序改造为后台服务，开放 HTTP API 供 Node.js SDK 调用。
+### 已完成功能
+- ✅ **HTTP 服务架构（Actix-web）**
+  - 独立二进制入口 src/bin/server.rs
+  - 端口 8080，4 workers
 
-### 核心 API（4 个接口）
+- ✅ **核心 API（4 个接口）**
+  - GET /api/element - 元素查找与坐标计算
+  - POST /api/window/list - 窗口列表
+  - POST /api/mouse/move - 拟人化鼠标移动
+  - POST /api/mouse/click - 拟人化鼠标点击
 
-#### GET /api/element
-根据 XPath 获取元素信息，包含坐标计算。
+- ✅ **鼠标拟人化模块**
+  - 三次贝塞尔曲线轨迹生成
+  - Sinusoidal ease-in-out 缓动函数
+  - 随机坐标计算（randomRange 参数）
+  - SendInput API 模拟
 
-**请求参数：**
-```json
-{
-  "window": { "title": "微信", "className": "mmui::MainWindow" },
-  "xpath": "//Button[@AutomationId='btnSend']",
-  "options": { "randomRange": 0.55 }
-}
-```
-
-**响应：**
-```json
-{
-  "found": true,
-  "element": {
-    "rect": { "x": 800, "y": 600, "width": 80, "height": 30 },
-    "center": { "x": 840, "y": 615 },
-    "centerRandom": { "x": 838, "y": 612 },
-    "controlType": "Button",
-    "name": "发送",
-    "isEnabled": true
-  }
-}
-```
-
-#### POST /api/window/list
-列出当前所有可用窗口。
-
-**响应：**
-```json
-{
-  "windows": [
-    { "title": "微信", "className": "mmui::MainWindow", "processId": 12345, "processName": "Weixin" },
-    { "title": "Chrome", "className": "Chrome_WidgetWin_1", "processId": 67890, "processName": "chrome" }
-  ]
-}
-```
-
-#### POST /api/mouse/move
-拟人化移动鼠标到目标坐标。
-
-**请求：**
-```json
-{
-  "target": { "x": 840, "y": 615 },
-  "options": {
-    "humanize": true,
-    "trajectory": "bezier",
-    "duration": 600
-  }
-}
-```
-
-#### POST /api/mouse/click
-拟人化点击元素。
-
-**请求：**
-```json
-{
-  "window": { "title": "微信" },
-  "xpath": "//Button[@AutomationId='btnSend']",
-  "options": {
-    "humanize": true,
-    "randomRange": 0.55,
-    "pauseAfter": 800
-  }
-}
-```
-
-### Node.js SDK（优先开发）
-
-```typescript
-import { ElementSelector } from '@element-selector/sdk';
-
-const client = new ElementSelector({ host: 'localhost', port: 8080 });
-
-// 1. 获取元素信息（含坐标）
-const element = await client.getElement({
-  window: { title: "微信" },
-  xpath: "//Button[@AutomationId='btnSend']"
-});
-console.log(element.center);        // { x: 840, y: 615 }
-console.log(element.centerRandom);  // { x: 838, y: 612 }
-
-// 2. 列出窗口
-const windows = await client.listWindows();
-
-// 3. 拟人化移动鼠标
-await client.mouseMove({
-  target: element.centerRandom,
-  humanize: true,
-  trajectory: 'bezier',
-  duration: 600
-});
-
-// 4. 拟人化点击元素
-await client.mouseClick({
-  window: { title: "微信" },
-  xpath: "//Button[@AutomationId='btnSend']",
-  humanize: true,
-  randomRange: 0.55
-});
-```
-
-### 技术选型
-- Actix-web（Rust 后端）
-- TypeScript（Node.js SDK）
+### 待优化
+- 📋 Node.js SDK 开发
+- 📋 API 认证机制（可选）
+- 📋 示例代码与文档
 
 ---
 
@@ -256,18 +163,18 @@ centerRandom = {
 7. ✅ 复制按钮和历史记录
 
 ### Phase 2: HTTP 服务 + Node.js SDK（当前阶段）
-**目标时间：1-2 个月**
+**目标时间：已完成核心 API**
 
-1. 🔄 HTTP 服务架构（Actix-web）
-2. 📋 实现 4 个核心 API
+1. ✅ HTTP 服务架构（Actix-web）
+2. ✅ 实现 4 个核心 API
    - GET /api/element
    - POST /api/window/list
    - POST /api/mouse/move
    - POST /api/mouse/click
-3. 📋 Node.js SDK 开发
-4. 📋 拟人化鼠标模块
+3. ✅ 拟人化鼠标模块
    - 贝塞尔曲线轨迹生成
    - 随机坐标计算
+4. 📋 Node.js SDK 开发
 5. 📋 示例代码与文档
 
 ### Phase 3: 高级特性（后续规划）

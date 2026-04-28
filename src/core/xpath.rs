@@ -1,5 +1,9 @@
-// src/xpath.rs
-use crate::model::{HierarchyNode, XPathResult, WindowInfo};
+// src/core/xpath.rs
+//
+// XPath generation and validation utilities.
+// Shared between GUI and HTTP API.
+
+use super::model::{HierarchyNode, XPathResult, WindowInfo};
 
 /// Build the complete XPath result from the captured hierarchy.
 /// The hierarchy now starts from the Window node.
@@ -200,7 +204,7 @@ fn check_brackets(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ElementRect, HierarchyNode};
+    use super::super::model::{ElementRect, HierarchyNode};
 
     fn node(ct: &str, aid: &str, name: &str) -> HierarchyNode {
         HierarchyNode::new(ct, aid, "", name, 0, ElementRect::default(), 0)
@@ -411,7 +415,7 @@ mod tests {
     /// Test new operators: NotContains, NotStartsWith, NotEndsWith
     #[test]
     fn new_string_operators() {
-        use crate::model::Operator;
+        use super::super::model::Operator;
         
         // NotContains
         let pred = Operator::NotContains.to_predicate("Name", "test");
@@ -433,7 +437,7 @@ mod tests {
     /// Test numeric comparison operators
     #[test]
     fn numeric_comparison_operators() {
-        use crate::model::Operator;
+        use super::super::model::Operator;
         
         // GreaterThan
         assert_eq!(Operator::GreaterThan.to_predicate("Index", "5"), "@Index > 5");

@@ -1,14 +1,11 @@
 // src/main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod capture;
-mod capture_overlay;
-mod error;
-mod highlight;
-mod model;
-mod mouse_hook;
-mod xpath;
+// GUI 模块
+mod gui;
+
+use gui::SelectorApp;
+use gui::mouse_hook;
 
 use eframe::egui;
 use log::info;
@@ -72,7 +69,7 @@ fn main() -> anyhow::Result<()> {
             }
             
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(app::SelectorApp::new(cc)) as Box<dyn eframe::App>)
+            Ok(Box::new(SelectorApp::new(cc)) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))

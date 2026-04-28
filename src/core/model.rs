@@ -1,4 +1,7 @@
-// src/model.rs
+// src/core/model.rs
+//
+// Core data models shared between GUI and HTTP API.
+
 use serde::{Deserialize, Serialize};
 
 // ─── Operator ────────────────────────────────────────────────────────────────
