@@ -557,6 +557,10 @@ pub mod windows_impl {
                         "Shell_SecondaryTrayWnd", // 第二任务栏
                         "Windows.UI.Core.CoreWindow", // UWP后台窗口
                         "Microsoft.UI.Xaml.Controls.TeachingTip", // 提示框
+                        "ShellTabWindowClass", // 资源管理器标签页
+                        "ProperTreeHost",    // 资源管理器文件树
+                        "DUIListView",        // 资源管理器文件列表
+                        "BrowserRootView",    // WebView子窗口
                     ];
                     
                     if !excluded_classes.contains(&class.as_str()) {
