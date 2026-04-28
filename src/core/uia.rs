@@ -186,7 +186,7 @@ pub mod windows_impl {
                     // Null element means we've reached the root.
                     let is_null = unsafe { 
                         auto.CompareElements(&p, &auto.GetRootElement()?)
-                            .unwrap_or(windows::Win32::Foundation::BOOL(0))
+                            .unwrap_or(windows::core::BOOL(0))
                             .as_bool()
                     };
                     if is_null {
@@ -910,7 +910,13 @@ pub mod windows_impl {
                             "IsOffscreen"          => unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool().to_string()).unwrap_or_default() },
                             _                       => String::new(),
                         };
-                        check_predicate(&actual, op, val)
+                        let result = check_predicate(&actual, op, val);
+                        // Debug log for starts-with failures
+                        if !result && op == "starts-with" {
+                            log::debug!("[XPath] starts-with check failed: attr={}, actual='{}', expected='{}', result={}", 
+                                attr, actual, val, result);
+                        }
+                        result
                     });
                     if all_match {
                         matches.push(elem);

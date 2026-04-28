@@ -184,7 +184,7 @@ pub mod win_hook {
 
         // If nCode < 0, must pass to CallNextHookEx without processing.
         if n_code < 0 {
-            return CallNextHookEx(hook, n_code, w_param, l_param);
+            return CallNextHookEx(Some(hook), n_code, w_param, l_param);
         }
 
         // Check if we should capture this event.
@@ -247,7 +247,7 @@ pub mod win_hook {
         }
 
         // Pass to next hook in chain.
-        CallNextHookEx(hook, n_code, w_param, l_param)
+        CallNextHookEx(Some(hook), n_code, w_param, l_param)
     }
 
     /// Start the hook thread. The hook must be installed in a thread with a message loop.
@@ -271,7 +271,7 @@ pub mod win_hook {
                 SetWindowsHookExW(
                     WH_MOUSE_LL,
                     Some(mouse_hook_proc),
-                    module,
+                    Some(module.into()),
                     0,  // 0 = hook applies to all threads in current desktop
                 )
             };

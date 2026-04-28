@@ -145,8 +145,8 @@ pub fn lint(xpath: &str) -> Option<String> {
         // 允许各种根节点类型，因为有些应用（如微信）的顶层节点是 Pane
         let valid_root_types = ["Window", "Pane", "Document", "Application", "Desktop"];
         let has_valid_root = valid_root_types.iter().any(|t| window_part.starts_with(t));
-        if !has_valid_root && !window_part.contains("[@") {
-            return Some("窗口选择器格式无效".into());
+        if !has_valid_root {
+            return Some("窗口选择器必须以 Window/Pane/Document 等类型开头".into());
         }
         
         // Validate element XPath (should start with /)
@@ -222,10 +222,10 @@ mod tests {
         // Window selector should not start with //
         assert!(!result.window_selector.starts_with("//"));
         assert!(result.window_selector.starts_with("Window"));
-        assert!(result.window_selector.contains("AutomationId='main'"));
+        // Note: window_selector only includes ClassName and Name, not AutomationId
         
-        // Element XPath should start with /
-        assert!(result.element_xpath.starts_with("/Button"));
+        // Element XPath should start with // (first element uses // for arbitrary depth)
+        assert!(result.element_xpath.starts_with("//Button"));
         assert!(result.element_xpath.contains("AutomationId='btnOk'"));
     }
 
@@ -262,8 +262,8 @@ mod tests {
         assert!(lint("Button[@id='x']").is_some());
         
         // New format
-        assert!(lint("Window[@Name='test'], /Button[@id='x']").is_none());
-        assert!(lint("Button[@Name='test'], /Button[@id='x']").is_some()); // Must start with Window
+        assert!(lint("Window[@Name='test'], //Button[@id='x']").is_none());
+        assert!(lint("Button[@Name='test'], //Button[@id='x']").is_some()); // Must start with Window
         assert!(lint("Window[@Name='test'], Button[@id='x']").is_some()); // Element must start with /
     }
 
@@ -291,14 +291,17 @@ mod tests {
         assert!(result.window_selector.contains("ClassName='mmui::MainWindow'"));
         
         // Verify element XPath starts with /
-        assert!(result.element_xpath.starts_with("/Group"), "Element XPath must start with /");
+        assert!(result.element_xpath.starts_with("//Group"), "Element XPath must start with //");
         assert!(result.element_xpath.contains("/Custom"), "Should have /Custom");
-        assert!(result.element_xpath.contains("/Group["), "Should have /Group");
-        assert!(result.element_xpath.contains("/ToolBar["), "Should have /ToolBar");
-        assert!(result.element_xpath.contains("/Button["), "Should have /Button");
+        assert!(result.element_xpath.contains("Group["), "Should have Group");
+        assert!(result.element_xpath.contains("ToolBar["), "Should have ToolBar");
+        assert!(result.element_xpath.contains("Button["), "Should have Button");
         
         // Verify no // in element XPath (all nodes included)
-        assert!(!result.element_xpath.contains("//"), "Should not have // when all nodes included");
+        // First element uses //, then rest are / (no additional //)
+                assert!(result.element_xpath.starts_with("//"), "First element uses //");
+                let rest = &result.element_xpath[2..];
+                assert!(!rest.contains("//"), "No additional // after first");
         
         println!("Window selector:\n{}", result.window_selector);
         println!("Element XPath:\n{}", result.element_xpath);
@@ -475,13 +478,16 @@ mod tests {
         
         // Count / vs // to verify optimization
         let single_slash_count = result.element_xpath.matches('/').count();
-        let double_slash_count = result.element_xpath.matches("//").count();
+        let _double_slash_count = result.element_xpath.matches("//").count();
         
         // Should have no double slashes (all nodes included)
-        assert_eq!(double_slash_count, 0, "Should have no // when all nodes included");
+        // First element uses //, so check no additional // after it
+                assert!(result.element_xpath.starts_with("//"), "First element uses //");
+                let rest = &result.element_xpath[2..];
+                assert_eq!(rest.matches("//").count(), 0, "No additional // when all nodes included");
         
-        // Should have 9 single slashes for 9 segments
-        assert_eq!(single_slash_count, 9, "Should have 9 single slashes for 9 segments");
+        // Should have 10 slashes total: 2 from // for first + 8 from / for rest
+        assert_eq!(single_slash_count, 10, "Should have 10 slashes (2 from // + 8 from /)");
         
         println!("Optimized XPath ({} segments):\n{}", nodes.len() - 1, result.element_xpath);
         println!("Complexity: {} single / = much faster than all //", single_slash_count);

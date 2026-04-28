@@ -153,14 +153,14 @@ mod windows_impl {
                     unsafe {
                         // 只从边框窗口获取消息，避免截获其他窗口的消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, Some(bh), 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
                         }
                         // 同时检查标签窗口的消息
-                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        let has_msg2 = PeekMessageW(&mut msg, Some(lh), 0, 0, PM_REMOVE);
                         if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
@@ -207,13 +207,13 @@ mod windows_impl {
                     unsafe {
                         // 只从高亮窗口获取消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, Some(bh), 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
                         }
-                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        let has_msg2 = PeekMessageW(&mut msg, Some(lh), 0, 0, PM_REMOVE);
                         if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
@@ -243,11 +243,11 @@ mod windows_impl {
         
         if border_val != 0 {
             BORDER_HWND.store(0, Ordering::SeqCst);
-            unsafe { let _ = PostMessageW(HWND(border_val as _), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            unsafe { let _ = PostMessageW(Some(HWND(border_val as _)), WM_CLOSE, WPARAM(0), LPARAM(0)); }
         }
         if label_val != 0 {
             LABEL_HWND.store(0, Ordering::SeqCst);
-            unsafe { let _ = PostMessageW(HWND(label_val as _), WM_CLOSE, WPARAM(0), LPARAM(0)); }
+            unsafe { let _ = PostMessageW(Some(HWND(label_val as _)), WM_CLOSE, WPARAM(0), LPARAM(0)); }
         }
         thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -278,13 +278,13 @@ mod windows_impl {
                     unsafe {
                         // 只从高亮窗口获取消息
                         let mut msg = std::mem::zeroed();
-                        let has_msg = PeekMessageW(&mut msg, bh, 0, 0, PM_REMOVE);
+                        let has_msg = PeekMessageW(&mut msg, Some(bh), 0, 0, PM_REMOVE);
                         if has_msg.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
                             let _ = DispatchMessageW(&msg);
                         }
-                        let has_msg2 = PeekMessageW(&mut msg, lh, 0, 0, PM_REMOVE);
+                        let has_msg2 = PeekMessageW(&mut msg, Some(lh), 0, 0, PM_REMOVE);
                         if has_msg2.as_bool() {
                             if msg.message == WM_QUIT { break; }
                             let _ = TranslateMessage(&msg);
@@ -335,7 +335,7 @@ mod windows_impl {
                 Ok(h) => {
                     // 使用颜色键: Cyan 区域透明
                     let _ = SetLayeredWindowAttributes(h, COLORREF(TRANSPARENT_KEY), 0, LWA_COLORKEY);
-                    let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                     Some(h)
                 }
                 Err(e) => {
@@ -360,14 +360,14 @@ mod windows_impl {
                 let border_brush = CreateSolidBrush(COLORREF(HIGHLIGHT_COLOR));
                 
                 // 填充中心为透明色 (Cyan)
-                let old_bg = SelectObject(hdc, bg_brush);
+                let old_bg = SelectObject(hdc, bg_brush.into());
                 let mut rc = RECT::default();
                 if GetClientRect(hwnd, &mut rc).is_ok() {
                     let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
                 }
                 
                 // 绘制边框四条边 (绿色)
-                let old_border = SelectObject(hdc, border_brush);
+                let old_border = SelectObject(hdc, border_brush.into());
                 // 上边
                 let _ = Rectangle(hdc, 0, 0, rc.right, BORDER_WIDTH);
                 // 下边
@@ -379,8 +379,8 @@ mod windows_impl {
                 
                 SelectObject(hdc, old_bg);
                 SelectObject(hdc, old_border);
-                let _ = DeleteObject(bg_brush);
-                let _ = DeleteObject(border_brush);
+                let _ = DeleteObject(bg_brush.into());
+                let _ = DeleteObject(border_brush.into());
                 
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
@@ -437,7 +437,7 @@ mod windows_impl {
                     // 不使用 LWA_COLORKEY，整个窗口都是实色的
                     use windows::Win32::UI::WindowsAndMessaging::LWA_ALPHA;
                     let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
-                    let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                     Some(h)
                 }
                 Err(e) => {
@@ -471,7 +471,7 @@ mod windows_impl {
                 
                 // 绘制绿色背景
                 let bg_brush = CreateSolidBrush(COLORREF(HIGHLIGHT_COLOR));
-                let old_bg = SelectObject(hdc, bg_brush);
+                let old_bg = SelectObject(hdc, bg_brush.into());
                 
                 let mut rc = RECT::default();
                 if GetClientRect(hwnd, &mut rc).is_ok() {
@@ -503,7 +503,7 @@ mod windows_impl {
                 
                 SelectObject(hdc, old_bg);
                 SelectObject(hdc, old_font);
-                let _ = DeleteObject(bg_brush);
+                let _ = DeleteObject(bg_brush.into());
                 
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)

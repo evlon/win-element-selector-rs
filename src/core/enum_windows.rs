@@ -3,10 +3,12 @@
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{
-    Foundation::{BOOL, HWND, LPARAM, CloseHandle, HANDLE},
+    Foundation::{HWND, LPARAM, CloseHandle, HANDLE},
     System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
     UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible},
 };
+#[cfg(target_os = "windows")]
+use windows::core::BOOL;
 
 use super::model::WindowInfo;
 
