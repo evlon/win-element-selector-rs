@@ -1,118 +1,149 @@
 // sdk/nodejs/examples/basic-usage.ts
-// 基本使用示例 - 展示安全操作流程
+// Element Selector SDK 流式调用示例
 
-import { ElementSelectorSDK } from '../src';
+import { SDK, ProfileStats } from '../src';
 
 async function main() {
-    // 创建 SDK 客户端
-    const sdk = new ElementSelectorSDK({
-        baseUrl: 'http://127.0.0.1:8080',
-        timeout: 30000
-    });
+    const sdk = new SDK();
 
     try {
+        console.log('=== Element Selector SDK 流式调用示例 ===');
+        console.log();
+
         // 1. 健康检查
-        console.log('=== 1. 健康检查 ===');
+        console.log('1. 健康检查...');
         const health = await sdk.health();
-        console.log('服务状态:', health);
+        console.log(`   服务状态: ${health.status}`);
         console.log();
 
         // 2. 获取窗口列表
-        console.log('=== 2. 窗口列表 ===');
+        console.log('2. 获取窗口列表...');
         const windows = await sdk.listWindows();
-        console.log(`找到 ${windows.length} 个窗口`);
-        windows.slice(0, 5).forEach(w => {
-            console.log(`  - ${w.title} (${w.processName})`);
-        });
-        console.log();
-
-        // 3. 查找记事本窗口
-        // **重要**: 使用精确的窗口选择器，包含 title + className + processName
-        console.log('=== 3. 激活窗口 ===');
-        const notepadWindow = windows.find(w => w.processName === 'Notepad');
+        const notepad = windows.find(w => w.processName === 'Notepad');
         
-        if (!notepadWindow) {
-            console.log('请先打开一个记事本窗口！');
+        if (!notepad) {
+            console.log('   请先打开一个记事本窗口！');
             return;
         }
-        
-        // 构建精确的窗口选择器
-        const windowSelector = {
-            title: notepadWindow.title,
-            className: notepadWindow.className,
-            processName: notepadWindow.processName,
-        };        
-        console.log('窗口选择器:', windowSelector);
-        
-        // **关键**: 先激活窗口，确保它是前台窗口
-        const activateResult = await sdk.activateWindow(windowSelector);
-        console.log('激活结果:', activateResult.success ? '成功' : '失败');
+        console.log(`   找到记事本: ${notepad.title}`);
         console.log();
 
-        // 4. 查找元素
-        console.log('=== 4. 查找元素 ===');
-        const element = await sdk.getElement({
-            windowSelector: `Window[@Name='${notepadWindow.title}' and @ClassName='${notepadWindow.className}']`,
-            xpath: '//Document',  // 记事本的编辑区域
-            randomRange: 0.55
-        });
+        // 3. 流式调用 - 基础示例
+        console.log('3. 流式调用 - 基础示例...');
+        await sdk.chain()
+            .humanize()                     // 开启拟人化
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .find('//Document')             // 查找编辑区域
+            .click()                        // 点击
+            .type('SDK 流式调用测试')        // 打字
+            .run();                         // 执行
+        console.log('   完成！');
+        console.log();
+
+        // 4. 流式调用 - 性能监控
+        console.log('4. 性能监控示例...');
+        const chain = sdk.chain()
+            .profile()                      // 开启性能监控
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .find('//Document')
+            .click()
+            .type('\n第二行内容')
+            .wait(500);
         
-        if (element.found && element.element) {
-            console.log('找到元素:');
-            console.log(`  位置: (${element.element.rect.x}, ${element.element.rect.y})`);
-            console.log(`  大小: ${element.element.rect.width} x ${element.element.rect.height}`);
-        } else {
-            console.log('未找到元素:', element.error);
+        const stats = await chain.run() as ProfileStats;
+        console.log(`   总耗时: ${stats.totalTime}ms`);
+        console.log(`   步骤: ${stats.steps.map((s: {step: string, time: number}) => `${s.step}(${s.time}ms)`).join(' → ')}`);
+        console.log();
+
+        // 5. 元素信息查询
+        console.log('5. 元素信息查询...');
+        const info = await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .find('//Document')
+            .inspect();
+        
+        if (info) {
+            console.log(`   名称: ${info.name}`);
+            console.log(`   类型: ${info.controlType}`);
+            console.log(`   位置: (${info.rect.x}, ${info.rect.y})`);
+            console.log(`   大小: ${info.rect.width}x${info.rect.height}`);
         }
         console.log();
 
-        // 5. 鼠标移动
-        console.log('=== 5. 鼠标移动 ===');
-        if (element.found && element.element) {
-            const moveResult = await sdk.moveMouse(element.element.centerRandom, {
-                humanize: true,
-                trajectory: 'bezier',
-                duration: 600
-            });
-            console.log('移动结果:', moveResult.success ? '成功' : '失败');
-            console.log(`  耗时: ${moveResult.durationMs}ms`);
-        }
+        // 6. 等待元素出现
+        console.log('6. 等待元素示例...');
+        const elem = await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .waitFor('//Document', { timeout: 5000 });
+        console.log(`   等待完成，元素: ${elem.name}`);
         console.log();
 
-        // 6. 安全点击 - 先激活窗口再点击
-        console.log('=== 6. 安全点击 ===');
-        const clickResult = await sdk.safeClick({
-            window: windowSelector,
-            xpath: '//Document',  // 点击编辑区域
-            options: {
-                humanize: true,
-                randomRange: 0.55,
-                pauseBefore: 100,
-                pauseAfter: 100
-            }
-        });
-        console.log('点击结果:', clickResult.success ? '成功' : '失败');
-        if (!clickResult.success) {
-            console.log('  错误:', clickResult.error);
-        }
+        // 7. 快捷键示例
+        console.log('7. 快捷键示例...');
+        await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .find('//Document')
+            .click()
+            .shortcut('Ctrl+A')            // 全选
+            .wait(200)
+            .shortcut('Ctrl+C')            // 复制
+            .run();
+        console.log('   快捷键执行完成！');
         console.log();
 
-        // 7. 安全打字 - 先激活窗口并聚焦元素，再打字
-        console.log('=== 7. 安全打字 ===');
-        const typeResult = await sdk.safeType(
-            windowSelector,
-            '//Document',  // 记事本编辑区域
-            'Hello, 这是自动输入的测试文本！',
-            { charDelay: { min: 30, max: 80 } }
-        );
-        console.log('打字结果:', typeResult.success ? '成功' : '失败');
-        console.log(`  字符数: ${typeResult.charsTyped}`);
-        console.log(`  耗时: ${typeResult.durationMs}ms`);
+        // 8. 断言示例
+        console.log('8. 断言示例...');
+        await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .assertExists('//Document');    // 断言元素存在
+        
+        await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .assertEnabled('//Document');   // 断言元素可用
+        console.log('   断言通过！');
         console.log();
 
-        console.log('=== 完成 ===');
-        console.log('提示: 使用 safeClick 和 safeType 方法可以确保操作成功');
-        console.log('关键步骤: 1) 使用精确的窗口选择器  2) 先激活窗口  3) 再执行操作');
+        // 9. 数据提取示例
+        console.log('9. 数据提取示例...');
+        const items = await sdk.chain()
+            .window({
+                title: notepad.title,
+                className: notepad.className,
+                processName: notepad.processName,
+            })
+            .findAll('//Document');
+        console.log(`   找到 ${items.length} 个元素`);
+        console.log();
+
+        console.log('=== 所有示例完成 ===');
 
     } catch (error) {
         console.error('错误:', error);
