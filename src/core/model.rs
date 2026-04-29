@@ -2,6 +2,7 @@
 //
 // Core data models shared between GUI and HTTP API.
 
+use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
 use serde::{Deserialize, Serialize};
 
 // ─── Operator ────────────────────────────────────────────────────────────────
@@ -101,6 +102,18 @@ impl PropertyFilter {
         Self { name: name.into(), operator: Operator::Equals, value, enabled }
     }
 
+    /// Create filter with custom operator (e.g., StartsWith for dynamic class names)
+    pub fn new_with_operator(name: impl Into<String>, value: impl Into<String>, operator: Operator) -> Self {
+        let value = value.into();
+        let enabled = !value.is_empty();
+        Self { name: name.into(), operator, value, enabled }
+    }
+
+    /// Create disabled filter (will be skipped in XPath generation)
+    pub fn new_disabled(name: impl Into<String>) -> Self {
+        Self { name: name.into(), operator: Operator::Equals, value: String::new(), enabled: false }
+    }
+
     /// Returns the XPath predicate string, or empty string if disabled/empty.
     pub fn predicate(&self) -> Option<String> {
         if !self.enabled || self.value.is_empty() {
@@ -167,10 +180,23 @@ impl HierarchyNode {
         let nm  = name.into();
 
         // Build filters with extended properties
+        // ClassName: detect dynamic class names and use stable prefix
+        let class_filter = if is_dynamic_class(&cn) {
+            let prefix = extract_stable_prefix(&cn);
+            if prefix.len() >= 4 {
+                PropertyFilter::new_with_operator("ClassName", prefix, Operator::StartsWith)
+            } else {
+                // Prefix too short, disable ClassName filter
+                PropertyFilter::new_disabled("ClassName")
+            }
+        } else {
+            PropertyFilter::new("ClassName", &cn)
+        };
+        
         let mut filters = vec![
             PropertyFilter::new("ControlType",    &ct),
             PropertyFilter::new("AutomationId",   &aid),
-            PropertyFilter::new("ClassName",      &cn),
+            class_filter,
             PropertyFilter::new("Name",           &nm),
         ];
         
@@ -333,9 +359,21 @@ pub struct CaptureResult {
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
 
+/// 单个属性校验失败详情
+#[derive(Debug, Clone)]
+pub struct PredicateFailure {
+    /// 属性名 (如 ClassName, Name)
+    pub attr_name: String,
+    /// XPath 中的期望值
+    pub expected_value: String,
+    /// 实际元素的值（如果能获取）
+    pub actual_value: Option<String>,
+    /// 失败原因提示
+    pub reason: String,
+}
+
 /// Result of validating a single XPath segment.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SegmentValidationResult {
     /// Segment index (0-based)
     pub segment_index: usize,
@@ -347,6 +385,8 @@ pub struct SegmentValidationResult {
     pub match_count: usize,
     /// Time taken to validate this segment (in milliseconds)
     pub duration_ms: u64,
+    /// 失败的 predicate 详情（如果匹配失败）
+    pub predicate_failures: Vec<PredicateFailure>,
 }
 
 /// Detailed validation result with per-segment information.

@@ -13,7 +13,7 @@ pub mod enum_windows;
 // Re-export commonly used types for convenience
 pub use model::*;
 pub use xpath::{generate, lint};
-pub use xpath_optimizer::{XPathOptimizer, OptimizationResult, OptimizationSummary, ClassStrategy, NameStrategy};
+pub use xpath_optimizer::{XPathOptimizer, OptimizationResult, OptimizationSummary};
 pub use error::{SelectorError, Result};
 
 // Re-export fast window enumeration

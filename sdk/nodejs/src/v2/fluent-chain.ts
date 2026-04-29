@@ -14,8 +14,8 @@ export interface ProfileStats {
     steps: { step: string; time: number; xpath?: string }[];
 }
 
-// 使用 types.ts 中定义的 ElementInfo
-export { ElementInfo } from '../types';
+// 使用 types.ts 中定义的 ElementInfo（类型导出）
+export type { ElementInfo } from '../types';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 链式操作动作定义

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Color32, Frame, Key, Layout, Margin, RichText,
-    Rounding, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
+    ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use log::info;
 
@@ -246,20 +246,12 @@ impl SelectorApp {
         };
         
         // Generate element XPath from element hierarchy
-        // 正常情况：跳过 hierarchy[0]（窗口根节点），因为窗口选择器已经单独处理
-        // 锚点优化后：hierarchy[0] 是锚点节点，不应跳过
-        let (element_nodes, _use_anchor_xpath) = if self.optimization_summary.is_some() && self.hierarchy.len() == 2 {
-            // 锚点优化：hierarchy = [锚点节点, 叶子节点]
-            (&self.hierarchy[..], true)  // 使用全部节点
-        } else if self.hierarchy.len() > 1 {
-            (&self.hierarchy[1..], false)
-        } else {
-            (&self.hierarchy[0..0], false)  // empty slice
-        };
+        // self.hierarchy 已经是从窗口节点之后截取的（捕获时 window_idx + 1），
+        // 所以直接使用完整 hierarchy，不需要再跳过第一个节点
         let element_xpath = if self.show_simplified {
-            xpath::generate_simplified_elements(element_nodes)
+            xpath::generate_simplified_elements(&self.hierarchy)
         } else {
-            xpath::generate_elements(element_nodes)
+            xpath::generate_elements(&self.hierarchy)
         };
         
         // Update all three fields
@@ -338,20 +330,18 @@ impl SelectorApp {
             info!("[智能优化] 使用锚点: {}", result.summary.anchor_description.clone().unwrap_or_default());
         }
         
-        // 2. 更新 hierarchy
-        self.hierarchy = result.hierarchy;
+        // 2. 更新优化摘要（不修改 hierarchy，保持 UI 树完整）
         self.optimization_summary = Some(result.summary.clone());
-        
-        // 打印优化后的状态
-        info!("[智能优化] 优化后节点状态:");
-        for (i, node) in self.hierarchy.iter().enumerate() {
-            let segment = node.xpath_segment();
-            info!("[智能优化] 优化后节点[{}] {}", i, segment);
-        }
-        
-        // 3. 重新生成 XPath
-        self.custom_xpath = false;
-        self.rebuild_xpath();
+                
+        // 打印优化后的 XPath
+        info!("[智能优化] 锚点索引: {}, 目标索引: {}", result.anchor_index.unwrap_or(0), result.target_index);
+        info!("[智能优化] 优化后 XPath: {}", result.optimized_xpath);
+                
+        // 3. 直接使用优化后的 XPath 字符串
+        self.element_xpath = result.optimized_xpath.clone();
+        self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+        self.xpath_error = xpath::lint(&self.xpath_text);
+        self.custom_xpath = true;  // 标记为自定义，因为使用了优化后的 XPath
         
         info!("[智能优化] 优化后 XPath: {}", self.element_xpath);
         
@@ -406,18 +396,41 @@ impl SelectorApp {
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
         } else {
-            // Find Window node position
-            let window_idx = result.hierarchy.iter()
-                .position(|n| n.control_type == "Window")
-                .unwrap_or(0);
+            // 找到窗口节点位置：优先匹配 window_info，其次匹配 Window 控制类型
+            let window_idx = if let Some(ref win) = result.window_info {
+                // 方法1：按 window_info 的 class_name 和 process_id 匹配
+                result.hierarchy.iter()
+                    .position(|n| n.class_name == win.class_name && n.process_id == win.process_id)
+                    .or_else(|| {
+                        // 方法2：按 process_id 匹配（某些窗口 class_name 可能不一致）
+                        result.hierarchy.iter()
+                            .position(|n| n.process_id == win.process_id)
+                    })
+                    .or_else(|| {
+                        // 方法3：找 Window 控制类型
+                        result.hierarchy.iter()
+                            .position(|n| n.control_type == "Window")
+                    })
+                    .unwrap_or(0)
+            } else {
+                // 无 window_info 时，找 Window 控制类型
+                result.hierarchy.iter()
+                    .position(|n| n.control_type == "Window")
+                    .unwrap_or(0)
+            };
                 
-            // Debug: log window info
+            // Debug: log window info and hierarchy nodes
+            info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
+            for (i, n) in result.hierarchy.iter().enumerate() {
+                info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+            }
             if let Some(ref win) = result.window_info {
                 info!("Window info extracted: class='{}', name='{}', process='{}', pid={}", 
                       win.class_name, win.title, win.process_name, win.process_id);
             } else {
                 info!("No window info extracted from hierarchy");
             }
+            info!("窗口节点定位: window_idx = {}", window_idx);
                 
             // Extract element hierarchy (nodes after Window) for tree display
             let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
@@ -608,7 +621,7 @@ impl SelectorApp {
             .fill(Color32::from_gray(252))
             .inner_margin(Margin::symmetric(10.0, 6.0))
             .stroke(Stroke::new(1.0, C_BORDER))
-            .rounding(Rounding::same(4.0))
+            .rounding(egui::Rounding::same(4.0))
             .show(ui, |ui| {
                 match self.active_tab {
                     ElementTab::Element => self.draw_element_xpath_content(ui),
@@ -624,7 +637,7 @@ impl SelectorApp {
             ui.label(RichText::new("元素 XPath:").color(C_MUTED).size(11.0));
             ui.add_space(4.0);
             if ui.small_button("复制").on_hover_text("复制元素 XPath").clicked() {
-                ui.output_mut(|o| o.copied_text = self.element_xpath.clone());
+                ui.ctx().copy_text(self.element_xpath.clone());
                 self.status_msg = "元素 XPath 已复制到剪贴板".to_string();
             }
             if ui.small_button("智能优化").on_hover_text("自动优化XPath，移除动态属性，使用锚点定位").clicked() {
@@ -663,8 +676,7 @@ impl SelectorApp {
                 .desired_rows(2)
                 .desired_width(ui.available_width())
                 .hint_text("/ControlType[@Attr='val']")
-                .text_color(C_MONO_FG)
-                .frame(true),
+                .text_color(C_MONO_FG),
         );
         if edit_resp.changed() {
             self.custom_xpath = true;
@@ -681,7 +693,7 @@ impl SelectorApp {
             ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
             ui.add_space(4.0);
             if ui.small_button("复制").on_hover_text("复制窗口选择器").clicked() {
-                ui.output_mut(|o| o.copied_text = self.window_selector.clone());
+                ui.ctx().copy_text(self.window_selector.clone());
                 self.status_msg = "窗口选择器已复制到剪贴板".to_string();
             }
             if self.custom_window_xpath {
@@ -700,8 +712,7 @@ impl SelectorApp {
                 .desired_rows(2)
                 .desired_width(ui.available_width())
                 .hint_text("Window[@Name='...' and @ClassName='...']")
-                .text_color(C_MONO_FG)
-                .frame(true),
+                .text_color(C_MONO_FG),
         );
         if edit_resp.changed() {
             self.custom_window_xpath = true;
@@ -870,7 +881,7 @@ impl SelectorApp {
             // 窗口信息摘要
             egui::Frame::none()
                 .fill(Color32::from_rgb(239, 246, 255))
-                .rounding(Rounding::same(4.0))
+                .rounding(egui::Rounding::same(4.0))
                 .inner_margin(Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
@@ -1033,6 +1044,100 @@ impl SelectorApp {
         }
     }
 
+    /// 显示校验详情（包括失败属性对比）
+    fn draw_validation_details(&mut self, ui: &mut Ui) {
+        // 只有校验后才显示
+        if self.detailed_validation.is_none() {
+            return;
+        }
+        
+        let detail = self.detailed_validation.as_ref().unwrap();
+        
+        // 分隔线
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+        
+        // 标题
+        panel_header(ui, "🔍 校验结果");
+        ui.add_space(4.0);
+        
+        // 总体状态
+        let status_color = match &detail.overall {
+            ValidationResult::Found { .. } => C_OK,
+            ValidationResult::NotFound => C_ERR,
+            ValidationResult::Error(_) => Color32::from_rgb(200, 100, 0),
+            _ => C_MUTED,
+        };
+        let status_text = match &detail.overall {
+            ValidationResult::Found { count, .. } => format!("✓ 通过 — 找到 {} 个元素", count),
+            ValidationResult::NotFound => "✗ 未找到匹配元素".to_string(),
+            ValidationResult::Error(e) => format!("⚠ 错误: {}", e),
+            _ => "未校验".to_string(),
+        };
+        
+        egui::Frame::none()
+            .fill(if detail.overall == ValidationResult::NotFound { Color32::from_rgb(255, 245, 245) } else { Color32::from_rgb(245, 255, 245) })
+            .rounding(egui::Rounding::same(4.0))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new(status_text).color(status_color).strong().size(13.0));
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("用时: {}ms", detail.total_duration_ms)).color(C_MUTED).size(11.0));
+            });
+        
+        // 失败详情
+        if detail.overall == ValidationResult::NotFound {
+            ui.add_space(8.0);
+            ui.label(RichText::new("可能原因:").color(C_MUTED).size(11.0));
+            ui.add_space(4.0);
+            
+            // 显示失败的 segment 信息
+            for seg in &detail.segments {
+                if !seg.matched && seg.match_count == 0 {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(255, 250, 240))
+                        .rounding(egui::Rounding::same(4.0))
+                        .inner_margin(Margin::symmetric(8.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(format!("第 {} 步失败:", seg.segment_index + 1)).color(Color32::from_rgb(200, 100, 0)).size(11.0));
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(&seg.segment_text).font(egui::FontId::monospace(10.0)).color(C_MONO_FG));
+                            
+                            // 失败的 predicate 详情
+                            if !seg.predicate_failures.is_empty() {
+                                ui.add_space(4.0);
+                                for pf in &seg.predicate_failures {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{}: ", pf.attr_name)).color(C_MUTED).size(10.0));
+                                        ui.label(RichText::new(format!("期望 '{}'", pf.expected_value)).color(Color32::from_rgb(100, 100, 200)).size(10.0));
+                                        if let Some(ref actual) = pf.actual_value {
+                                            ui.label(RichText::new(" vs ").color(C_MUTED).size(10.0));
+                                            ui.label(RichText::new(format!("实际 '{}'", actual)).color(Color32::from_rgb(200, 100, 100)).size(10.0));
+                                        }
+                                    });
+                                    ui.label(RichText::new(&pf.reason).color(C_MUTED).size(10.0));
+                                }
+                            } else {
+                                // 提示常见原因
+                                ui.label(RichText::new("• 属性值在验证时发生变化").color(C_MUTED).size(10.0));
+                                ui.label(RichText::new("• 元素结构在捕获后发生变化").color(C_MUTED).size(10.0));
+                            }
+                        });
+                    ui.add_space(4.0);
+                }
+            }
+            
+            // 建议解决方案
+            ui.add_space(8.0);
+            ui.label(RichText::new("建议尝试:").color(C_MUTED).size(11.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("1. 点击“智能优化”按钮，使用优化后的 XPath").color(C_MUTED).size(10.0));
+            ui.label(RichText::new("2. 检查动态类名是否在捕获后发生变化").color(C_MUTED).size(10.0));
+            ui.label(RichText::new("3. 重新捕获元素，确保元素状态稳定").color(C_MUTED).size(10.0));
+        }
+    }
+
     // ── Right panel: 根据标签页显示不同属性编辑器 ────────────────────────────────────
 
     fn draw_right_panel(&mut self, ui: &mut Ui) {
@@ -1040,6 +1145,9 @@ impl SelectorApp {
             ElementTab::Element => self.draw_element_properties(ui),
             ElementTab::WindowElement => self.draw_window_properties(ui),
         }
+        
+        // 校验详情区域
+        self.draw_validation_details(ui);
     }
 
     /// 元素模式：显示元素属性编辑
@@ -1062,7 +1170,7 @@ impl SelectorApp {
                     let node = &self.hierarchy[sel_idx];
                     egui::Frame::none()
                         .fill(Color32::from_rgb(239, 246, 255))
-                        .rounding(Rounding::same(4.0))
+                        .rounding(egui::Rounding::same(4.0))
                         .inner_margin(Margin::symmetric(10.0, 6.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -1171,7 +1279,7 @@ impl SelectorApp {
                 egui::Frame::none()
                     .fill(Color32::from_rgb(248, 250, 252))
                     .stroke(Stroke::new(0.5, C_BORDER))
-                    .rounding(Rounding::same(4.0))
+                    .rounding(egui::Rounding::same(4.0))
                     .inner_margin(Margin::symmetric(8.0, 4.0))
                     .show(ui, |ui| {
                         ui.label(
@@ -1288,7 +1396,7 @@ impl SelectorApp {
                 egui::Frame::none()
                     .fill(Color32::from_rgb(248, 250, 252))
                     .stroke(Stroke::new(0.5, C_BORDER))
-                    .rounding(Rounding::same(4.0))
+                    .rounding(egui::Rounding::same(4.0))
                     .inner_margin(Margin::symmetric(8.0, 4.0))
                     .show(ui, |ui| {
                         ui.label(

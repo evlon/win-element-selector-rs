@@ -8,7 +8,7 @@ export interface ProfileStats {
         xpath?: string;
     }[];
 }
-export { ElementInfo } from '../types';
+export type { ElementInfo } from '../types';
 export declare class FluentChain {
     private client;
     private actions;

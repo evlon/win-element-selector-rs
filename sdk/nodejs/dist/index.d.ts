@@ -64,8 +64,10 @@ export declare class SDK {
      */
     listWindows(): Promise<import("./types").WindowInfo[]>;
 }
-export { FluentChain, ElementInfo, ProfileStats } from './v2/fluent-chain';
-export { SDKConfig, DEFAULTS, WindowSelector, WindowInfo, Point, Rect, } from './types';
+export { FluentChain } from './v2/fluent-chain';
+export type { ElementInfo, ProfileStats } from './v2/fluent-chain';
+export { DEFAULTS } from './types';
+export type { SDKConfig, WindowSelector, WindowInfo, Point, Rect, } from './types';
 export { buildWindowSelector } from './utils';
 export default SDK;
 //# sourceMappingURL=index.d.ts.map

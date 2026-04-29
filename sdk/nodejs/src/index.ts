@@ -98,12 +98,15 @@ export class SDK {
 // 导出
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export { FluentChain, ElementInfo, ProfileStats } from './v2/fluent-chain';
+// 类导出（值）
+export { FluentChain } from './v2/fluent-chain';
 
 // 类型导出
-export {
+export type { ElementInfo, ProfileStats } from './v2/fluent-chain';
+
+export { DEFAULTS } from './types';
+export type {
     SDKConfig,
-    DEFAULTS,
     WindowSelector,
     WindowInfo,
     Point,

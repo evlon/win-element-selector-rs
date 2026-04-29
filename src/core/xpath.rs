@@ -102,8 +102,9 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
     
     included.iter().enumerate().map(|(i, &node)| {
         if i == 0 {
-            // 第一个元素节点：使用 // 从窗口内部任意层级搜索
-            // 因为窗口选择器已经定位到窗口，元素可能在任意深度
+            // 第一个元素节点：使用 // 从窗口内部搜索
+            // 窗口内部结构可能复杂，// 更稳定
+            // 例如 Tauri 窗口的 WebView2 嵌入节点可能不在预期层级
             format!("//{}", node.xpath_segment())
         } else {
             // Check if we skipped any intermediate nodes
@@ -224,8 +225,8 @@ mod tests {
         assert!(result.window_selector.starts_with("Window"));
         // Note: window_selector only includes ClassName and Name, not AutomationId
         
-        // Element XPath should start with // (first element uses // for arbitrary depth)
-        assert!(result.element_xpath.starts_with("//Button"));
+        // Element XPath should start with / (first element is window's direct child)
+        assert!(result.element_xpath.starts_with("/Button"));
         assert!(result.element_xpath.contains("AutomationId='btnOk'"));
     }
 
@@ -290,18 +291,16 @@ mod tests {
         assert!(result.window_selector.starts_with("Window"), "Window selector must start with Window");
         assert!(result.window_selector.contains("ClassName='mmui::MainWindow'"));
         
-        // Verify element XPath starts with /
-        assert!(result.element_xpath.starts_with("//Group"), "Element XPath must start with //");
+        // Verify element XPath starts with / (first element is window's direct child)
+        assert!(result.element_xpath.starts_with("/Group"), "Element XPath must start with /Group");
         assert!(result.element_xpath.contains("/Custom"), "Should have /Custom");
         assert!(result.element_xpath.contains("Group["), "Should have Group");
         assert!(result.element_xpath.contains("ToolBar["), "Should have ToolBar");
         assert!(result.element_xpath.contains("Button["), "Should have Button");
         
         // Verify no // in element XPath (all nodes included)
-        // First element uses //, then rest are / (no additional //)
-                assert!(result.element_xpath.starts_with("//"), "First element uses //");
-                let rest = &result.element_xpath[2..];
-                assert!(!rest.contains("//"), "No additional // after first");
+        // First element uses /, then rest are / (no // at all)
+        assert!(!result.element_xpath.contains("//"), "No // when all nodes are consecutive");
         
         println!("Window selector:\n{}", result.window_selector);
         println!("Element XPath:\n{}", result.element_xpath);
@@ -481,13 +480,12 @@ mod tests {
         let _double_slash_count = result.element_xpath.matches("//").count();
         
         // Should have no double slashes (all nodes included)
-        // First element uses //, so check no additional // after it
-                assert!(result.element_xpath.starts_with("//"), "First element uses //");
-                let rest = &result.element_xpath[2..];
-                assert_eq!(rest.matches("//").count(), 0, "No additional // when all nodes included");
+        // First element uses /, then rest are / (no // at all)
+        assert!(result.element_xpath.starts_with("/"), "First element uses /");
+        assert!(!result.element_xpath.contains("//"), "No // when all nodes included");
         
-        // Should have 10 slashes total: 2 from // for first + 8 from / for rest
-        assert_eq!(single_slash_count, 10, "Should have 10 slashes (2 from // + 8 from /)");
+        // Should have 9 slashes total: 1 from / for first + 8 from / for rest
+        assert_eq!(single_slash_count, 9, "Should have 9 slashes (all /");
         
         println!("Optimized XPath ({} segments):\n{}", nodes.len() - 1, result.element_xpath);
         println!("Complexity: {} single / = much faster than all //", single_slash_count);

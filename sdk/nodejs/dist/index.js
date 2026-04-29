@@ -89,9 +89,9 @@ exports.SDK = SDK;
 // ═══════════════════════════════════════════════════════════════════════════════
 // 导出
 // ═══════════════════════════════════════════════════════════════════════════════
+// 类导出（值）
 var fluent_chain_2 = require("./v2/fluent-chain");
 Object.defineProperty(exports, "FluentChain", { enumerable: true, get: function () { return fluent_chain_2.FluentChain; } });
-// 类型导出
 var types_2 = require("./types");
 Object.defineProperty(exports, "DEFAULTS", { enumerable: true, get: function () { return types_2.DEFAULTS; } });
 // 工具导出

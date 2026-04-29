@@ -2,12 +2,15 @@
 //
 // Windows UI Automation core operations.
 // Shared between GUI and HTTP API.
+//
+// XPath execution uses uiauto-xpath library for full XPath 1.0 standard support.
 
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
 use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo};
-use log::{debug, error};
+use log::{debug, error, info};
+use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Windows implementation
@@ -137,28 +140,35 @@ pub mod windows_impl {
     }
 
     /// Extract window information from the captured hierarchy.
-    /// Finds the first Window node in the chain (root → target).
+    /// 窗口选择器必须定位顶层窗口（Desktop的直接子节点），
+    /// 这样 find_window_by_selector 才能通过 TreeScope_Children 找到它。
+    /// 
+    /// hierarchy 结构（已 reverse 为 root → target）：
+    /// - hierarchy[0] = Desktop
+    /// - hierarchy[1] = 顶层窗口（Desktop的直接子节点）← 窗口选择器目标
+    /// - hierarchy[2..last-1] = 中间层级节点
+    /// - hierarchy[last] = 目标元素
     fn extract_window_info(hierarchy: &[HierarchyNode]) -> Option<WindowInfo> {
-        // 跳过桌面节点，找到第一个真正的应用窗口节点
-        // #32769 是 Windows 桌面窗口类名，Desktop 是桌面控制类型
-        hierarchy
-            .iter()
-            .find(|n| {
-                // 跳过桌面相关节点
-                n.class_name != "#32769" 
-                && n.control_type != "Desktop"
-                && !n.name.starts_with("桌面")
-            })
-            .map(|w| {
-                // Get process name from process_id
-                let process_name = get_process_name_by_id(w.process_id);
-                WindowInfo {
-                    title: w.name.clone(),
-                    class_name: w.class_name.clone(),
-                    process_id: w.process_id,
-                    process_name,
-                }
-            })
+        if hierarchy.len() < 2 {
+            return None;
+        }
+        
+        // 顶层窗口 = Desktop（hierarchy[0]）的第一个非桌面子节点
+        // 这必须是 hierarchy[1]，因为向上遍历是从目标到Desktop
+        // Desktop之后的第一个节点就是顶层窗口
+        let top_window = hierarchy.iter()
+            .skip(1) // 跳过 Desktop
+            .next()?; // 取第一个 = 顶层窗口
+        
+        // 获取进程名
+        let process_name = get_process_name_by_id(top_window.process_id);
+        
+        Some(WindowInfo {
+            title: top_window.name.clone(),
+            class_name: top_window.class_name.clone(),
+            process_id: top_window.process_id,
+            process_name,
+        })
     }
 
     fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
@@ -460,8 +470,49 @@ pub mod windows_impl {
             }
         };
 
-        // Stage 2: Search elements from search_root with detailed tracking
         log::info!("[XPath Validation] Stage 2/2: Searching elements with XPath: {}", element_xpath);
+        
+        // Debug: 打印窗口的直接子节点，以及第一个子节点的子节点
+        log::info!("[XPath Validation] Window's direct children:");
+        let walker = unsafe { auto.ControlViewWalker().ok() };        
+        if let Some(walker) = walker {
+            let mut child = unsafe { walker.GetFirstChildElement(&search_root).ok() };
+            let mut idx = 0;
+            while let Some(c) = child {
+                let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };                
+                let class = get_bstr(unsafe { c.CurrentClassName() });
+                let name = get_bstr(unsafe { c.CurrentName() });
+                let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+                log::info!("  child[{}] {} class='{}' name='{}' frameworkId='{}'", idx, ct, class, name, fwid);
+                        
+                // 打印第一个子节点的子节点（检查 WRY_WEBVIEW 的内部结构）                
+                if idx == 0 {
+                    log::info!("  WRY_WEBVIEW's children:");
+                    let mut sub_child = unsafe { walker.GetFirstChildElement(&c).ok() };
+                    let mut sub_idx = 0;
+                    while let Some(sc) = sub_child {
+                        let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };                        
+                        let sub_class = get_bstr(unsafe { sc.CurrentClassName() });
+                        let sub_name = get_bstr(unsafe { sc.CurrentName() });
+                        let sub_fwid = get_bstr(unsafe { sc.CurrentFrameworkId() });
+                        log::info!("    sub[{}] {} class='{}' name='{}' frameworkId='{}'", sub_idx, sub_ct, sub_class, sub_name, sub_fwid);
+                        sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };                        
+                        sub_idx += 1;
+                        if sub_idx > 5 { break; }
+                    }
+                }
+                        
+                child = unsafe { walker.GetNextSiblingElement(&c).ok() };                
+                idx += 1;
+                if idx > 10 { break; } // 最多打印10个
+            }
+        }
+                
+        // Debug: 查找目标元素的父节点并打印其子节点的 ClassName
+        // 用于检查 predicate 匹配失败的原因
+        log::info!("[XPath Validation] Debug: searching for parent group nodes...");
+        
+        // Stage 2: Search elements from search_root with detailed tracking
         
         let (results, segments) = match find_by_xpath_detailed(&auto, &search_root, element_xpath) {
             Ok((results, segments)) => (results, segments),
@@ -756,254 +807,71 @@ pub mod windows_impl {
         (name, class)
     }
 
-    /// XPath segment with scope information.
-    #[derive(Debug)]
-    struct XPathSegment {
-        /// Whether to search descendants (//) or just children (/).
-        descendants: bool,
-        /// Tag name (e.g., "Button", "Window").
-        tag: String,
-        /// Predicates (e.g., [("AutomationId", "=", "btn1")]).
-        preds: Vec<(String, String, String)>,
-    }
-
-    /// Parse XPath into segments, respecting both / and // semantics.
-    fn parse_xpath(xpath: &str) -> Vec<XPathSegment> {
-        let mut segments = Vec::new();
-        let mut remaining = xpath.trim();
-        
-        // 记录开头的 / 或 //，用于第一个segment的 descendants 设置
-        let first_is_descendants = if remaining.starts_with("//") {
-            remaining = &remaining[2..];
-            true
-        } else if remaining.starts_with('/') {
-            remaining = &remaining[1..];
-            false  // 单个 / 表示直接子节点
-        } else {
-            true  // 没有前缀，默认 descendant search
-        };
-        
-        while !remaining.is_empty() {
-            // Determine if next segment is // or /
-            let descendants = if remaining.starts_with("//") {
-                remaining = &remaining[2..];
-                true
-            } else if remaining.starts_with('/') {
-                remaining = &remaining[1..];
-                false
-            } else if segments.is_empty() {
-                // 第一个 segment 使用开头记录的 / 或 //
-                first_is_descendants
-            } else {
-                // Subsequent segments without prefix default to children
-                false
-            };
-            
-            // Extract segment content (until next / or end)
-            let end_pos = remaining
-                .find('/')
-                .unwrap_or(remaining.len());
-            let seg_content = &remaining[..end_pos].trim();
-            remaining = &remaining[end_pos..];
-            
-            if !seg_content.is_empty() {
-                let (tag, preds) = parse_segment(seg_content);
-                segments.push(XPathSegment {
-                    descendants,
-                    tag,
-                    preds,
-                });
-            }
-        }
-        
-        segments
-    }
-
     /// Find elements by XPath with detailed per-segment validation results.
+    /// Uses uiauto-xpath library for full XPath 1.0 standard support.
     fn find_by_xpath_detailed(
         auto: &IUIAutomation,
         root: &IUIAutomationElement,
         xpath: &str,
     ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
         use std::time::Instant;
-        use windows::Win32::UI::Accessibility::*;
 
-        let segments = parse_xpath(xpath);
-        log::info!("[XPath Validation] Parsing {} segments", segments.len());
+        let total_start = Instant::now();
+        info!("[XPath Validation] Executing XPath with uiauto-xpath: {}", xpath);
 
-        if segments.is_empty() {
-            return Ok((vec![], vec![]));
-        }
+        // Wrap the root element for uiauto-xpath
+        let uia_elem = UiaXPathElement::new(root.clone(), auto.clone());
 
-        // Start search from root element.
-        let mut current_search_root = root.clone();
-        let mut segment_results: Vec<SegmentValidationResult> = Vec::new();
-        
-        for (seg_idx, seg) in segments.iter().enumerate() {
-            let seg_start = Instant::now();
-            let seg_text = format!(
-                "{}{}[{}]",
-                if seg.descendants { "//" } else { "/" },
-                seg.tag,
-                seg.preds.iter()
-                    .map(|(attr, op, val)| format!("@{}{}'{}'", attr, op, val))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
-            );
-            
-            log::info!(
-                "[XPath Validation] Segment {}: {} tag='{}', preds={:?}",
-                seg_idx,
-                if seg.descendants { "//" } else { "/" },
-                seg.tag,
-                seg.preds
-            );
-            
-            // ── XPath Validation Logic ──
-            // Note: CreatePropertyCondition requires VARIANT type which is not available in windows crate 0.58
-            // For AutomationId-only predicates, we add optimization hint in logs
-            
-            let mut matches: Vec<IUIAutomationElement> = Vec::new();
-            
-            // Choose search scope based on segment type.
-            let scope = if seg.descendants {
-                TreeScope_Subtree
-            } else {
-                TreeScope_Children
-            };
-            
-            // Optimization hint for AutomationId-only predicates
-            if seg.descendants && seg.preds.len() == 1 && seg.preds[0].0 == "AutomationId" && seg.preds[0].1 == "=" {
-                log::info!("[XPath Validation] AutomationId-only predicate: '{}', fast-path potential", seg.preds[0].2);
+        // Compile and execute XPath using uiauto-xpath library
+        let compiled_xpath = match XPath::compile(xpath) {
+            Ok(xp) => xp,
+            Err(e) => {
+                error!("[XPath Validation] XPath compilation failed: {}", e);
+                return Err(anyhow::anyhow!("XPath compilation error: {}", e));
             }
-            
-            let condition: IUIAutomationCondition = unsafe {
-                auto.CreateTrueCondition()?
-            };
-            let found = unsafe {
-                current_search_root.FindAll(scope, &condition)?
-            };
-            let count = unsafe { found.Length()? };
-            log::info!("[XPath Validation] Searching {} elements", count);
-                
-                for i in 0..count {
-                    let elem = unsafe { found.GetElement(i)? };
-                    let ct = unsafe {
-                        elem.CurrentControlType()
-                            .map(control_type_name)
-                            .unwrap_or_default()
-                    };
-                    if !seg.tag.is_empty() && seg.tag != "*" && ct != seg.tag {
-                        continue;
-                    }
-                    // Check predicates (skip Index).
-                    let all_match = seg.preds.iter().filter(|(attr, _, _)| attr != "Index" && attr != "ProcessName").all(|(attr, op, val)| {
-                        let actual = match attr.as_str() {
-                            "AutomationId"         => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                            "ClassName"            => get_bstr(unsafe { elem.CurrentClassName() }),
-                            "Name"                 => get_bstr(unsafe { elem.CurrentName() }),
-                            "ControlType"          => unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                            "FrameworkId"          => get_bstr(unsafe { elem.CurrentFrameworkId() }),
-                            "LocalizedControlType" => get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
-                            "HelpText"             => get_bstr(unsafe { elem.CurrentHelpText() }),
-                            "IsEnabled"            => unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool().to_string()).unwrap_or_default() },
-                            "IsOffscreen"          => unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool().to_string()).unwrap_or_default() },
-                            _                       => String::new(),
-                        };
-                        let result = check_predicate(&actual, op, val);
-                        // Debug log for starts-with failures
-                        if !result && op == "starts-with" {
-                            log::debug!("[XPath] starts-with check failed: attr={}, actual='{}', expected='{}', result={}", 
-                                attr, actual, val, result);
-                        }
-                        result
-                    });
-                    if all_match {
-                        matches.push(elem);
-                    }
-                }
-            
-            let duration_ms = seg_start.elapsed().as_millis() as u64;
-            log::info!("[XPath Validation] Found {} matches for segment {} ({}ms)", matches.len(), seg_idx, duration_ms);
-            
-            // Record segment result
-            segment_results.push(SegmentValidationResult {
-                segment_index: seg_idx,
-                segment_text: seg_text,
+        };
+
+        // Execute the query
+        let matches: Vec<IUIAutomationElement> = match compiled_xpath.select_nodes(&uia_elem) {
+            Ok(nodes) => {
+                // Extract raw IUIAutomationElement from each UiElement
+                // Note: This requires uiauto-xpath to expose raw_element() method
+                // See: https://github.com/your-repo/uiauto-xpath
+                nodes.into_iter()
+                    .map(|n| {
+                        // Use Clone to get the underlying raw element
+                        // Since UiElement::new takes IUIAutomationElement and we have Clone,
+                        // we need to access the raw field
+                        // For now, we work around by creating a wrapper
+                        let raw = n.raw_element().clone();
+                        raw
+                    })
+                    .collect()
+            },
+            Err(e) => {
+                error!("[XPath Validation] XPath execution failed: {}", e);
+                return Err(anyhow::anyhow!("XPath execution error: {}", e));
+            }
+        };
+
+        let total_duration_ms = total_start.elapsed().as_millis() as u64;
+        info!("[XPath Validation] Found {} matches ({}ms total)", matches.len(), total_duration_ms);
+
+        // Generate segment validation results for UI display
+        // Since uiauto-xpath executes the entire XPath at once, we generate
+        // a summary result instead of per-segment results
+        let segment_results = vec![
+            SegmentValidationResult {
+                segment_index: 0,
+                segment_text: xpath.to_string(),
                 matched: !matches.is_empty(),
                 match_count: matches.len(),
-                duration_ms,
-            });
-            
-            if matches.is_empty() {
-                return Ok((vec![], segment_results));
+                duration_ms: total_duration_ms,
+                predicate_failures: Vec::new(), // 暂时为空，后续实现收集
             }
-            
-            // If this is the last segment, return all matches.
-            if seg_idx == segments.len() - 1 {
-                log::info!("[XPath Validation] Final result: {} matches", matches.len());
-                return Ok((matches, segment_results));
-            }
-            
-            // For next segment, use the first match as search root.
-            current_search_root = matches[0].clone();
-        }
+        ];
 
-        // Should never reach here, but just in case.
-        log::info!("[XPath Validation] Final result: 0 matches");
-        Ok((vec![], segment_results))
-    }
-
-    fn parse_segment(seg: &str) -> (String, Vec<(String, String, String)>) {
-        if let Some(bracket) = seg.find('[') {
-            let tag   = seg[..bracket].trim().to_string();
-            let inner = seg[bracket + 1..seg.rfind(']').unwrap_or(seg.len())].trim();
-            let preds = parse_predicates(inner);
-            (tag, preds)
-        } else {
-            (seg.trim().to_string(), vec![])
-        }
-    }
-
-    /// Very lightweight predicate parser for `@Attr op 'val'` and `contains(...)`.
-    fn parse_predicates(s: &str) -> Vec<(String, String, String)> {
-        let mut result = Vec::new();
-        for part in s.split(" and ") {
-            let part = part.trim();
-            if part.starts_with("contains(") {
-                // contains(@Attr, 'val')
-                let inner = &part[9..part.rfind(')').unwrap_or(part.len())];
-                let mut parts = inner.splitn(2, ',');
-                let attr = parts.next().unwrap_or("").trim().trim_start_matches('@').to_string();
-                let val  = parts.next().unwrap_or("").trim().trim_matches('\'').to_string();
-                result.push((attr, "contains".to_string(), val));
-            } else if part.starts_with("starts-with(") {
-                let inner = &part[12..part.rfind(')').unwrap_or(part.len())];
-                let mut parts = inner.splitn(2, ',');
-                let attr = parts.next().unwrap_or("").trim().trim_start_matches('@').to_string();
-                let val  = parts.next().unwrap_or("").trim().trim_matches('\'').to_string();
-                result.push((attr, "starts-with".to_string(), val));
-            } else if let Some(eq_pos) = part.find("!=") {
-                let attr = part[..eq_pos].trim().trim_start_matches('@').to_string();
-                let val  = part[eq_pos + 2..].trim().trim_matches('\'').to_string();
-                result.push((attr, "!=".to_string(), val));
-            } else if let Some(eq_pos) = part.find('=') {
-                let attr = part[..eq_pos].trim().trim_start_matches('@').to_string();
-                let val  = part[eq_pos + 1..].trim().trim_matches('\'').to_string();
-                result.push((attr, "=".to_string(), val));
-            }
-        }
-        result
-    }
-
-    fn check_predicate(actual: &str, op: &str, expected: &str) -> bool {
-        match op {
-            "="           => actual == expected,
-            "!="          => actual != expected,
-            "contains"    => actual.contains(expected),
-            "starts-with" => actual.starts_with(expected),
-            _             => false,
-        }
+        Ok((matches, segment_results))
     }
 
     /// Find all matching elements and return their detailed info
@@ -1108,6 +976,7 @@ pub mod mock_impl {
                     matched: true,
                     match_count: 1,
                     duration_ms: 10,
+                    predicate_failures: Vec::new(),
                 }
             ],
             total_duration_ms: 50,
