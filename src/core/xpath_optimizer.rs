@@ -7,8 +7,8 @@
 // - 本模块只做数据格式转换：HierarchyNode ↔ XPath 字符串
 // - 统计信息直接由 uiauto-xpath 库提供
 
-use super::model::HierarchyNode;
-use uiauto_xpath::XPath;
+use super::model::{HierarchyNode, Operator, PropertyFilter};
+use uiauto_xpath::{XPath, is_dynamic_class, extract_stable_prefix};
 
 /// 优化摘要（用于 UI 显示）
 #[derive(Debug, Clone, Default)]
@@ -32,6 +32,8 @@ pub struct OptimizationResult {
     pub optimized_xpath: String,
     /// 最小化 XPath（备选）
     pub minimal_xpath: String,
+    /// 优化后的 hierarchy（已修改 included 和 filters）
+    pub optimized_hierarchy: Vec<HierarchyNode>,
 }
 
 /// XPath智能优化器 - 直接调用 uiauto-xpath 库
@@ -49,8 +51,7 @@ impl XPathOptimizer {
     }
     
     /// 执行优化：HierarchyNode → XPath → optimize → 返回结果
-    /// 注意：此方法不修改 hierarchy，只返回优化后的 XPath 字符串和索引信息
-    /// 所有统计信息由 uiauto-xpath 库提供，保持高内聚
+    /// 同时生成优化后的 hierarchy，同步 UI 状态
     pub fn optimize(&self, hierarchy: &[HierarchyNode]) -> OptimizationResult {
         if hierarchy.is_empty() {
             return OptimizationResult {
@@ -59,6 +60,7 @@ impl XPathOptimizer {
                 summary: OptimizationSummary::default(),
                 optimized_xpath: String::new(),
                 minimal_xpath: String::new(),
+                optimized_hierarchy: Vec::new(),
             };
         }
         
@@ -70,7 +72,14 @@ impl XPathOptimizer {
         
         match result {
             Ok(opt_result) => {
-                // 直接使用 uiauto-xpath 提供的索引和统计信息
+                // 生成优化后的 hierarchy
+                let optimized_hierarchy = self.apply_optimization_to_hierarchy(
+                    hierarchy,
+                    opt_result.anchor_index,
+                    opt_result.target_index,
+                );
+                
+                // 统计信息
                 let summary = OptimizationSummary {
                     removed_dynamic_attrs: self.count_removed_attrs(hierarchy),
                     simplified_attrs: opt_result.simplified_attrs_count,
@@ -85,20 +94,110 @@ impl XPathOptimizer {
                     summary,
                     optimized_xpath: opt_result.anchor_relative,
                     minimal_xpath: opt_result.minimal,
+                    optimized_hierarchy,
                 }
             }
             Err(_) => {
-                // optimize 失败时返回原始 XPath
-                let xpath = full_xpath.clone();
+                // optimize 失败时返回原始 hierarchy
                 OptimizationResult {
                     anchor_index: None,
                     target_index: hierarchy.len() - 1,
                     summary: OptimizationSummary::default(),
-                    optimized_xpath: xpath.clone(),
-                    minimal_xpath: xpath.clone(),
+                    optimized_xpath: full_xpath.clone(),
+                    minimal_xpath: full_xpath.clone(),
+                    optimized_hierarchy: hierarchy.to_vec(),
                 }
             }
         }
+    }
+    
+    /// 将优化结果应用到 hierarchy
+    /// - 锚点之前的节点：排除 (included = false)
+    /// - 锚点到目标之间的节点：包含，但属性简化
+    /// - 目标节点：包含，保留必要属性
+    fn apply_optimization_to_hierarchy(
+        &self,
+        hierarchy: &[HierarchyNode],
+        anchor_index: Option<usize>,
+        target_index: usize,
+    ) -> Vec<HierarchyNode> {
+        hierarchy.iter().enumerate().map(|(i, node)| {
+            let mut optimized_node = node.clone();
+            
+            // 决定节点是否包含
+            match anchor_index {
+                Some(ai) => {
+                    // 有锚点：只包含锚点到目标的节点
+                    optimized_node.included = i >= ai && i <= target_index;
+                }
+                None => {
+                    // 无锚点：只包含目标节点
+                    optimized_node.included = i == target_index;
+                }
+            }
+            
+            // 如果节点被包含，优化其属性过滤器
+            if optimized_node.included {
+                optimized_node.filters = self.optimize_node_filters(node, i == target_index);
+            }
+            
+            optimized_node
+        }).collect()
+    }
+    
+    /// 优化单个节点的属性过滤器
+    /// - AutomationId：保留（锚点节点）
+    /// - ClassName：动态类名改用 starts-with
+    /// - Name：过长的禁用
+    /// - ControlType：保留
+    /// - Index：保留
+    fn optimize_node_filters(&self, node: &HierarchyNode, is_target: bool) -> Vec<PropertyFilter> {
+        node.filters.iter().map(|f| {
+            let mut optimized_filter = f.clone();
+            
+            match f.name.as_str() {
+                "AutomationId" => {
+                    // AutomationId 对锚点很重要，对目标也可保留
+                    optimized_filter.enabled = !f.value.is_empty();
+                }
+                "ClassName" => {
+                    // 动态类名改用 starts-with
+                    if is_dynamic_class(&f.value) {
+                        let prefix = extract_stable_prefix(&f.value);
+                        if prefix.len() >= 4 {
+                            optimized_filter.operator = Operator::StartsWith;
+                            optimized_filter.value = prefix;
+                            optimized_filter.enabled = true;
+                        } else {
+                            // 前缀太短，禁用
+                            optimized_filter.enabled = false;
+                        }
+                    } else {
+                        // 稳定类名保留
+                        optimized_filter.enabled = !f.value.is_empty();
+                    }
+                }
+                "Name" => {
+                    // 过长的 Name 可能是动态标题，禁用
+                    let limit = if is_target { 30 } else { 20 };  // 目标节点限制更宽松
+                    optimized_filter.enabled = f.value.len() <= limit && !f.value.is_empty();
+                }
+                "ControlType" => {
+                    // ControlType 对定位很重要，保留
+                    optimized_filter.enabled = true;
+                }
+                "Index" => {
+                    // Index 保留
+                    optimized_filter.enabled = f.value.parse::<i32>().unwrap_or(0) > 0;
+                }
+                _ => {
+                    // 其他属性默认禁用（FrameworkId 等）
+                    optimized_filter.enabled = false;
+                }
+            }
+            
+            optimized_filter
+        }).collect()
     }
     
     /// 从 HierarchyNode 生成完整 XPath 字符串

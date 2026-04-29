@@ -105,7 +105,8 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
             // 第一个元素节点：使用 // 从窗口内部搜索
             // 窗口内部结构可能复杂，// 更稳定
             // 例如 Tauri 窗口的 WebView2 嵌入节点可能不在预期层级
-            format!("//{}", node.xpath_segment())
+            // 先去掉为了速度，以后遇到复杂情况再优化
+            format!("/{}", node.xpath_segment())
         } else {
             // Check if we skipped any intermediate nodes
             let prev_node = included[i - 1];

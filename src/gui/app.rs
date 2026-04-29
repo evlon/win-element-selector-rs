@@ -330,22 +330,31 @@ impl SelectorApp {
             info!("[智能优化] 使用锚点: {}", result.summary.anchor_description.clone().unwrap_or_default());
         }
         
-        // 2. 更新优化摘要（不修改 hierarchy，保持 UI 树完整）
+        // 2. 更新 hierarchy 为优化后的版本（同步 UI 状态）
+        self.hierarchy = result.optimized_hierarchy.clone();
+        
+        // 3. 更新优化摘要
         self.optimization_summary = Some(result.summary.clone());
+        
+        // 打印优化后的 hierarchy 状态
+        info!("[智能优化] 优化后节点状态:");
+        for (i, node) in self.hierarchy.iter().enumerate() {
+            info!("[智能优化] 节点[{}] {} included={} filters:", i, node.control_type, node.included);
+            for f in &node.filters {
+                if f.enabled {
+                    info!("  - {}: {} {}", f.name, f.operator.label(), f.value);
+                }
+            }
+        }
                 
-        // 打印优化后的 XPath
-        info!("[智能优化] 锚点索引: {}, 目标索引: {}", result.anchor_index.unwrap_or(0), result.target_index);
-        info!("[智能优化] 优化后 XPath: {}", result.optimized_xpath);
-                
-        // 3. 直接使用优化后的 XPath 字符串
-        self.element_xpath = result.optimized_xpath.clone();
-        self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
-        self.xpath_error = xpath::lint(&self.xpath_text);
-        self.custom_xpath = true;  // 标记为自定义，因为使用了优化后的 XPath
+        // 4. 从优化后的 hierarchy 生成 XPath
+        self.custom_xpath = false;  // 临时设置为 false，让 rebuild_xpath 能执行
+        self.rebuild_xpath();
+        self.custom_xpath = true;   // 设置为 true，表示使用了优化后的 XPath
         
         info!("[智能优化] 优化后 XPath: {}", self.element_xpath);
         
-        // 4. 更新状态消息
+        // 5. 更新状态消息
         let summary = &result.summary;
         self.status_msg = format!(
             "智能优化完成：移除 {} 个动态属性，简化 {} 个属性{}",
@@ -360,11 +369,11 @@ impl SelectorApp {
         
         info!("[智能优化] 状态消息: {}", self.status_msg);
         
-        // 5. 自动验证
+        // 6. 自动验证
         info!("[智能优化] 开始验证...");
         self.do_validate();
         
-        // 6. 保存
+        // 7. 保存
         self.save_to_file();
         info!("[智能优化] 已保存到 last_capture.json");
     }
@@ -870,8 +879,16 @@ impl SelectorApp {
                     show_validation_details,
                 );
                 if included_changed {
-                    self.custom_xpath = false;
-                    self.rebuild_xpath();
+                    // 检查是否处于智能优化状态
+                    if self.optimization_summary.is_some() {
+                        // 优化状态：重新执行智能优化，基于新的 hierarchy 配置
+                        self.do_optimize();
+                    } else if !self.custom_xpath {
+                        // 正常状态：重新生成 XPath
+                        self.rebuild_xpath();
+                    }
+                    // 如果是手动编辑状态(custom_xpath=true 且无优化摘要)，不做任何操作
+                    // 保持用户手动编辑的内容
                 }
                 ui.add_space(12.0);
             });
