@@ -543,7 +543,7 @@ pub mod windows_impl {
         
         // 生成逐层校验结果（复用 uiauto-xpath 的 ancestors 和 get_property API）
         let layers = if !results.is_empty() {
-            let first_match = UiaXPathElement::from_raw(results[0].clone(), auto.clone());
+            let first_match = UiaXPathElement::new(results[0].clone(), auto.clone());
             let ancestors = first_match.ancestors();
             
             hierarchy.iter().enumerate().map(|(layer_idx, node)| {

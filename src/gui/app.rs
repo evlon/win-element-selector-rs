@@ -858,7 +858,7 @@ impl SelectorApp {
 
                 let validation_segments = self.detailed_validation.as_ref().map(|d| &d.segments);
                 let show_validation_details = self.config.show_validation_details;
-                Self::draw_tree_recursive(
+                let included_changed = Self::draw_tree_recursive(
                     ui,
                     &mut self.hierarchy,
                     &mut self.selected_node,
@@ -869,6 +869,10 @@ impl SelectorApp {
                     validation_segments,
                     show_validation_details,
                 );
+                if included_changed {
+                    self.custom_xpath = false;
+                    self.rebuild_xpath();
+                }
                 ui.add_space(12.0);
             });
     }
@@ -914,14 +918,14 @@ impl SelectorApp {
         _depth: usize,
         validation_segments: Option<&Vec<SegmentValidationResult>>,
         show_validation_details: bool,
-    ) {
+    ) -> bool {
         let is_leaf   = idx + 1 >= total;
         let is_target = idx + 1 == total;
         let is_sel    = *selected_node == Some(idx);
         let included  = hierarchy[idx].included;
 
         let label_text = hierarchy[idx].tree_label();
-        let icon = if is_target { "🎯" } else if included { "●" } else { "⊖" };
+        let icon = if is_target { "🎯" } else { "" };
         let label_color = if is_target { C_TARGET_FG }
                           else if is_sel { C_SEL_FG }
                           else if !included { C_MUTED }
@@ -948,27 +952,44 @@ impl SelectorApp {
             .color(label_color)
             .strong_if(is_sel || is_target);
 
+        // Track if included state changed
+        let mut included_changed = false;
+
         if is_leaf {
-            // Leaf node — draw as selectable row
+            // Leaf node — draw as selectable row with checkbox
             let row_bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
             egui::Frame::none()
                 .fill(row_bg)
                 .inner_margin(Margin::symmetric(4.0, 1.0))
                 .show(ui, |ui| {
-                    let resp = ui.add(
-                        egui::Label::new(header_text)
-                            .sense(Sense::click())
-                            .truncate(),
-                    );
-                    if resp.clicked() {
-                        *selected_node = Some(idx);
-                    }
-                    // Context menu
-                    resp.context_menu(|ui| {
-                        Self::node_context_menu(ui, hierarchy, idx, selected_node);
-                    });
-                    resp.on_hover_ui(|ui| {
-                        node_tooltip(ui, &hierarchy[idx]);
+                    ui.horizontal(|ui| {
+                        // Checkbox for include/exclude
+                        let checkbox_resp = ui.checkbox(&mut hierarchy[idx].included, "");
+                        if checkbox_resp.changed() {
+                            included_changed = true;
+                        }
+                        checkbox_resp.on_hover_text(if hierarchy[idx].included {
+                            "已包含在 XPath 中 — 取消勾选将排除此节点"
+                        } else {
+                            "已排除 — 勾选将包含在 XPath 中"
+                        });
+
+                        // Node label
+                        let resp = ui.add(
+                            egui::Label::new(header_text)
+                                .sense(Sense::click())
+                                .truncate(),
+                        );
+                        if resp.clicked() {
+                            *selected_node = Some(idx);
+                        }
+                        // Context menu (keep for other actions like highlight)
+                        resp.context_menu(|ui| {
+                            Self::node_context_menu(ui, hierarchy, idx, selected_node);
+                        });
+                        resp.on_hover_ui(|ui| {
+                            node_tooltip(ui, &hierarchy[idx]);
+                        });
                     });
                 });
         } else {
@@ -982,43 +1003,59 @@ impl SelectorApp {
                 .inner_margin(Margin::symmetric(2.0, 0.0));
 
             frame.show(ui, |ui| {
-                // Use CollapsingHeader with the expanded state driven by our vec.
-                let ch = egui::CollapsingHeader::new(header_text)
-                    .id_salt(id)
-                    .open(Some(expanded[idx]))
-                    .show(ui, |ui| {
-                        // Child = next node in chain
-                        Self::draw_tree_recursive(
-                            ui,
-                            hierarchy,
-                            selected_node,
-                            expanded,
-                            idx + 1,
-                            total,
-                            _depth + 1,
-                            validation_segments,
-                            show_validation_details,
-                        );
+                ui.horizontal(|ui| {
+                    // Checkbox for include/exclude
+                    let checkbox_resp = ui.checkbox(&mut hierarchy[idx].included, "");
+                    if checkbox_resp.changed() {
+                        included_changed = true;
+                    }
+                    checkbox_resp.on_hover_text(if hierarchy[idx].included {
+                        "已包含在 XPath 中 — 取消勾选将排除此节点"
+                    } else {
+                        "已排除 — 勾选将包含在 XPath 中"
                     });
 
-                // Update expanded state from header interaction
-                expanded[idx] = ch.openness > 0.5;
+                    // Use CollapsingHeader with the expanded state driven by our vec.
+                    let ch = egui::CollapsingHeader::new(header_text)
+                        .id_salt(id)
+                        .open(Some(expanded[idx]))
+                        .show(ui, |ui| {
+                            // Child = next node in chain
+                            let child_changed = Self::draw_tree_recursive(
+                                ui,
+                                hierarchy,
+                                selected_node,
+                                expanded,
+                                idx + 1,
+                                total,
+                                _depth + 1,
+                                validation_segments,
+                                show_validation_details,
+                            );
+                            included_changed = included_changed || child_changed;
+                        });
 
-                // Clicking the header label selects this node
-                if ch.header_response.clicked() {
-                    *selected_node = Some(idx);
-                }
+                    // Update expanded state from header interaction
+                    expanded[idx] = ch.openness > 0.5;
 
-                // Context menu
-                ch.header_response.context_menu(|ui| {
-                    Self::node_context_menu(ui, hierarchy, idx, selected_node);
-                });
+                    // Clicking the header label selects this node
+                    if ch.header_response.clicked() {
+                        *selected_node = Some(idx);
+                    }
 
-                ch.header_response.on_hover_ui(|ui| {
-                    node_tooltip(ui, &hierarchy[idx]);
+                    // Context menu
+                    ch.header_response.context_menu(|ui| {
+                        Self::node_context_menu(ui, hierarchy, idx, selected_node);
+                    });
+
+                    ch.header_response.on_hover_ui(|ui| {
+                        node_tooltip(ui, &hierarchy[idx]);
+                    });
                 });
             });
         }
+
+        included_changed
     }
 
     fn node_context_menu(
@@ -1027,12 +1064,8 @@ impl SelectorApp {
         idx: usize,
         selected_node: &mut Option<usize>,
     ) {
-        let included = hierarchy[idx].included;
-        let toggle_label = if included { "从 XPath 中排除此节点" } else { "将此节点加入 XPath" };
-        if ui.button(toggle_label).clicked() {
-            hierarchy[idx].included = !included;
-            ui.close_menu();
-        }
+        // 提示用户可以使用复选框
+        ui.label(RichText::new("使用行首复选框切换包含/排除").color(C_MUTED).size(10.0));
         ui.separator();
         if ui.button("高亮显示此元素").clicked() {
             highlight::flash(&hierarchy[idx].rect, 1500);
