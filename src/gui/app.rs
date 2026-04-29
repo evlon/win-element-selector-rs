@@ -944,17 +944,6 @@ impl SelectorApp {
                               else if !node_included { C_MUTED }
                               else { Color32::from_gray(35) };
             
-            // 缩进： 根据节点深度(索引位置)计算缩进
-            // 每个节点缩进 14.0 像素
-            let indent = idx as f32 * 14.0;
-            ui.add_space(indent);
-            
-            // 构建节点标签
-            // label_text 已在上面读取
-            // icon 和 label_color 已在上面计算
-            
-            // 验证标记
-            
             // 验证标记
             let validation_marker = if show_validation_details {
                 validation_segments
@@ -982,7 +971,7 @@ impl SelectorApp {
             // 绘制一行: 复选框 + 标签
             egui::Frame::none()
                 .fill(row_bg)
-                .inner_margin(Margin::symmetric(2.0, 1.0))
+                .inner_margin(Margin::symmetric(2.0, 1.0))  // 一致的垂直间距
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         // 复选框 (用于包含/排除节点) - 使用索引直接访问
