@@ -359,7 +359,43 @@ pub struct CaptureResult {
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
 
-/// 单个属性校验失败详情
+/// 单个属性校验结果（用于逐层校验显示）
+#[derive(Debug, Clone)]
+pub struct PropertyValidationResult {
+    /// 属性名 (如 ClassName, Name, ControlType)
+    pub attr_name: String,
+    /// 运算符 (Equals, StartsWith, Contains 等)
+    pub operator: Operator,
+    /// XPath 中的期望值
+    pub expected_value: String,
+    /// 实际元素的值（校验后获取）
+    pub actual_value: Option<String>,
+    /// 匹配状态: true = 匹配成功, false = 不匹配
+    pub matched: bool,
+    /// 此属性是否启用（参与校验）
+    pub enabled: bool,
+}
+
+/// 单个层级节点的校验结果
+#[derive(Debug, Clone)]
+pub struct LayerValidationResult {
+    /// 节点在 hierarchy 中的索引
+    pub node_index: usize,
+    /// ControlType (用于显示)
+    pub control_type: String,
+    /// 节点简短描述（用于UI显示）
+    pub node_label: String,
+    /// 是否匹配（此层级是否找到元素）
+    pub matched: bool,
+    /// 各属性的校验结果
+    pub properties: Vec<PropertyValidationResult>,
+    /// 匹配的元素数量
+    pub match_count: usize,
+    /// 此层级执行时间 (ms)
+    pub duration_ms: u64,
+}
+
+/// 单个属性校验失败详情（用于错误提示）
 #[derive(Debug, Clone)]
 pub struct PredicateFailure {
     /// 属性名 (如 ClassName, Name)
@@ -394,8 +430,10 @@ pub struct SegmentValidationResult {
 pub struct DetailedValidationResult {
     /// Overall result
     pub overall: ValidationResult,
-    /// Per-segment validation results
+    /// Per-segment validation results (XPath step results)
     pub segments: Vec<SegmentValidationResult>,
+    /// Per-layer validation results (hierarchy node results) - 新增
+    pub layers: Vec<LayerValidationResult>,
     /// Total validation time (in milliseconds)
     pub total_duration_ms: u64,
 }

@@ -446,6 +446,7 @@ pub mod windows_impl {
                 return DetailedValidationResult {
                     overall: ValidationResult::Error(e.to_string()),
                     segments: vec![],
+                    layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
                 };
             }
@@ -465,6 +466,7 @@ pub mod windows_impl {
                         format!("窗口未找到: {}", window_selector)
                     ),
                     segments: vec![],
+                    layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
                 };
             }
@@ -520,6 +522,7 @@ pub mod windows_impl {
                 return DetailedValidationResult {
                     overall: ValidationResult::Error(e.to_string()),
                     segments: vec![],
+                    layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
                 };
             }
@@ -540,6 +543,7 @@ pub mod windows_impl {
         DetailedValidationResult {
             overall,
             segments,
+            layers: vec![], // 暂时为空，后续实现逐层校验
             total_duration_ms: total_start.elapsed().as_millis() as u64,
         }
     }
@@ -979,6 +983,7 @@ pub mod mock_impl {
                     predicate_failures: Vec::new(),
                 }
             ],
+            layers: vec![],
             total_duration_ms: 50,
         }
     }
