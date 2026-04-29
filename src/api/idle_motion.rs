@@ -528,7 +528,7 @@ pub async fn start_idle_motion(body: web::Json<IdleMotionStartRequest>) -> impl 
             }
         }
         
-        crate::capture::validate_selector_and_xpath_detailed(&window_selector_clone, &xpath_clone)
+        crate::capture::validate_selector_and_xpath_detailed(&window_selector_clone, &xpath_clone, &[])  // API层无 hierarchy 数据，layers 为空
     })
     .await;
     

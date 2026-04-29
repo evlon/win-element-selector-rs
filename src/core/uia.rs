@@ -8,7 +8,7 @@
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
-use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, PropertyFilter, SegmentValidationResult, ValidationResult, WindowInfo};
+use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyFilter, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
 
@@ -436,6 +436,7 @@ pub mod windows_impl {
     pub fn validate_selector_and_xpath_detailed(
         window_selector: &str,
         element_xpath: &str,
+        hierarchy: &[HierarchyNode],
     ) -> DetailedValidationResult {
         use std::time::Instant;
         let total_start = Instant::now();
@@ -540,10 +541,82 @@ pub mod windows_impl {
             ValidationResult::Found { count: results.len(), first_rect }
         };
         
+        // 生成逐层校验结果（复用 uiauto-xpath 的 ancestors 和 get_property API）
+        let layers = if !results.is_empty() {
+            let first_match = UiaXPathElement::from_raw(results[0].clone(), auto.clone());
+            let ancestors = first_match.ancestors();
+            
+            hierarchy.iter().enumerate().map(|(layer_idx, node)| {
+                let actual_elem = if layer_idx == hierarchy.len() - 1 {
+                    Some(&first_match)
+                } else {
+                    let ancestor_idx = ancestors.len().saturating_sub(layer_idx + 1);
+                    ancestors.get(ancestor_idx)
+                };
+                
+                match actual_elem {
+                    Some(elem) => {
+                        let props: Vec<PropertyValidationResult> = node.filters.iter().map(|f| {
+                            let actual = elem.get_property(&f.name);
+                            let matched = actual.as_ref().map_or(false, |act| {
+                                match f.operator {
+                                    Operator::Equals => act == &f.value,
+                                    Operator::NotEquals => act != &f.value,
+                                    Operator::Contains => act.contains(&f.value),
+                                    Operator::NotContains => !act.contains(&f.value),
+                                    Operator::StartsWith => act.starts_with(&f.value),
+                                    Operator::NotStartsWith => !act.starts_with(&f.value),
+                                    Operator::EndsWith => act.ends_with(&f.value),
+                                    Operator::NotEndsWith => !act.ends_with(&f.value),
+                                    _ => act == &f.value,
+                                }
+                            });
+                            PropertyValidationResult {
+                                attr_name: f.name.clone(),
+                                operator: f.operator.clone(),
+                                expected_value: f.value.clone(),
+                                actual_value: actual,
+                                matched,
+                                enabled: f.enabled,
+                            }
+                        }).collect();
+                        let all_matched = props.iter().all(|p| p.matched || !p.enabled);
+                        LayerValidationResult {
+                            node_index: layer_idx,
+                            control_type: node.control_type.clone(),
+                            node_label: node.tree_label(),
+                            matched: all_matched,
+                            properties: props,
+                            match_count: 1,
+                            duration_ms: 0,
+                        }
+                    }
+                    None => LayerValidationResult {
+                        node_index: layer_idx,
+                        control_type: node.control_type.clone(),
+                        node_label: node.tree_label(),
+                        matched: false,
+                        properties: node.filters.iter().map(|f| PropertyValidationResult {
+                            attr_name: f.name.clone(),
+                            operator: f.operator.clone(),
+                            expected_value: f.value.clone(),
+                            actual_value: None,
+                            matched: false,
+                            enabled: f.enabled,
+                        }).collect(),
+                        match_count: 0,
+                        duration_ms: 0,
+                    },
+                }
+            }).collect()
+        } else {
+            vec![]
+        };
+        
         DetailedValidationResult {
             overall,
             segments,
-            layers: vec![], // 暂时为空，后续实现逐层校验
+            layers,
             total_duration_ms: total_start.elapsed().as_millis() as u64,
         }
     }
@@ -967,6 +1040,7 @@ pub mod mock_impl {
     pub fn validate_selector_and_xpath_detailed(
         _window_selector: &str,
         _element_xpath: &str,
+        _hierarchy: &[HierarchyNode],
     ) -> DetailedValidationResult {
         DetailedValidationResult {
             overall: ValidationResult::Found {

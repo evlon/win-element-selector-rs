@@ -482,6 +482,7 @@ impl SelectorApp {
         let detailed_result = capture::validate_selector_and_xpath_detailed(
             &self.window_selector,
             &self.element_xpath,
+            &self.hierarchy,
         );
         
         // Store detailed result for UI display

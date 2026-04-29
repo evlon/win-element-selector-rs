@@ -27,8 +27,9 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
 pub fn validate_selector_and_xpath_detailed(
     window_selector: &str,
     element_xpath: &str,
+    hierarchy: &[crate::core::model::HierarchyNode],
 ) -> DetailedValidationResult {
-    uia::validate_selector_and_xpath_detailed(window_selector, element_xpath)
+    uia::validate_selector_and_xpath_detailed(window_selector, element_xpath, hierarchy)
 }
 
 /// Find all matching elements with detailed info

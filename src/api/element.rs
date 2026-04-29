@@ -51,6 +51,7 @@ pub async fn get_element(query: web::Query<ElementQuery>) -> impl Responder {
         super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector,
             &xpath,
+            &[],  // API层无 hierarchy 数据，layers 为空
         )
     })
     .await;
