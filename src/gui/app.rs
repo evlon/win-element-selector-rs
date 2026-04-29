@@ -867,14 +867,11 @@ impl SelectorApp {
 
                 let validation_segments = self.detailed_validation.as_ref().map(|d| &d.segments);
                 let show_validation_details = self.config.show_validation_details;
-                let included_changed = Self::draw_tree_recursive(
+                let included_changed = Self::draw_tree_flat(
                     ui,
                     &mut self.hierarchy,
                     &mut self.selected_node,
                     &mut self.node_expanded,
-                    0,
-                    n,
-                    0,
                     validation_segments,
                     show_validation_details,
                 );
@@ -920,67 +917,75 @@ impl SelectorApp {
         }
     }
 
-    /// Recursive tree drawing using egui CollapsingHeader.
-    /// `start` is the current node index; all nodes from start..end are in the subtree
-    /// rooted at the node at depth `depth_of_start`.
-    /// Since the hierarchy is a strict ancestor chain (each node is parent of all following),
-    /// node[i] is parent of node[i+1], so the "children" of node[i] is just {node[i+1]}.
-    fn draw_tree_recursive(
+    /// 绘制元素层级树（平面列表形式）)
+    /// 由于数据模型是线性的祖先链（每个节点只有一个子节点），
+    /// 使用简单的缩进控制来展示层级关系，而不是复杂的递归 CollapsingHeader。
+    fn draw_tree_flat(
         ui: &mut Ui,
         hierarchy: &mut Vec<HierarchyNode>,
         selected_node: &mut Option<usize>,
-        expanded: &mut Vec<bool>,
-        idx: usize,
-        total: usize,
-        _depth: usize,
+        _expanded: &mut Vec<bool>,  // 保留参数但不再使用(平面列表不需要展开/折叠)
         validation_segments: Option<&Vec<SegmentValidationResult>>,
         show_validation_details: bool,
     ) -> bool {
-        let is_leaf   = idx + 1 >= total;
-        let is_target = idx + 1 == total;
-        let is_sel    = *selected_node == Some(idx);
-        let included  = hierarchy[idx].included;
-
-        let label_text = hierarchy[idx].tree_label();
-        let icon = if is_target { "🎯" } else { "" };
-        let label_color = if is_target { C_TARGET_FG }
-                          else if is_sel { C_SEL_FG }
-                          else if !included { C_MUTED }
-                          else { Color32::from_gray(35) };
-
-        // Add validation marker if available and enabled
-        let validation_marker = if show_validation_details {
-            validation_segments
-                .and_then(|segments| segments.get(idx))
-                .map(|seg| {
-                    if seg.matched {
-                        format!(" ✅ {}ms", seg.duration_ms)
-                    } else {
-                        format!(" ❌ {}ms", seg.duration_ms)
-                    }
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-
-        let header_text = RichText::new(format!("{} {}{}", icon, label_text, validation_marker))
-            .size(12.0)
-            .color(label_color)
-            .strong_if(is_sel || is_target);
-
-        // Track if included state changed
+        let n = hierarchy.len();
         let mut included_changed = false;
-
-        if is_leaf {
-            // Leaf node — draw as selectable row with checkbox
+        
+        for idx in 0..n {
+            let is_target = idx == n - 1;  // 最后一个节点是目标
+            let is_sel = *selected_node == Some(idx);
+            
+            // 先读取不需要在闭包内修改的值
+            let label_text = hierarchy[idx].tree_label();
+            let node_included = hierarchy[idx].included;
+            let icon = if is_target { "🎯" } else { "" };
+            let label_color = if is_target { C_TARGET_FG }
+                              else if is_sel { C_SEL_FG }
+                              else if !node_included { C_MUTED }
+                              else { Color32::from_gray(35) };
+            
+            // 缩进： 根据节点深度(索引位置)计算缩进
+            // 每个节点缩进 14.0 像素
+            let indent = idx as f32 * 14.0;
+            ui.add_space(indent);
+            
+            // 构建节点标签
+            // label_text 已在上面读取
+            // icon 和 label_color 已在上面计算
+            
+            // 验证标记
+            
+            // 验证标记
+            let validation_marker = if show_validation_details {
+                validation_segments
+                    .and_then(|segments| segments.get(idx))
+                    .map(|seg| {
+                        if seg.matched {
+                            format!(" ✅ {}ms", seg.duration_ms)
+                        } else {
+                            format!(" ❌ {}ms", seg.duration_ms)
+                        }
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            
+            let header_text = RichText::new(format!("{} {}{}", icon, label_text, validation_marker))
+                .size(12.0)
+                .color(label_color)
+                .strong_if(is_sel || is_target);
+            
+            // 行背景
             let row_bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
+            
+            // 绘制一行: 复选框 + 标签
             egui::Frame::none()
                 .fill(row_bg)
-                .inner_margin(Margin::symmetric(4.0, 1.0))
+                .inner_margin(Margin::symmetric(2.0, 1.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // Checkbox for include/exclude
+                        // 复选框 (用于包含/排除节点) - 使用索引直接访问
                         let checkbox_resp = ui.checkbox(&mut hierarchy[idx].included, "");
                         if checkbox_resp.changed() {
                             included_changed = true;
@@ -990,8 +995,8 @@ impl SelectorApp {
                         } else {
                             "已排除 — 勾选将包含在 XPath 中"
                         });
-
-                        // Node label
+                        
+                        // 节点标签
                         let resp = ui.add(
                             egui::Label::new(header_text)
                                 .sense(Sense::click())
@@ -1000,78 +1005,20 @@ impl SelectorApp {
                         if resp.clicked() {
                             *selected_node = Some(idx);
                         }
-                        // Context menu (keep for other actions like highlight)
+                        
+                        // 右键菜单
                         resp.context_menu(|ui| {
                             Self::node_context_menu(ui, hierarchy, idx, selected_node);
                         });
+                        
+                        // 悬停 tooltip
                         resp.on_hover_ui(|ui| {
                             node_tooltip(ui, &hierarchy[idx]);
                         });
                     });
                 });
-        } else {
-            // Non-leaf: use CollapsingHeader for expand/collapse
-            // We need to track open state manually to sync with `expanded`.
-            let id = egui::Id::new(("tree_node", idx));
-
-            let row_bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
-            let frame  = egui::Frame::none()
-                .fill(row_bg)
-                .inner_margin(Margin::symmetric(2.0, 0.0));
-
-            frame.show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Checkbox for include/exclude
-                    let checkbox_resp = ui.checkbox(&mut hierarchy[idx].included, "");
-                    if checkbox_resp.changed() {
-                        included_changed = true;
-                    }
-                    checkbox_resp.on_hover_text(if hierarchy[idx].included {
-                        "已包含在 XPath 中 — 取消勾选将排除此节点"
-                    } else {
-                        "已排除 — 勾选将包含在 XPath 中"
-                    });
-
-                    // Use CollapsingHeader with the expanded state driven by our vec.
-                    let ch = egui::CollapsingHeader::new(header_text)
-                        .id_salt(id)
-                        .open(Some(expanded[idx]))
-                        .show(ui, |ui| {
-                            // Child = next node in chain
-                            let child_changed = Self::draw_tree_recursive(
-                                ui,
-                                hierarchy,
-                                selected_node,
-                                expanded,
-                                idx + 1,
-                                total,
-                                _depth + 1,
-                                validation_segments,
-                                show_validation_details,
-                            );
-                            included_changed = included_changed || child_changed;
-                        });
-
-                    // Update expanded state from header interaction
-                    expanded[idx] = ch.openness > 0.5;
-
-                    // Clicking the header label selects this node
-                    if ch.header_response.clicked() {
-                        *selected_node = Some(idx);
-                    }
-
-                    // Context menu
-                    ch.header_response.context_menu(|ui| {
-                        Self::node_context_menu(ui, hierarchy, idx, selected_node);
-                    });
-
-                    ch.header_response.on_hover_ui(|ui| {
-                        node_tooltip(ui, &hierarchy[idx]);
-                    });
-                });
-            });
         }
-
+        
         included_changed
     }
 

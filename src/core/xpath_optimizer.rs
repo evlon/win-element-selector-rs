@@ -233,7 +233,8 @@ impl XPathOptimizer {
 mod tests {
     use super::*;
     use crate::core::model::ElementRect;
-    use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
+    // is_dynamic_class, extract_stable_prefix 已在 use 娡块顶部导入，不需要重复导入
+    #[test]
     
     #[test]
     fn test_optimize_with_automation_id() {
