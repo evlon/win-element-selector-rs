@@ -154,6 +154,9 @@ pub struct HierarchyNode {
     pub filters:               Vec<PropertyFilter>,
     /// Whether this node should be included in the final XPath.
     pub included:              bool,
+    /// Whether this node is the target element (the one user captured).
+    /// Used by optimizer to correctly identify the target node.
+    pub is_target:             bool,
     /// Position function mode for Index:
     /// - "position": position()=N (default)
     /// - "first": first() (when position=1)
@@ -221,6 +224,7 @@ impl HierarchyNode {
             process_id,
             filters,
             included: true,
+            is_target: false,          // 默认非目标节点，捕获时会设置最后一个节点为目标
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture
         }

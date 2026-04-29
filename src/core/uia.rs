@@ -220,7 +220,9 @@ pub mod windows_impl {
         }
 
         // Compute sibling index for the last element (target).
+        // Mark the last node as the target element for optimizer.
         if let Some(last) = hierarchy.last_mut() {
+            last.is_target = true;  // 标记为目标节点
             last.index = sibling_index(&target, &walker).unwrap_or(0);
             if last.index > 0 {
                 // Update the Index filter value.
