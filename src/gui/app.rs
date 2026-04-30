@@ -1133,7 +1133,7 @@ impl SelectorApp {
 
         if ui.button(if included { "⊖ 从 XPath 中排除此节点" } else { "⊕ 将此节点加入 XPath" }).clicked() {
             hierarchy[idx].included = !included;
-            ui.close_menu();
+            ui.close();
         }
 
         ui.separator();
@@ -1141,19 +1141,19 @@ impl SelectorApp {
         if ui.button("🔍 高亮显示此元素").clicked() {
             let info = HighlightInfo::new(hierarchy[idx].rect.clone(), &hierarchy[idx].control_type);
             highlight::flash_with_info(&info, 1500);
-            ui.close_menu();
+            ui.close();
         }
 
         if ui.button("📋 复制此节点 XPath 片段").clicked() {
             ui.ctx().copy_text(hierarchy[idx].xpath_segment());
-            ui.close_menu();
+            ui.close();
         }
 
         ui.separator();
 
         if ui.button("选中此节点").clicked() {
             *selected_node = Some(idx);
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -1593,8 +1593,8 @@ impl eframe::App for SelectorApp {
         self.overlay.draw(ctx);
 
         // ── 全局样式 ──────────────────────────────────────────────────────────
-        ctx.set_style({
-            let mut s = (*ctx.style()).clone();
+        ctx.set_global_style({
+            let mut s = (*ctx.global_style()).clone();
             s.visuals.panel_fill   = Color32::WHITE;
             s.visuals.window_fill  = Color32::WHITE;
             s.spacing.item_spacing = egui::vec2(4.0, 2.0);

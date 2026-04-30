@@ -2,6 +2,9 @@
 //
 // 捕获状态数据模型（单一数据源）
 // 解决 UI 状态不一致问题：所有用户可修改的状态集中管理，持久化时完整保存
+//
+// NOTE: 此文件为架构改进预留，当前使用 PersistedCapture 扩展方案
+#![allow(dead_code)]
 
 use std::path::Path;
 use serde::{Deserialize, Serialize};

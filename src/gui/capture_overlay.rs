@@ -4,7 +4,7 @@
 // Displays a semi-transparent, always-on-top panel showing capture shortcuts.
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Vec2,
+    self, Align, Color32, Frame, Layout, Margin, RichText, Stroke, Vec2,
 };
 
 /// The floating overlay panel content.

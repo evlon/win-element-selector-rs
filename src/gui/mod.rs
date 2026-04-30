@@ -11,4 +11,3 @@ pub mod state_model;
 
 // Re-export for convenience
 pub use app::SelectorApp;
-pub use state_model::{CaptureStateModel, XPathSourceKind};
