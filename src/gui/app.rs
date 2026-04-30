@@ -628,11 +628,11 @@ impl SelectorApp {
 
     // ── Panels ────────────────────────────────────────────────────────────────
 
-    fn draw_titlebar(&self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("titlebar")
-            .exact_height(32.0)
+    fn draw_titlebar(&self, ui: &mut Ui) {
+        egui::Panel::top("titlebar")
+            .exact_size(32.0)
             .frame(Frame::NONE.fill(C_TITLE_BG))
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
                     ui.label(
@@ -656,16 +656,16 @@ impl SelectorApp {
     }
 
     /// 顶部控制栏：名称 + 捕获 + 校验
-    fn draw_top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top_bar")
-            .exact_height(44.0)
+    fn draw_top_bar(&mut self, ui: &mut Ui) {
+        egui::Panel::top("top_bar")
+            .exact_size(44.0)
             .frame(
                 Frame::NONE
                     .fill(Color32::from_gray(248))
                     .inner_margin(Margin::symmetric(12, 8))
                     .stroke(Stroke::new(1.0, C_BORDER)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("元素名称:").color(C_MUTED).size(11.5));
                     ui.add_space(4.0);
@@ -706,7 +706,7 @@ impl SelectorApp {
                                     .stroke(Stroke::new(1.0, C_WARN))
                                     .min_size(Vec2::new(120.0, 28.0)),
                                 ).on_hover_text("点击或按 Esc 取消").clicked() {
-                                    self.cancel_capture(ctx);
+                                    self.cancel_capture(ui.ctx());
                                 }
                             }
                             CaptureState::Capturing => {
@@ -734,18 +734,18 @@ impl SelectorApp {
     }
 
     /// 捕获状态横幅（仅在 WaitingClick 时显示）
-    fn draw_capture_banner(&self, ctx: &egui::Context) {
+    fn draw_capture_banner(&self, ui: &mut Ui) {
         if !matches!(self.capture_state, CaptureState::WaitingClick { .. }) {
             return;
         }
-        egui::TopBottomPanel::top("capture_banner")
-            .exact_height(26.0)
+        egui::Panel::top("capture_banner")
+            .exact_size(26.0)
             .frame(
                 Frame::NONE
                     .fill(C_CAPTURE_BG)
                     .stroke(Stroke::new(1.0, Color32::from_rgb(253, 230, 138))),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
                     ui.label(
@@ -758,15 +758,15 @@ impl SelectorApp {
     }
 
     /// 底部面板：XPath 预览 + 状态 + 确定/取消（合并为单一 Panel）
-    fn draw_bottom_panel(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("bottom_panel")
+    fn draw_bottom_panel(&mut self, ui: &mut Ui) {
+        egui::Panel::bottom("bottom_panel")
             .frame(
                 Frame::NONE
                     .fill(Color32::from_gray(245))
                     .inner_margin(Margin::symmetric(12, 8))
                     .stroke(Stroke::new(1.0, C_BORDER)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 // ── XPath 预览区 ─────────────────────────────────────────────
                 self.draw_xpath_preview_content(ui);
 
@@ -798,7 +798,7 @@ impl SelectorApp {
                             .fill(confirm_fill)
                             .min_size(Vec2::new(110.0, 30.0)),
                         ).on_hover_text("保存并关闭（未校验时会先自动校验）").clicked() {
-                            self.do_confirm_and_close(ctx);
+                            self.do_confirm_and_close(ui.ctx());
                         }
 
                         ui.add_space(6.0);
@@ -811,7 +811,7 @@ impl SelectorApp {
                             .min_size(Vec2::new(70.0, 30.0)),
                         ).on_hover_text("放弃本次操作并关闭").clicked() {
                             self.save_to_file();
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
 
                         ui.add_space(8.0);
@@ -1551,15 +1551,13 @@ impl eframe::App for SelectorApp {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx();
-        
         // 捕获状态下持续刷新
         if self.capture_state != CaptureState::Idle {
-            ctx.request_repaint_after(Duration::from_millis(200));
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
 
         // ── 全局键盘 ─────────────────────────────────────────────────────────
-        let (f4, f7, escape) = ctx.input(|i| {
+        let (f4, f7, escape) = ui.ctx().input(|i| {
             (i.key_pressed(Key::F4), i.key_pressed(Key::F7), i.key_pressed(Key::Escape))
         });
         if f4 && self.capture_state == CaptureState::Idle { self.start_capture(); }
@@ -1574,14 +1572,14 @@ impl eframe::App for SelectorApp {
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg    = "捕获超时，已取消".to_string();
-                ctx.set_cursor_icon(egui::CursorIcon::Default);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             } else if escape {
-                self.cancel_capture(ctx);
+                self.cancel_capture(ui.ctx());
             } else if let Some(event) = mouse_hook::poll_click() {
                 if event.is_down {
                     let mode = event.capture_mode();
                     if mode != CaptureMode::None {
-                        self.finish_capture_at(event.x, event.y, mode, ctx);
+                        self.finish_capture_at(event.x, event.y, mode, ui.ctx());
                     }
                 }
             }
@@ -1608,11 +1606,11 @@ impl eframe::App for SelectorApp {
             self.last_highlight_pos = None;
         }
 
-        self.overlay.draw(ctx);
+        self.overlay.draw(ui.ctx());
 
         // ── 全局样式 ──────────────────────────────────────────────────────────
-        ctx.set_global_style({
-            let mut s = (*ctx.global_style()).clone();
+        ui.ctx().set_global_style({
+            let mut s = (*ui.ctx().global_style()).clone();
             s.visuals.panel_fill   = Color32::WHITE;
             s.visuals.window_fill  = Color32::WHITE;
             s.spacing.item_spacing = egui::vec2(4.0, 2.0);
@@ -1625,14 +1623,14 @@ impl eframe::App for SelectorApp {
         });
 
         // ── Panel 布局 ────────────────────────────────────────────────────────
-        self.draw_titlebar(ctx);
-        self.draw_top_bar(ctx);
-        self.draw_capture_banner(ctx);   // 仅捕获状态下可见
-        self.draw_bottom_panel(ctx);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
+        self.draw_titlebar(ui);
+        self.draw_top_bar(ui);
+        self.draw_capture_banner(ui);   // 仅捕获状态下可见
+        self.draw_bottom_panel(ui);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
 
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(Color32::from_gray(250)))
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.add_space(6.0);
 
                 // ── 标签页 + 辅助开关 ─────────────────────────────────────────
@@ -1701,7 +1699,7 @@ impl eframe::App for SelectorApp {
                     self.divider_dragging = false;
                 }
                 if drag_resp.hovered() || self.divider_dragging {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
 
                 // 分隔线
