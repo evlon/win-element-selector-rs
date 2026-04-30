@@ -212,17 +212,56 @@ pub mod windows_impl {
 
         chain.reverse(); // root → target
 
-        // 计算每个节点相对于窗口根的深度
-        // chain 结构：[Desktop, Window, ..., target]
-        // 窗口节点通常在 index=1（Desktop的直接子节点）
-        // depth_from_window = chain_index - window_index
-        let window_index = chain.iter().position(|elem| {
-            unsafe {
-                elem.CurrentControlType()
-                    .map(control_type_name)
-                    .unwrap_or_default() == "Window"
+        // 验证并补充遗漏的中间节点
+        // GetParentElement 可能返回"逻辑父节点"而非"树结构父节点"，导致中间节点被跳过
+        // 我们需要验证：父节点的子节点列表是否包含当前节点
+        // 如果不包含，说明有遗漏，需要补充中间节点
+        let mut verified_chain: Vec<IUIAutomationElement> = Vec::new();
+        for (i, elem) in chain.iter().enumerate() {
+            verified_chain.push(elem.clone());
+            if i + 1 < chain.len() {
+                let parent = elem;
+                let child = &chain[i + 1];
+                // 检查 parent 的直接子节点是否包含 child
+                let child_found = unsafe {
+                    let mut found = false;
+                    let mut c = walker.GetFirstChildElement(parent).ok();
+                    while let Some(ref current_child) = c {
+                        if auto.CompareElements(current_child, child)
+                            .map(|b| b.as_bool())
+                            .unwrap_or(false) {
+                            found = true;
+                            break;
+                        }
+                        c = walker.GetNextSiblingElement(current_child).ok();
+                    }
+                    found
+                };
+                
+                if !child_found {
+                    // 子节点不在父节点的直接子节点列表中，说明有遗漏
+                    // 尾递归搜索：从 parent 开始向下查找 child，补充路径上的所有中间节点
+                    info!("[Capture] 发现遗漏的中间节点：父节点 {} 的子节点中不包含 {}", 
+                          unsafe { parent.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                          unsafe { child.CurrentControlType().map(control_type_name).unwrap_or_default() });
+                    
+                    // 搜索从 parent 到 child 的路径
+                    if let Some(intermediates) = find_path_to_element(&auto, &walker, parent, child) {
+                        for intermediate in intermediates {
+                            verified_chain.push(intermediate);
+                        }
+                    }
+                }
             }
-        }).unwrap_or(1); // 如果找不到，默认索引为 1
+        }
+        
+        chain = verified_chain;
+        
+        // 计算每个节点相对于窗口根的深度
+        // chain 结构：[Desktop, 顶层窗口, ..., target]
+        // 顶层窗口 = Desktop 的直接子节点（chain[1]）
+        // depth_from_window = chain_index - 1
+        let window_index = 1; // 顶层窗口始终在 chain[1]
 
         let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
         for (chain_idx, elem) in chain.iter().enumerate() {
@@ -335,6 +374,43 @@ pub mod windows_impl {
         }
         
         Some(node)
+    }
+
+    /// 从 parent 开始向下搜索 target，返回路径上的所有中间节点
+    /// 使用递归 DFS 搜索，找到目标后返回路径
+    fn find_path_to_element(
+        auto: &IUIAutomation,
+        walker: &IUIAutomationTreeWalker,
+        parent: &IUIAutomationElement,
+        target: &IUIAutomationElement,
+    ) -> Option<Vec<IUIAutomationElement>> {
+        // 直接检查 parent 的子节点是否包含 target
+        let mut child = unsafe { walker.GetFirstChildElement(parent).ok() };
+        
+        while let Some(ref c) = child {
+            let is_target = unsafe {
+                auto.CompareElements(c, target)
+                    .map(|b| b.as_bool())
+                    .unwrap_or(false)
+            };
+            
+            if is_target {
+                // target 是 parent 的直接子节点，不需要中间节点
+                return Some(Vec::new());
+            }
+            
+            // 递归搜索子节点
+            if let Some(path) = find_path_to_element(auto, walker, c, target) {
+                // 找到了！c 是路径上的第一个中间节点
+                let mut result = vec![c.clone()];
+                result.extend(path);
+                return Some(result);
+            }
+            
+            child = unsafe { walker.GetNextSiblingElement(c).ok() };
+        }
+        
+        None
     }
 
     /// 1-based index among same-type siblings under the parent.
@@ -699,7 +775,7 @@ pub mod windows_impl {
             if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
-                let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
+                let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
 
                 // Only include windows with non-empty title
                 if !title.is_empty() {
@@ -826,7 +902,7 @@ pub mod windows_impl {
 
 
     /// Find target window by parsing window selector XPath.
-    /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
+    /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow' and @ProcessName='WeChat']"
     fn find_window_by_selector(
         auto: &IUIAutomation,
         window_selector: &str,
@@ -834,7 +910,7 @@ pub mod windows_impl {
         use windows::Win32::UI::Accessibility::*;
         
         // Parse window selector to extract conditions
-        let (expected_name, expected_class) = parse_window_selector(window_selector);
+        let (expected_name, expected_class, expected_process) = parse_window_selector(window_selector);
         
         let desktop = unsafe { auto.GetRootElement().ok()? };
         let condition = unsafe { auto.CreateTrueCondition().ok()? };
@@ -857,12 +933,15 @@ pub mod windows_impl {
             if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
+                let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
+                let process_name = get_process_name_by_id(pid);
                 
                 // Match by parsed conditions
                 let name_match = expected_name.as_ref().map_or(true, |n| &title == n);
                 let class_match = expected_class.as_ref().map_or(true, |c| &class == c);
+                let process_match = expected_process.as_ref().map_or(true, |p| &process_name == p);
                 
-                if name_match && class_match {
+                if name_match && class_match && process_match {
                     return Some(win);
                 }
             }
@@ -871,11 +950,12 @@ pub mod windows_impl {
         None
     }
 
-    /// Parse window selector to extract Name and ClassName conditions.
-    /// Returns (Option<Name>, Option<ClassName>)
-    fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>) {
+    /// Parse window selector to extract Name, ClassName, and ProcessName conditions.
+    /// Returns (Option<Name>, Option<ClassName>, Option<ProcessName>)
+    fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>, Option<String>) {
         let mut name = None;
         let mut class = None;
+        let mut process_name = None;
         
         // Extract content between [ and ]
         if let Some(start) = selector.find('[') {
@@ -897,10 +977,18 @@ pub mod windows_impl {
                         class = Some(predicates[start_pos..start_pos + end_pos].to_string());
                     }
                 }
+                
+                // Parse @ProcessName='value'
+                if let Some(pos) = predicates.find("@ProcessName='") {
+                    let start_pos = pos + 14;
+                    if let Some(end_pos) = predicates[start_pos..].find('\'') {
+                        process_name = Some(predicates[start_pos..start_pos + end_pos].to_string());
+                    }
+                }
             }
         }
         
-        (name, class)
+        (name, class, process_name)
     }
 
     /// Find elements by XPath with detailed per-segment validation results.
