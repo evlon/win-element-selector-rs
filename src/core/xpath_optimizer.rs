@@ -93,13 +93,31 @@ impl XPathOptimizer {
         }
         
         // 4. 生成 XPath 字符串
-        let full_xpath = xpath_nodes_with_indices.iter()
-            .map(|(_, n)| {
-                let segment = n.xpath_segment();
-                if segment.starts_with('/') { segment } else { format!("/{}", segment) }
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        //    第一个节点是根节点（原始索引=0）时用 / 开头，否则用 // 开头
+        let first_is_root = xpath_nodes_with_indices.first()
+            .map(|(orig_idx, _)| *orig_idx == 0)
+            .unwrap_or(false);
+        
+        let full_xpath = if first_is_root {
+            // 绝对路径：从根节点开始
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            // 相对路径：从任意位置开始查找第一个节点
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+                .replacen("/", "//", 1)  // 把第一个 / 替换成 //
+        };
         
         // 5. 调用 uiauto-xpath 的 optimize
         let result = XPath::optimize(&full_xpath);
@@ -133,7 +151,10 @@ impl XPathOptimizer {
                     anchor_index: opt_result.anchor_index,
                     target_index: opt_result.target_index,
                     summary,
-                    optimized_xpath: opt_result.anchor_relative,
+                    // 修正输出 XPath 的开头斜杠：根据原始锚点索引
+                    //    - 锚点是根节点（索引0）：用 / 开头（绝对路径）
+                    //    - 锚点不是根节点或无锚点：用 // 开头（相对路径）
+                    optimized_xpath: self.fix_xpath_prefix(&opt_result.anchor_relative, original_anchor_index),
                     minimal_xpath: opt_result.minimal,
                     optimized_hierarchy,
                 }
@@ -247,6 +268,34 @@ impl XPathOptimizer {
             .filter(|n| n.class_name.len() > 30 || !n.automation_id.is_empty())
             .count()
     }
+    
+    /// 修正 XPath 开头斜杠：根据原始锚点索引
+    /// - 锚点是根节点（索引 0）：用 / 开头（绝对路径）
+    /// - 锚点不是根节点或无锚点：用 // 开头（相对路径）
+    fn fix_xpath_prefix(&self, xpath: &str, original_anchor_index: Option<usize>) -> String {
+        match original_anchor_index {
+            Some(0) => {
+                // 锚点是根节点，用绝对路径 / 开头
+                if xpath.starts_with("//") {
+                    xpath.replacen("//", "/", 1)
+                } else if xpath.starts_with("/") {
+                    xpath.to_string()
+                } else {
+                    format!("/{}", xpath)
+                }
+            }
+            _ => {
+                // 锚点不是根节点或无锚点，用相对路径 // 开头
+                if xpath.starts_with("//") {
+                    xpath.to_string()
+                } else if xpath.starts_with("/") {
+                    xpath.replacen("/", "//", 1)
+                } else {
+                    format!("//{}", xpath)
+                }
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -352,5 +401,61 @@ mod tests {
         
         // 压缩率应大于 70%
         assert!(result.summary.compression_ratio > 0.5);
+    }
+    
+    #[test]
+    fn test_xpath_prefix_when_first_node_excluded() {
+        let optimizer = XPathOptimizer::new();
+        
+        // 用户取消了第一个节点（Pane），只保留 Document 和 Group
+        let mut hierarchy = vec![
+            HierarchyNode::new("Pane", "", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Document", "RootWebArea", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Group", "", "btn-class", "新建对话", 0, ElementRect::default(), 0),
+        ];
+        
+        // 取消第一个节点（原始索引 0）
+        hierarchy[0].included = false;
+        // 标记最后一个节点为目标节点
+        hierarchy[2].is_target = true;
+        
+        let result = optimizer.optimize(&hierarchy);
+        
+        println!("=== 第一个节点被取消 ===");
+        println!("optimized_xpath: {}", result.optimized_xpath);
+        println!("anchor_index: {:?}", result.anchor_index);
+        
+        // 输入 XPath 第一个节点是 Document（原始索引 1），不是根节点
+        // 优化后的 XPath 应该用 // 开头（相对路径），而不是 / 开头
+        assert!(result.optimized_xpath.starts_with("//"),
+            "Expected // prefix, got: {}", result.optimized_xpath);
+    }
+    
+    #[test]
+    fn test_xpath_prefix_when_anchor_is_root() {
+        let optimizer = XPathOptimizer::new();
+        
+        // 第一个节点（Pane）有 AutomationId，会被选为锚点
+        let mut hierarchy = vec![
+            HierarchyNode::new("Pane", "MainWindow", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Document", "", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Button", "", "btn-class", "点击", 0, ElementRect::default(), 0),
+        ];
+        
+        // 标记最后一个节点为目标节点
+        hierarchy[2].is_target = true;
+        
+        let result = optimizer.optimize(&hierarchy);
+        
+        println!("=== 锚点是根节点 ===");
+        println!("optimized_xpath: {}", result.optimized_xpath);
+        println!("anchor_index: {:?}", result.anchor_index);
+        
+        // 锚点是第一个节点（原始索引 0），是根节点
+        // 优化后的 XPath 应该用 / 开头（绝对路径）
+        assert!(result.optimized_xpath.starts_with("/"),
+            "Expected / prefix, got: {}", result.optimized_xpath);
+        assert!(!result.optimized_xpath.starts_with("//"),
+            "Expected single / prefix, got: {}", result.optimized_xpath);
     }
 }
