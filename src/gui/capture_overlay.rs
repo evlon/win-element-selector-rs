@@ -4,7 +4,7 @@
 // Displays a semi-transparent, always-on-top panel showing capture shortcuts.
 
 use eframe::egui::{
-    self, Align, Color32, Frame, Layout, Margin, RichText, Stroke, Vec2,
+    self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Vec2,
 };
 
 /// The floating overlay panel content.
@@ -52,11 +52,11 @@ impl CaptureOverlay {
             .interactable(false)
             .fixed_size(Vec2::new(320.0, 220.0))
             .anchor(egui::Align2::LEFT_TOP, Vec2::new(20.0, 20.0))
-            .frame(Frame::none()
+            .frame(Frame::NONE
                 .fill(Color32::from_rgba_premultiplied(20, 20, 30, 200))  // Semi-transparent dark
-                .rounding(egui::Rounding::same(8.0))
+                .corner_radius(egui::CornerRadius::same(8))
                 .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 80)))
-                .inner_margin(Margin::same(16.0)))
+                .inner_margin(Margin::same(16)))
             .show(ctx, |ui| {
                 // Title
                 ui.horizontal(|ui| {
@@ -102,10 +102,10 @@ fn draw_shortcut_row(ui: &mut egui::Ui, action: &str, shortcut: &str, desc: &str
         
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // Shortcut badge
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(40, 60, 100))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(Margin::symmetric(8.0, 3.0))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(Margin::symmetric(8, 3))
                 .show(ui, |ui| {
                     ui.label(RichText::new(shortcut)
                         .color(Color32::from_rgb(200, 220, 255))

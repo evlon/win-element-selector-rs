@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Color32, Frame, Key, Layout, Margin, RichText,
+    self, Align, Color32, CornerRadius, Frame, Key, Layout, Margin, RichText,
     ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use log::info;
@@ -538,7 +538,7 @@ impl SelectorApp {
     fn draw_titlebar(&self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("titlebar")
             .exact_height(32.0)
-            .frame(Frame::none().fill(C_TITLE_BG))
+            .frame(Frame::NONE.fill(C_TITLE_BG))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
@@ -567,9 +567,9 @@ impl SelectorApp {
         egui::TopBottomPanel::top("top_bar")
             .exact_height(44.0)
             .frame(
-                Frame::none()
+                Frame::NONE
                     .fill(Color32::from_gray(248))
-                    .inner_margin(Margin::symmetric(12.0, 8.0))
+                    .inner_margin(Margin::symmetric(12, 8))
                     .stroke(Stroke::new(1.0, C_BORDER)),
             )
             .show(ctx, |ui| {
@@ -648,7 +648,7 @@ impl SelectorApp {
         egui::TopBottomPanel::top("capture_banner")
             .exact_height(26.0)
             .frame(
-                Frame::none()
+                Frame::NONE
                     .fill(C_CAPTURE_BG)
                     .stroke(Stroke::new(1.0, Color32::from_rgb(253, 230, 138))),
             )
@@ -668,9 +668,9 @@ impl SelectorApp {
     fn draw_bottom_panel(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("bottom_panel")
             .frame(
-                Frame::none()
+                Frame::NONE
                     .fill(Color32::from_gray(245))
-                    .inner_margin(Margin::symmetric(12.0, 8.0))
+                    .inner_margin(Margin::symmetric(12, 8))
                     .stroke(Stroke::new(1.0, C_BORDER)),
             )
             .show(ctx, |ui| {
@@ -755,11 +755,11 @@ impl SelectorApp {
 
     /// XPath 预览内容（根据标签页切换）
     fn draw_xpath_preview_content(&mut self, ui: &mut Ui) {
-        Frame::none()
+        Frame::NONE
             .fill(Color32::from_gray(252))
-            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .inner_margin(Margin::symmetric(10, 6))
             .stroke(Stroke::new(1.0, C_BORDER))
-            .rounding(egui::Rounding::same(4.0))
+            .corner_radius(CornerRadius::same(4))
             .show(ui, |ui| {
                 match self.active_tab {
                     ElementTab::Element      => self.draw_element_xpath_content(ui),
@@ -928,10 +928,10 @@ impl SelectorApp {
         ui.add_space(4.0);
 
         if let Some(ref win) = self.window_info {
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(239, 246, 255))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         prop_row(ui, "标题",  &win.title);
@@ -993,9 +993,9 @@ impl SelectorApp {
 
             let row_bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
 
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(row_bg)
-                .inner_margin(Margin::symmetric(2.0, 1.0))
+                .inner_margin(Margin::symmetric(2, 1))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let cb_resp = ui.checkbox(&mut hierarchy[idx].included, "");
@@ -1091,10 +1091,10 @@ impl SelectorApp {
                 // 节点摘要
                 {
                     let node = &self.hierarchy[sel_idx];
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(Color32::from_rgb(239, 246, 255))
-                        .rounding(egui::Rounding::same(4.0))
-                        .inner_margin(Margin::symmetric(10.0, 6.0))
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("控件类型").color(C_MUTED).size(11.0));
@@ -1124,9 +1124,9 @@ impl SelectorApp {
                 ui.add_space(6.0);
 
                 // 属性列表表头
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(C_PANEL_HDR)
-                    .inner_margin(Margin::symmetric(4.0, 2.0))
+                    .inner_margin(Margin::symmetric(4, 2))
                     .stroke(Stroke::new(0.5, C_BORDER))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1148,9 +1148,9 @@ impl SelectorApp {
                         Color32::from_rgb(245, 247, 253)
                     };
 
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(row_color)
-                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                        .inner_margin(Margin::symmetric(4, 1))
                         .show(ui, |ui| {
                             let filter = &mut self.hierarchy[sel_idx].filters[fi];
                             ui.horizontal(|ui| {
@@ -1197,11 +1197,11 @@ impl SelectorApp {
                 ui.label(RichText::new("本节点 XPath 片段:").color(C_MUTED).size(11.0));
                 ui.add_space(2.0);
                 let seg = self.hierarchy[sel_idx].xpath_segment();
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(Color32::from_rgb(248, 250, 252))
                     .stroke(Stroke::new(0.5, C_BORDER))
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(&seg)
@@ -1242,9 +1242,9 @@ impl SelectorApp {
                     return;
                 }
 
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(C_PANEL_HDR)
-                    .inner_margin(Margin::symmetric(4.0, 2.0))
+                    .inner_margin(Margin::symmetric(4, 2))
                     .stroke(Stroke::new(0.5, C_BORDER))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1266,9 +1266,9 @@ impl SelectorApp {
                         Color32::from_rgb(245, 247, 253)
                     };
 
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(row_color)
-                        .inner_margin(Margin::symmetric(4.0, 1.0))
+                        .inner_margin(Margin::symmetric(4, 1))
                         .show(ui, |ui| {
                             let filter = &mut self.window_filters[fi];
                             ui.horizontal(|ui| {
@@ -1314,11 +1314,11 @@ impl SelectorApp {
 
                 ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
                 ui.add_space(2.0);
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(Color32::from_rgb(248, 250, 252))
                     .stroke(Stroke::new(0.5, C_BORDER))
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(&self.window_selector)
@@ -1357,10 +1357,10 @@ impl SelectorApp {
             Color32::from_rgb(245, 255, 245)
         };
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(frame_fill)
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.label(RichText::new(status_text).color(status_color).strong().size(13.0));
                 ui.add_space(4.0);
@@ -1376,10 +1376,10 @@ impl SelectorApp {
         for seg in &detail.segments {
             if seg.matched || seg.match_count > 0 { continue; }
 
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(Color32::from_rgb(255, 250, 240))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(Margin::symmetric(8.0, 6.0))
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(format!("第 {} 步失败:", seg.segment_index + 1))
@@ -1444,7 +1444,9 @@ impl eframe::App for SelectorApp {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
+        
         // 捕获状态下持续刷新
         if self.capture_state != CaptureState::Idle {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -1508,7 +1510,7 @@ impl eframe::App for SelectorApp {
             s.visuals.panel_fill   = Color32::WHITE;
             s.visuals.window_fill  = Color32::WHITE;
             s.spacing.item_spacing = egui::vec2(4.0, 2.0);
-            s.spacing.window_margin     = egui::Margin::same(0.0);
+            s.spacing.window_margin     = egui::Margin::same(0);
             s.spacing.button_padding    = egui::vec2(6.0, 3.0);
             s.spacing.indent            = 14.0;
             s.spacing.interact_size     = egui::vec2(18.0, 18.0);
@@ -1523,7 +1525,7 @@ impl eframe::App for SelectorApp {
         self.draw_bottom_panel(ctx);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
 
         egui::CentralPanel::default()
-            .frame(Frame::none().fill(Color32::from_gray(250)))
+            .frame(Frame::NONE.fill(Color32::from_gray(250)))
             .show(ctx, |ui| {
                 ui.add_space(6.0);
 
@@ -1635,9 +1637,9 @@ impl eframe::App for SelectorApp {
 
 fn panel_header(ui: &mut Ui, title: &str) {
     let w = ui.available_width();
-    Frame::none()
+    Frame::NONE
         .fill(C_PANEL_HDR)
-        .inner_margin(Margin::symmetric(8.0, 3.0))
+        .inner_margin(Margin::symmetric(8, 3))
         .stroke(Stroke::new(0.5, C_BORDER))
         .show(ui, |ui| {
             ui.set_max_width(w);
