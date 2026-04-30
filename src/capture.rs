@@ -4,7 +4,10 @@
 // GUI 专用 - 调用 core::uia 模块
 
 use crate::core::uia;
-use crate::core::model::{CaptureResult, DetailedValidationResult, WindowInfo};
+use crate::core::model::{DetailedValidationResult, WindowInfo};
+
+// 公开导出 CaptureResult，供 GUI 使用
+pub use crate::core::model::CaptureResult;
 
 /// Mock capture result for testing.
 pub fn mock() -> CaptureResult {
