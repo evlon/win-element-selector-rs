@@ -985,10 +985,10 @@ impl SelectorApp {
                             "已排除 — 勾选将包含在 XPath 中"
                         });
                         
-                        // 节点标签
+                        // 节点标签 - 使用 Sense::click_and_drag() 以支持右键菜单
                         let resp = ui.add(
                             egui::Label::new(header_text)
-                                .sense(Sense::click())
+                                .sense(Sense::click_and_drag())
                                 .truncate(),
                         );
                         if resp.clicked() {
@@ -1021,7 +1021,10 @@ impl SelectorApp {
         ui.label(RichText::new("使用行首复选框切换包含/排除").color(C_MUTED).size(10.0));
         ui.separator();
         if ui.button("高亮显示此元素").clicked() {
-            highlight::flash(&hierarchy[idx].rect, 1500);
+            let node = &hierarchy[idx];
+            // 使用 HighlightInfo 传入 control_type，显示元素类型标签
+            let highlight_info = HighlightInfo::new(node.rect.clone(), &node.control_type);
+            highlight::flash_with_info(&highlight_info, 1500);
             ui.close_menu();
         }
         ui.separator();
