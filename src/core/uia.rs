@@ -212,9 +212,26 @@ pub mod windows_impl {
 
         chain.reverse(); // root → target
 
+        // 计算每个节点相对于窗口根的深度
+        // chain 结构：[Desktop, Window, ..., target]
+        // 窗口节点通常在 index=1（Desktop的直接子节点）
+        // depth_from_window = chain_index - window_index
+        let window_index = chain.iter().position(|elem| {
+            unsafe {
+                elem.CurrentControlType()
+                    .map(control_type_name)
+                    .unwrap_or_default() == "Window"
+            }
+        }).unwrap_or(1); // 如果找不到，默认索引为 1
+
         let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
-        for elem in &chain {
+        for (chain_idx, elem) in chain.iter().enumerate() {
             if let Some(node) = element_to_node(elem, &auto) {
+                // 计算真实深度：从窗口到该节点需要走多少步
+                // depth = chain_idx - window_index
+                // 例如：window_index=1，chain_idx=2 → depth=1（窗口的直接子节点）
+                let mut node = node;
+                node.depth_from_window = chain_idx.saturating_sub(window_index);
                 hierarchy.push(node);
             }
         }

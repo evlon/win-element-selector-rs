@@ -995,6 +995,7 @@ impl SelectorApp {
 
                 let validation_segments     = self.detailed_validation.as_ref().map(|d| &d.segments);
                 let show_validation_details = self.config.show_validation_details;
+                let validation_result        = Some(&self.validation);
 
                 let included_changed = Self::draw_tree_flat(
                     ui,
@@ -1002,6 +1003,7 @@ impl SelectorApp {
                     &mut self.selected_node,
                     validation_segments,
                     show_validation_details,
+                    validation_result,
                 );
 
                 if included_changed {
@@ -1048,6 +1050,7 @@ impl SelectorApp {
         selected_node: &mut Option<usize>,
         validation_segments: Option<&Vec<SegmentValidationResult>>,
         show_validation_details: bool,
+        validation_result: Option<&ValidationResult>,
     ) -> bool {
         let n = hierarchy.len();
         let mut included_changed = false;
@@ -1109,7 +1112,7 @@ impl SelectorApp {
                         }
 
                         resp.context_menu(|ui| {
-                            Self::node_context_menu(ui, hierarchy, idx, selected_node);
+                            Self::node_context_menu(ui, hierarchy, idx, selected_node, validation_result);
                         });
 
                         resp.on_hover_ui(|ui| {
@@ -1128,6 +1131,7 @@ impl SelectorApp {
         hierarchy: &mut Vec<HierarchyNode>,
         idx: usize,
         selected_node: &mut Option<usize>,
+        validation_result: Option<&ValidationResult>,
     ) {
         let included = hierarchy[idx].included;
 
@@ -1138,8 +1142,22 @@ impl SelectorApp {
 
         ui.separator();
 
-        if ui.button("🔍 高亮显示此元素").clicked() {
-            let info = HighlightInfo::new(hierarchy[idx].rect.clone(), &hierarchy[idx].control_type);
+        // 高亮逻辑改进：根据校验状态决定使用哪个 rect
+        // - 校验成功：使用实际找到的元素 rect（更准确）
+        // - 校验失败/未校验：使用捕获时的 rect，但提示用户
+        let highlight_label = match validation_result {
+            Some(ValidationResult::Found { .. }) => "🔍 高亮显示此元素（校验位置）",
+            Some(ValidationResult::NotFound) => "🔍 高亮显示此元素（捕获位置⚠）",
+            Some(ValidationResult::Error(_)) => "🔍 高亮显示此元素（捕获位置⚠）",
+            _ => "🔍 高亮显示此元素（捕获位置）",
+        };        
+        if ui.button(highlight_label).clicked() {
+            // 校验成功时，优先使用校验结果的 rect
+            let rect_to_use = match validation_result {
+                Some(ValidationResult::Found { first_rect: Some(r), .. }) => r.clone(),
+                _ => hierarchy[idx].rect.clone(),  // 校验失败或未校验，使用捕获时的 rect
+            };
+            let info = HighlightInfo::new(rect_to_use, &hierarchy[idx].control_type);
             highlight::flash_with_info(&info, 1500);
             ui.close();
         }

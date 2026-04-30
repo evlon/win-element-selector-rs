@@ -165,6 +165,13 @@ pub struct HierarchyNode {
     pub position_mode:         String,
     /// Total sibling count (needed for last() detection)
     pub sibling_count:         i32,
+    /// 该节点在真实UIA树中距离窗口根节点的层级深度。
+    /// 用于判断XPath前缀：
+    /// - depth差值=1 → 父子关系，用 `/`
+    /// - depth差值>1 → 跳过中间层，用 `//`
+    /// 窗口节点本身 depth=0，其直接子节点 depth=1，以此类推。
+    #[serde(default)]
+    pub depth_from_window:     usize,
 }
 
 impl HierarchyNode {
@@ -227,6 +234,7 @@ impl HierarchyNode {
             is_target: false,          // 默认非目标节点，捕获时会设置最后一个节点为目标
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture
+            depth_from_window: 0,  // 默认值，捕获时会计算真实深度
         }
     }
 
