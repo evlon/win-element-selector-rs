@@ -21,14 +21,17 @@ pub mod windows_impl {
     use windows::{
         core::BSTR,
         Win32::{
-            Foundation::POINT,
+            Foundation::{POINT, HWND, LPARAM},
             System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
             UI::{
                 Accessibility::{
                     CUIAutomation, IUIAutomation, IUIAutomationElement,
                     IUIAutomationTreeWalker,
                 },
-                WindowsAndMessaging::GetCursorPos,
+                WindowsAndMessaging::{
+                    GetCursorPos, EnumWindows, GetWindowThreadProcessId,
+                    IsWindowVisible,
+                },
             },
         },
     };
@@ -596,46 +599,44 @@ pub mod windows_impl {
 
         for (win_idx, search_root) in matched_windows.iter().enumerate() {
             log::info!("[XPath Validation] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, matched_windows.len());
-            
-            // Debug: 打印窗口的直接子节点
+
+            // Debug-only: print window's direct children tree for diagnostics
+            #[cfg(debug_assertions)]
             if win_idx == 0 {
                 log::info!("[XPath Validation] Window's direct children:");
-                let walker = unsafe { auto.ControlViewWalker().ok() };        
+                let walker = unsafe { auto.ControlViewWalker().ok() };
                 if let Some(walker) = walker {
                     let mut child = unsafe { walker.GetFirstChildElement(search_root).ok() };
                     let mut idx = 0;
                     while let Some(c) = child {
-                        let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };                
+                        let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
                         let class = get_bstr(unsafe { c.CurrentClassName() });
                         let name = get_bstr(unsafe { c.CurrentName() });
                         let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
                         log::info!("  child[{}] {} class='{}' name='{}' frameworkId='{}'", idx, ct, class, name, fwid);
-                        
-                        // 打印第一个子节点的子节点
+
                         if idx == 0 {
-                            log::info!("  WRY_WEBVIEW's children:");
+                            log::info!("  first child's sub-children:");
                             let mut sub_child = unsafe { walker.GetFirstChildElement(&c).ok() };
                             let mut sub_idx = 0;
                             while let Some(sc) = sub_child {
-                                let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };                        
+                                let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };
                                 let sub_class = get_bstr(unsafe { sc.CurrentClassName() });
                                 let sub_name = get_bstr(unsafe { sc.CurrentName() });
                                 let sub_fwid = get_bstr(unsafe { sc.CurrentFrameworkId() });
                                 log::info!("    sub[{}] {} class='{}' name='{}' frameworkId='{}'", sub_idx, sub_ct, sub_class, sub_name, sub_fwid);
-                                sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };                        
+                                sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };
                                 sub_idx += 1;
                                 if sub_idx > 5 { break; }
                             }
                         }
-                        
-                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };                
+
+                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };
                         idx += 1;
                         if idx > 10 { break; }
                     }
                 }
             }
-            
-            log::info!("[XPath Validation] Debug: searching for parent group nodes...");
 
             match find_by_xpath_with_fallback(&auto, search_root, element_xpath) {
                 Ok((results, segments)) => {
@@ -956,23 +957,152 @@ pub mod windows_impl {
     /// Find target windows by parsing window selector XPath.
     /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow' and @ProcessName='Weixin']"
     /// Returns all matching windows (for multi-process scenario, try XPath on each).
+    ///
+    /// Performance strategy:
+    /// 1. Fast path: Win32 EnumWindows + ElementFromHandle (milliseconds)
+    ///    - EnumWindows only returns ~20-50 top-level windows (not all UIA elements)
+    ///    - GetWindowThreadProcessId is a single syscall (much faster than OpenProcess+Query)
+    ///    - ElementFromHandle converts HWND → UIA element in O(1)
+    /// 2. Fallback: UIA condition-based search (if fast path fails)
     fn find_window_by_selector(
         auto: &IUIAutomation,
         window_selector: &str,
     ) -> Vec<IUIAutomationElement> {
-        use windows::Win32::UI::Accessibility::*;
+        use std::time::Instant;
         
-        // Parse window selector to extract conditions
+        let start = Instant::now();
         let (expected_name, expected_class, expected_process) = parse_window_selector(window_selector);
+        
+        // Fast path: EnumWindows + ElementFromHandle
+        let fast_results = find_window_by_enum_windows(
+            auto, &expected_name, &expected_class, &expected_process,
+        );
+        if !fast_results.is_empty() {
+            log::info!("[Window Search] EnumWindows fast path found {} window(s) in {}ms", 
+                fast_results.len(), start.elapsed().as_millis());
+            return fast_results;
+        }
+        
+        log::info!("[Window Search] EnumWindows found 0, falling back to UIA search...");
+        
+        // Fallback: UIA condition-based search
+        let fallback_results = find_window_by_uia_condition(
+            auto, &expected_name, &expected_class, &expected_process,
+        );
+        log::info!("[Window Search] UIA fallback found {} window(s) in {}ms total", 
+            fallback_results.len(), start.elapsed().as_millis());
+        
+        fallback_results
+    }
+
+    /// Fast path: use Win32 EnumWindows to find matching windows.
+    /// This bypasses slow UIA enumeration entirely.
+    fn find_window_by_enum_windows(
+        auto: &IUIAutomation,
+        expected_name: &Option<String>,
+        expected_class: &Option<String>,
+        expected_process: &Option<String>,
+    ) -> Vec<IUIAutomationElement> {
+        // Collect matching HWNDs via EnumWindows callback
+        let matched_hwnds: Vec<HWND> = enumerate_top_level_windows();
+        
+        if matched_hwnds.is_empty() {
+            return vec![];
+        }
+        
+        let mut results = Vec::new();
+        
+        for hwnd in matched_hwnds {
+            // Skip invisible windows early
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                continue;
+            }
+            
+            // Check PID if ProcessName filter is specified
+            if let Some(ref expected_proc) = expected_process {
+                let mut pid: u32 = 0;
+                unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+                if pid == 0 {
+                    continue;
+                }
+                let proc_name = get_process_name_by_id(pid);
+                if &proc_name != expected_proc {
+                    continue;
+                }
+            }
+            
+            // Convert HWND to UIA element
+            let elem = match unsafe { auto.ElementFromHandle(hwnd) } {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            
+            // Verify Name condition
+            if let Some(ref expected) = expected_name {
+                let actual_name = get_bstr(unsafe { elem.CurrentName() });
+                if &actual_name != expected {
+                    continue;
+                }
+            }
+            
+            // Verify ClassName condition
+            if let Some(ref expected) = expected_class {
+                let actual_class = get_bstr(unsafe { elem.CurrentClassName() });
+                if &actual_class != expected {
+                    continue;
+                }
+            }
+            
+            results.push(elem);
+        }
+        
+        results
+    }
+
+    /// Enumerate all top-level windows using Win32 EnumWindows API.
+    /// Returns a list of HWND handles for visible windows.
+    fn enumerate_top_level_windows() -> Vec<HWND> {
+        let hwnds: std::cell::RefCell<Vec<HWND>> = std::cell::RefCell::new(Vec::new());
+        
+        // EnumWindows callback: collect HWNDs of visible windows
+        unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+            let hwnds = &*(lparam.0 as *const std::cell::RefCell<Vec<HWND>>);
+            // Only collect visible windows
+            if IsWindowVisible(hwnd).as_bool() {
+                hwnds.borrow_mut().push(hwnd);
+            }
+            windows::core::BOOL(1) // Continue enumeration
+        }
+        
+        let hwnds_ptr = &hwnds as *const _ as isize;
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_callback),
+                LPARAM(hwnds_ptr),
+            );
+        }
+        
+        hwnds.into_inner()
+    }
+
+    /// Fallback: use UIA condition-based search for windows.
+    /// Used when EnumWindows fast path finds no matches (rare edge case).
+    fn find_window_by_uia_condition(
+        auto: &IUIAutomation,
+        expected_name: &Option<String>,
+        expected_class: &Option<String>,
+        expected_process: &Option<String>,
+    ) -> Vec<IUIAutomationElement> {
+        use windows::Win32::UI::Accessibility::*;
         
         let desktop = match unsafe { auto.GetRootElement() } {
             Ok(d) => d,
             Err(_) => return vec![],
         };
-        let condition = match unsafe { auto.CreateTrueCondition() } {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
+        
+        // Build UIA condition for engine-level filtering
+        let condition = build_window_find_condition(auto, expected_name, expected_class);
+        
         let windows = match unsafe { desktop.FindAll(TreeScope_Children, &condition) } {
             Ok(w) => w,
             Err(_) => return vec![],
@@ -983,9 +1113,6 @@ pub mod windows_impl {
             Err(_) => return vec![],
         };
         
-        // 支持多种窗口类型：Window, Pane, Document 等
-        let valid_window_types = ["Window", "Pane", "Document", "Application"];
-        
         let mut matched_windows = Vec::new();
         
         for i in 0..count {
@@ -993,31 +1120,96 @@ pub mod windows_impl {
                 Ok(w) => w,
                 Err(_) => continue,
             };
-            let ct = unsafe {
-                win.CurrentControlType()
-                    .map(control_type_name)
-                    .unwrap_or_default()
-            };
             
-            // 支持多种窗口类型
-            if valid_window_types.contains(&ct.as_str()) {
-                let title = get_bstr(unsafe { win.CurrentName() });
-                let class = get_bstr(unsafe { win.CurrentClassName() });
-                let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
+            let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
+            
+            if let Some(ref expected_proc) = expected_process {
                 let process_name = get_process_name_by_id(pid);
-                
-                // Match by parsed conditions
-                let name_match = expected_name.as_ref().map_or(true, |n| &title == n);
-                let class_match = expected_class.as_ref().map_or(true, |c| &class == c);
-                let process_match = expected_process.as_ref().map_or(true, |p| &process_name == p);
-                
-                if name_match && class_match && process_match {
-                    matched_windows.push(win);
+                if &process_name != expected_proc {
+                    continue;
                 }
             }
+            
+            matched_windows.push(win);
         }
         
         matched_windows
+    }
+
+    /// Build a UIA condition for window search, combining Name/ClassName property conditions.
+    /// Returns CreateTrueCondition() as fallback if property condition creation fails.
+    fn build_window_find_condition(
+        auto: &IUIAutomation,
+        expected_name: &Option<String>,
+        expected_class: &Option<String>,
+    ) -> windows::Win32::UI::Accessibility::IUIAutomationCondition {
+        use windows::Win32::UI::Accessibility::*;
+        use windows::Win32::System::Variant::*;
+        use windows::core::BSTR;
+        
+        // Helper: create a property condition for a BSTR value
+        let try_bstr_condition = |prop_id: UIA_PROPERTY_ID, value: &str| -> Option<IUIAutomationCondition> {
+            let mut variant = VARIANT::default();
+            unsafe {
+                // Use raw pointer writes to avoid ManuallyDrop DerefMut issues
+                let var_ptr = &mut variant as *mut VARIANT;
+                // VARIANT layout: vt (u16) at offset 0, then padding, then union at offset 8
+                // Write VT_BSTR to the vt field
+                let vt_ptr = var_ptr as *mut VARENUM;
+                std::ptr::write(vt_ptr, VT_BSTR);
+                // Write BSTR to the bstrVal field in the union
+                // The union starts at offset 8 (after vt + 3 reserved u16s)
+                let bstr_ptr = (var_ptr as *mut u8).add(8) as *mut core::mem::ManuallyDrop<BSTR>;
+                std::ptr::write(bstr_ptr, core::mem::ManuallyDrop::new(BSTR::from(value)));
+                auto.CreatePropertyCondition(prop_id, &variant).ok()
+            }
+        };
+        
+        let mut conditions: Vec<IUIAutomationCondition> = Vec::new();
+        
+        // Add Name condition if specified
+        if let Some(ref name) = expected_name {
+            if let Some(cond) = try_bstr_condition(UIA_NamePropertyId, name) {
+                conditions.push(cond);
+                log::debug!("[Window Search] Added Name condition: '{}'", name);
+            }
+        }
+        
+        // Add ClassName condition if specified
+        if let Some(ref class) = expected_class {
+            if let Some(cond) = try_bstr_condition(UIA_ClassNamePropertyId, class) {
+                conditions.push(cond);
+                log::debug!("[Window Search] Added ClassName condition: '{}'", class);
+            }
+        }
+        
+        // Combine conditions
+        match conditions.len() {
+            0 => {
+                // No specific conditions, use TrueCondition
+                unsafe { auto.CreateTrueCondition() }.unwrap_or_else(|_| {
+                    panic!("CreateTrueCondition failed");
+                })
+            }
+            1 => conditions.remove(0),
+            2 => {
+                // Combine two conditions with AND
+                let cond2 = conditions.remove(1);
+                let cond1 = conditions.remove(0);
+                unsafe {
+                    auto.CreateAndCondition(&cond1, &cond2)
+                        .unwrap_or(cond1)
+                }
+            }
+            _ => {
+                // Combine multiple conditions with AND using CreateAndConditionFromNativeArray
+                let opts: Vec<Option<IUIAutomationCondition>> = conditions.into_iter().map(Some).collect();
+                unsafe {
+                    auto.CreateAndConditionFromNativeArray(&opts)
+                        .unwrap_or_else(|_| opts.into_iter().next().unwrap().unwrap())
+                }
+            }
+        }
     }
 
     /// Parse window selector to extract Name, ClassName, and ProcessName conditions.
@@ -1171,69 +1363,108 @@ pub mod windows_impl {
 
     /// Find elements by XPath with automatic fallback for intermediate layers.
     /// 
-    /// Strategy (ordered by speed, fast → slow):
-    /// 1. Try /XPath from window root (direct child — fastest)
-    /// 2. Try /XPath from content root (WebView container — fast)
-    /// 3. Try //XPath from content root (descendant in WebView — medium)
-    /// 4. Try //XPath from window root (descendant in full window — slowest)
+    /// Strategy depends on XPath type:
+    /// 
+    /// For //XPath (descendant search — most common):
+    /// 1. Try from content root first (fast — skips Win32 chrome/intermediate layers)
+    /// 2. Fallback to window root if content root not found or yields no results
+    /// 
+    /// For /XPath (absolute path):
+    /// 1. Try from window root first (most likely to match exact path)
+    /// 2. Try from content root (direct path)
+    /// 3. Try //XPath from content root (descendant within content)
+    /// 4. Try //XPath from window root (last resort)
     fn find_by_xpath_with_fallback(
         auto: &IUIAutomation,
         window: &IUIAutomationElement,
         xpath: &str,
     ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-        // Step 1: Try from window root
-        let (results, segments) = find_by_xpath_detailed(auto, window, xpath)?;
-        if !results.is_empty() {
-            return Ok((results, segments));
-        }
+        use std::time::Instant;
+        let fallback_start = Instant::now();
         
-        log::info!("[XPath Fallback] Window root search returned 0, trying fallbacks...");
+        let is_descendant = xpath.starts_with("//");
         
-        // Compute descendant XPath once (used in steps 3 & 4)
-        let descendant_xpath = if xpath.starts_with('/') && !xpath.starts_with("//") {
-            Some(format!("/{}", xpath)) // /xpath → //xpath
-        } else {
-            None
-        };
-        
-        // Step 2: Find content root and try /XPath (direct child from content root)
-        if let Some(content_root) = find_content_root(auto, window) {
-            // Step 2a: Try direct child search from content root
-            log::info!("[XPath Fallback] Step 2a: Trying /XPath from content root");
-            if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath) {
-                if !r2.is_empty() {
-                    log::info!("[XPath Fallback] ✓ Step 2a: Found {} results from content root (direct)", r2.len());
-                    return Ok((r2, s2));
+        if is_descendant {
+            // ── Descendant XPath (//...): prioritize content root ──
+            // Content root has far fewer nodes than window root,
+            // so descendant search is much faster from content root.
+            
+            // Step 1: Try content root first (fast path)
+            if let Some(content_root) = find_content_root(auto, window) {
+                log::info!("[XPath Fallback] //XPath — Step 1: content root (fast)");
+                if let Ok((r, s)) = find_by_xpath_detailed(auto, &content_root, xpath) {
+                    if !r.is_empty() {
+                        log::info!("[XPath Fallback] ✓ Step 1: Found {} results from content root ({}ms)", 
+                            r.len(), fallback_start.elapsed().as_millis());
+                        return Ok((r, s));
+                    }
                 }
             }
             
-            // Step 2b: Try descendant search from content root
-            // This handles extra intermediate layers between content root and target
-            // (e.g., WRY_WEBVIEW → Chrome_WidgetWin_1 → BrowserRootView)
-            if let Some(ref desc_xpath) = descendant_xpath {
-                log::info!("[XPath Fallback] Step 2b: Trying //XPath from content root");
-                if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, desc_xpath) {
+            // Step 2: Fallback to window root
+            log::info!("[XPath Fallback] //XPath — Step 2: window root (fallback)");
+            let (results, segments) = find_by_xpath_detailed(auto, window, xpath)?;
+            if !results.is_empty() {
+                log::info!("[XPath Fallback] ✓ Step 2: Found {} results from window root ({}ms)", 
+                    results.len(), fallback_start.elapsed().as_millis());
+                return Ok((results, segments));
+            }
+            
+            log::info!("[XPath Fallback] All //XPath fallbacks exhausted ({}ms)", 
+                fallback_start.elapsed().as_millis());
+            Ok((results, segments))
+        } else {
+            // ── Absolute XPath (/...): try window root first ──
+            
+            // Step 1: Try from window root (exact path)
+            let (results, segments) = find_by_xpath_detailed(auto, window, xpath)?;
+            if !results.is_empty() {
+                log::info!("[XPath Fallback] /XPath — Step 1: Found {} results from window root ({}ms)", 
+                    results.len(), fallback_start.elapsed().as_millis());
+                return Ok((results, segments));
+            }
+            
+            log::info!("[XPath Fallback] /XPath — window root returned 0, trying content root...");
+            
+            // Step 2: Try content root
+            if let Some(content_root) = find_content_root(auto, window) {
+                // Step 2a: Try /XPath from content root (direct)
+                log::info!("[XPath Fallback] /XPath — Step 2a: content root (direct)");
+                if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath) {
+                    if !r2.is_empty() {
+                        log::info!("[XPath Fallback] ✓ Step 2a: Found {} from content root ({}ms)", 
+                            r2.len(), fallback_start.elapsed().as_millis());
+                        return Ok((r2, s2));
+                    }
+                }
+                
+                // Step 2b: Try //XPath from content root (descendant within content)
+                let desc_xpath = format!("/{}", xpath);
+                log::info!("[XPath Fallback] /XPath — Step 2b: content root (descendant)");
+                if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, &desc_xpath) {
                     if !r3.is_empty() {
-                        log::info!("[XPath Fallback] ✓ Step 2b: Found {} results from content root (descendant)", r3.len());
+                        log::info!("[XPath Fallback] ✓ Step 2b: Found {} from content root desc ({}ms)", 
+                            r3.len(), fallback_start.elapsed().as_millis());
                         return Ok((r3, s3));
                     }
                 }
             }
-        }
-        
-        // Step 3: Try descendant search from window root (slowest, last resort)
-        if let Some(ref desc_xpath) = descendant_xpath {
-            log::info!("[XPath Fallback] Step 3: Trying //XPath from window root");
-            if let Ok((r4, s4)) = find_by_xpath_detailed(auto, window, desc_xpath) {
+            
+            // Step 3: Last resort — //XPath from window root
+            let desc_xpath = format!("/{}", xpath);
+            log::info!("[XPath Fallback] /XPath — Step 3: window root descendant (last resort)");
+            if let Ok((r4, s4)) = find_by_xpath_detailed(auto, window, &desc_xpath) {
                 if !r4.is_empty() {
-                    log::info!("[XPath Fallback] ✓ Step 3: Found {} results from window root (descendant)", r4.len());
+                    log::info!("[XPath Fallback] ✓ Step 3: Found {} from window root desc ({}ms)", 
+                        r4.len(), fallback_start.elapsed().as_millis());
                     return Ok((r4, s4));
                 }
             }
+            
+            log::info!("[XPath Fallback] All /XPath fallbacks exhausted ({}ms)", 
+                fallback_start.elapsed().as_millis());
+            Ok((results, segments))
         }
-        
-        log::info!("[XPath Fallback] All fallbacks exhausted, returning empty results");
-        Ok((results, segments))
     }
 
     /// Find elements by XPath with detailed per-segment validation results.
