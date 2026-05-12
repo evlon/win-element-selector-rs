@@ -53,6 +53,9 @@ strip       = true
 [profile.dev]
 opt-level = 1
 
+[build-dependencies]
+embed-resource = "3"
+
 [[bin]]
 name = "element-selector"
 path = "src/main.rs"

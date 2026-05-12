@@ -74,14 +74,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn load_icon() -> egui::IconData {
-    // 16x16 RGBA placeholder icon (blue square)
-    let size = 16usize;
-    let mut pixels = vec![0u8; size * size * 4];
-    for chunk in pixels.chunks_mut(4) {
-        chunk[0] = 44;   // R
-        chunk[1] = 82;   // G
-        chunk[2] = 130;  // B
-        chunk[3] = 255;  // A
+    let icon_rgba = include_bytes!("../assets/icon_32.rgba");
+    let size = 32u32;
+    egui::IconData {
+        rgba: icon_rgba.to_vec(),
+        width: size,
+        height: size,
     }
-    egui::IconData { rgba: pixels, width: size as u32, height: size as u32 }
 }
