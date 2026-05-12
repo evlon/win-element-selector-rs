@@ -1909,6 +1909,7 @@ fn prop_row(ui: &mut Ui, key: &str, val: &str, t: Theme) {
 fn node_tooltip(ui: &mut Ui, node: &HierarchyNode, t: Theme) {
     ui.label(RichText::new("元素详情").strong().size(11.0));
     ui.separator();
+    // 核心属性（始终显示）
     for (k, v) in [
         ("ControlType",  node.control_type.as_str()),
         ("AutomationId", node.automation_id.as_str()),
@@ -1919,6 +1920,46 @@ fn node_tooltip(ui: &mut Ui, node: &HierarchyNode, t: Theme) {
             ui.label(RichText::new(k).color(t.muted).size(10.0));
             ui.add_space(4.0);
             ui.label(RichText::new(v).monospace().size(10.0));
+        });
+    }
+    // 扩展属性（有值时显示）
+    for (k, v) in [
+        ("FrameworkId",          node.framework_id.as_str()),
+        ("HelpText",             node.help_text.as_str()),
+        ("LocalizedControlType", node.localized_control_type.as_str()),
+        ("AcceleratorKey",      node.accelerator_key.as_str()),
+        ("AccessKey",            node.access_key.as_str()),
+        ("ItemType",             node.item_type.as_str()),
+        ("ItemStatus",           node.item_status.as_str()),
+    ] {
+        if !v.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(k).color(t.muted).size(10.0));
+                ui.add_space(4.0);
+                ui.label(RichText::new(v).monospace().size(10.0));
+            });
+        }
+    }
+    // 布尔属性（特殊值时显示）
+    if node.is_password {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("IsPassword").color(t.muted).size(10.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("true").monospace().size(10.0));
+        });
+    }
+    if !node.is_enabled {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("IsEnabled").color(t.muted).size(10.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("false").monospace().size(10.0));
+        });
+    }
+    if node.is_offscreen {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("IsOffscreen").color(t.muted).size(10.0));
+            ui.add_space(4.0);
+            ui.label(RichText::new("true").monospace().size(10.0));
         });
     }
     if node.rect.width > 0 {

@@ -252,8 +252,18 @@ impl XPathOptimizer {
                     // Index 保留
                     optimized_filter.enabled = f.value.parse::<i32>().unwrap_or(0) > 0;
                 }
+                // 扩展属性：条件性添加的属性，保留（它们已有区分度）
+                "FrameworkId" | "HelpText" | "LocalizedControlType" | "AcceleratorKey"
+                | "AccessKey" | "ItemType" | "ItemStatus" => {
+                    // 字符串属性：非空时保留
+                    optimized_filter.enabled = !f.value.is_empty();
+                }
+                "IsPassword" | "IsEnabled" | "IsOffscreen" => {
+                    // 布尔属性：这些只在有区分度时才添加，保留
+                    optimized_filter.enabled = f.enabled;
+                }
                 _ => {
-                    // 其他属性默认禁用（FrameworkId 等）
+                    // 其他未知属性默认禁用
                     optimized_filter.enabled = false;
                 }
             }

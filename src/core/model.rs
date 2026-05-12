@@ -149,6 +149,15 @@ pub struct HierarchyNode {
     pub localized_control_type: String,     // LocalizedControlType
     pub is_enabled:            bool,        // IsEnabled property
     pub is_offscreen:          bool,        // IsOffscreen property
+    pub is_password:           bool,        // IsPassword property
+    #[serde(default)]
+    pub accelerator_key:       String,      // AcceleratorKey property
+    #[serde(default)]
+    pub access_key:            String,      // AccessKey property
+    #[serde(default)]
+    pub item_type:             String,      // ItemType property
+    #[serde(default)]
+    pub item_status:           String,      // ItemStatus property
     pub rect:                  ElementRect,
     pub process_id:            u32,
     pub filters:               Vec<PropertyFilter>,
@@ -227,6 +236,11 @@ impl HierarchyNode {
             localized_control_type: String::new(),
             is_enabled: true,
             is_offscreen: false,
+            is_password: false,
+            accelerator_key: String::new(),
+            access_key: String::new(),
+            item_type: String::new(),
+            item_status: String::new(),
             rect,
             process_id,
             filters,
@@ -235,6 +249,46 @@ impl HierarchyNode {
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture
             depth_from_window: 0,  // 默认值，捕获时会计算真实深度
+        }
+    }
+
+    /// 构建扩展属性过滤器
+    /// 在 UIA 捕获阶段填充完扩展字段后调用，将所有有区分度的属性加入 filters
+    /// 策略：
+    /// - 字符串属性：非空时添加（如 HelpText, AcceleratorKey 等）
+    /// - 布尔属性：特殊值时添加（如 IsPassword=true, IsEnabled=false, IsOffscreen=true）
+    pub fn build_extended_filters(&mut self) {
+        // 字符串属性：非空时添加
+        if !self.framework_id.is_empty() {
+            self.filters.push(PropertyFilter::new("FrameworkId", &self.framework_id));
+        }
+        if !self.help_text.is_empty() {
+            self.filters.push(PropertyFilter::new("HelpText", &self.help_text));
+        }
+        if !self.localized_control_type.is_empty() {
+            self.filters.push(PropertyFilter::new("LocalizedControlType", &self.localized_control_type));
+        }
+        if !self.accelerator_key.is_empty() {
+            self.filters.push(PropertyFilter::new("AcceleratorKey", &self.accelerator_key));
+        }
+        if !self.access_key.is_empty() {
+            self.filters.push(PropertyFilter::new("AccessKey", &self.access_key));
+        }
+        if !self.item_type.is_empty() {
+            self.filters.push(PropertyFilter::new("ItemType", &self.item_type));
+        }
+        if !self.item_status.is_empty() {
+            self.filters.push(PropertyFilter::new("ItemStatus", &self.item_status));
+        }
+        // 布尔属性：特殊值时添加（有区分度）
+        if self.is_password {
+            self.filters.push(PropertyFilter::new("IsPassword", "true"));
+        }
+        if !self.is_enabled {
+            self.filters.push(PropertyFilter::new("IsEnabled", "false"));
+        }
+        if self.is_offscreen {
+            self.filters.push(PropertyFilter::new("IsOffscreen", "true"));
         }
     }
 

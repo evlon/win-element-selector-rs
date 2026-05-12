@@ -8,7 +8,7 @@
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
-use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyFilter, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
+use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
 
@@ -352,6 +352,10 @@ pub mod windows_impl {
             Ok(val) => val.as_bool(),
             Err(_) => false,
         };
+        let is_password = match unsafe { elem.CurrentIsPassword() } {
+            Ok(val) => val.as_bool(),
+            Err(_) => false,
+        };
         
         // AccRole is deprecated in UIA, use ControlType instead
         // But we can still extract it if needed from LegacyIAccessible pattern
@@ -386,14 +390,14 @@ pub mod windows_impl {
         node.localized_control_type = localized_control_type;
         node.is_enabled = is_enabled;
         node.is_offscreen = is_offscreen;
+        node.is_password = is_password;
+        node.accelerator_key = get_bstr(unsafe { elem.CurrentAcceleratorKey() });
+        node.access_key = get_bstr(unsafe { elem.CurrentAccessKey() });
+        node.item_type = get_bstr(unsafe { elem.CurrentItemType() });
+        node.item_status = get_bstr(unsafe { elem.CurrentItemStatus() });
         
-        // Add extended property filters (only UIA standard properties, not human-readable ones)
-        if !node.framework_id.is_empty() {
-            node.filters.push(PropertyFilter::new("FrameworkId", &node.framework_id));
-        }
-        if !node.help_text.is_empty() {
-            node.filters.push(PropertyFilter::new("HelpText", &node.help_text));
-        }
+        // Build extended property filters from all populated fields
+        node.build_extended_filters();
         
         Some(node)
     }
