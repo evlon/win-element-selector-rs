@@ -1,19 +1,16 @@
 //! EnumWindows API implementation for fast window enumeration
 //! Results match Alt+Tab window list
 
-#[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::{HWND, LPARAM, CloseHandle, HANDLE},
     System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
     UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible},
 };
-#[cfg(target_os = "windows")]
 use windows::core::BOOL;
 
 use super::model::WindowInfo;
 
 // Thread-local storage for EnumWindows callback results
-#[cfg(target_os = "windows")]
 thread_local! {
     pub static WINDOW_LIST: std::cell::RefCell<Vec<WindowInfo>> = std::cell::RefCell::new(Vec::new());
 }
@@ -21,7 +18,6 @@ thread_local! {
 /// Enumerate all top-level visible windows on desktop.
 /// Uses Win32 EnumWindows API - results match Alt+Tab window list.
 /// Performance: ~50-100 windows typically (fast, < 50ms)
-#[cfg(target_os = "windows")]
 pub fn enumerate_windows_fast() -> Vec<WindowInfo> {
     // Clear thread-local storage before enumeration
     WINDOW_LIST.with(|list| {
@@ -40,7 +36,6 @@ pub fn enumerate_windows_fast() -> Vec<WindowInfo> {
 }
 
 /// EnumWindows callback - filters visible windows with titles (matches Alt+Tab)
-#[cfg(target_os = "windows")]
 extern "system" fn enum_windows_callback(hwnd: HWND, _lparam: LPARAM) -> BOOL {
     unsafe {
         // Must be visible (matches Alt+Tab behavior)
@@ -93,7 +88,6 @@ extern "system" fn enum_windows_callback(hwnd: HWND, _lparam: LPARAM) -> BOOL {
 }
 
 /// Get process name by ID using Win32 API
-#[cfg(target_os = "windows")]
 fn get_process_name_win32(process_id: u32) -> String {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;

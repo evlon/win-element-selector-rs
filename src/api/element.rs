@@ -39,11 +39,8 @@ pub async fn get_element(query: web::Query<ElementQuery>) -> impl Responder {
     
     // UI Automation 操作需要在 STA 线程中执行
     let result = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         super::super::capture::validate_selector_and_xpath_detailed(
@@ -156,11 +153,8 @@ pub async fn get_all_elements(query: web::Query<ElementQuery>) -> impl Responder
     let random_range = query.random_range;
     
     let result = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         super::super::capture::find_all_elements_detailed(

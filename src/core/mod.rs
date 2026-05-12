@@ -17,5 +17,4 @@ pub use xpath_optimizer::{XPathOptimizer, OptimizationResult, OptimizationSummar
 pub use error::{SelectorError, Result};
 
 // Re-export fast window enumeration
-#[cfg(target_os = "windows")]
 pub use enum_windows::enumerate_windows_fast;

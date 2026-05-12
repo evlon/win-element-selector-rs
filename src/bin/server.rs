@@ -63,8 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = format!("{}:{}", args.bind, args.port);
     info!("element-selector-server starting on {}", bind_addr);
     
-    // Windows: COM 必须在主线程初始化 (STA)
-    #[cfg(target_os = "windows")]
+    // COM 必须在主线程初始化 (STA)
     {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
         unsafe {

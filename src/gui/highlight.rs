@@ -17,51 +17,25 @@ pub fn flash(rect: &ElementRect, duration_ms: u64) {
 }
 
 pub fn flash_with_info(info: &HighlightInfo, duration_ms: u64) {
-    #[cfg(target_os = "windows")]
     windows_impl::flash_with_info(info, duration_ms);
-
-    #[cfg(not(target_os = "windows"))]
-    log::debug!("highlight::flash_with_info (stub)");
 }
 
 pub fn hide() {
-    #[cfg(target_os = "windows")]
     windows_impl::hide();
-
-    #[cfg(not(target_os = "windows"))]
-    log::debug!("highlight::hide (stub)");
 }
 
 pub fn update_highlight(info: &HighlightInfo) {
-    #[cfg(target_os = "windows")]
     windows_impl::update_highlight(info);
-
-    #[cfg(not(target_os = "windows"))]
-    log::debug!("highlight::update_highlight (stub)");
 }
 
 #[allow(dead_code)]
 pub fn show(rect: &ElementRect) -> HighlightHandle {
-    #[cfg(target_os = "windows")]
-    {
-        windows_impl::show(rect, "")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        HighlightHandle { active: Arc::new(AtomicBool::new(true)) }
-    }
+    windows_impl::show(rect, "")
 }
 
 #[allow(dead_code)]
 pub fn show_with_info(info: &HighlightInfo) -> HighlightHandle {
-    #[cfg(target_os = "windows")]
-    {
-        windows_impl::show(&info.rect, &info.control_type_cn)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        HighlightHandle { active: Arc::new(AtomicBool::new(true)) }
-    }
+    windows_impl::show(&info.rect, &info.control_type_cn)
 }
 
 pub struct HighlightHandle {
@@ -75,7 +49,6 @@ impl Drop for HighlightHandle {
 }
 
 // ─── Windows implementation ──────────────────────────────────────────────────
-#[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
     use std::thread;

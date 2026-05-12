@@ -8,7 +8,6 @@ use log::{debug, error, info};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-#[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM, LRESULT},
     UI::WindowsAndMessaging::{
@@ -153,7 +152,6 @@ static MOVED_CHANNEL: once_cell::sync::Lazy<(Sender<MouseMovedEvent>, Mutex<Opti
     });
 
 // Global hook handle (only accessed from hook thread).
-#[cfg(target_os = "windows")]
 thread_local! {
     static HOOK_HANDLE: std::cell::RefCell<Option<HHOOK>> = std::cell::RefCell::new(None);
 }
@@ -162,7 +160,6 @@ thread_local! {
 // Windows implementation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[cfg(target_os = "windows")]
 pub mod win_hook {
     use super::*;
     use std::thread::{self, JoinHandle};
@@ -348,20 +345,6 @@ pub mod win_hook {
             }
         });
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Non-Windows stub
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[cfg(not(target_os = "windows"))]
-pub mod win_hook {
-    use super::*;
-    pub fn start_hook_thread() -> anyhow::Result<()> {
-        info!("Mouse hook not available on non-Windows platforms");
-        Ok(())
-    }
-    pub fn stop_hook_thread() {}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

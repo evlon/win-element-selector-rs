@@ -14,11 +14,8 @@ pub async fn list_windows() -> impl Responder {
     info!("API: /api/window/list");
     
     let windows = tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         let result = super::super::capture::list_windows();
@@ -63,11 +60,8 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     let window_selector = req.window_selector.clone();
     
     let success = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         super::super::core::uia::windows_impl::activate_window_by_selector(&window_selector)
@@ -107,11 +101,8 @@ pub async fn focus_element(req: web::Json<FocusElementRequest>) -> impl Responde
     let xpath = req.xpath.clone();
     
     let success = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         super::super::core::uia::windows_impl::activate_and_focus_element(&window_selector, &xpath)

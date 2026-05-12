@@ -87,11 +87,8 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     // Step 2: 获取元素坐标
     let xpath = request.xpath.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "windows")]
-        {
-            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                log::error!("COM STA init failed: {}", e);
-            }
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
         }
         
         super::super::capture::validate_selector_and_xpath_detailed(

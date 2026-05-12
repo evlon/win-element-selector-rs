@@ -18,7 +18,6 @@ fn main() -> anyhow::Result<()> {
     info!("element-selector starting");
 
     // COM must be initialized on the main thread (STA) for UI Automation.
-    #[cfg(target_os = "windows")]
     {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
         unsafe {
@@ -49,8 +48,7 @@ fn main() -> anyhow::Result<()> {
             // Configure fonts for Chinese character support
             let mut fonts = egui::FontDefinitions::default();
             
-            // Try to load system Chinese font
-            #[cfg(target_os = "windows")]
+            // Load system Chinese font
             {
                 // Use Microsoft YaHei (微软雅黑) which is built-in on Windows
                 let font_data = egui::FontData::from_static(include_bytes!(

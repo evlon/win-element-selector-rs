@@ -15,7 +15,6 @@ use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
 // ═══════════════════════════════════════════════════════════════════════════════
 // Windows implementation
 // ═══════════════════════════════════════════════════════════════════════════════
-#[cfg(target_os = "windows")]
 pub mod windows_impl {
     use super::*;
     use windows::{
@@ -115,48 +114,45 @@ pub mod windows_impl {
 
     /// Get process name by process ID using Windows API.
     fn get_process_name_by_id(process_id: u32) -> String {
-        #[cfg(target_os = "windows")]
-        {
-            use windows::Win32::{
-                Foundation::{CloseHandle, HANDLE},
-                System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
+        use windows::Win32::{
+            Foundation::{CloseHandle, HANDLE},
+            System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION},
+        };
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        unsafe {
+            let handle_result = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id);
+            let handle = match handle_result {
+                Ok(h) => h,
+                Err(_) => return String::new(),
             };
-            use std::ffi::OsString;
-            use std::os::windows::ffi::OsStringExt;
+            
+            if handle == HANDLE::default() {
+                return String::new();
+            }
 
-            unsafe {
-                let handle_result = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id);
-                let handle = match handle_result {
-                    Ok(h) => h,
-                    Err(_) => return String::new(),
-                };
-                
-                if handle == HANDLE::default() {
-                    return String::new();
-                }
-
-                let mut buffer = [0u16; 260]; // MAX_PATH
-                let mut length = buffer.len() as u32;
-                
-                let result = QueryFullProcessImageNameW(
-                    handle,
-                    PROCESS_NAME_WIN32,
-                    windows::core::PWSTR(buffer.as_mut_ptr()),
-                    &mut length,
-                );
-                
-                let _ = CloseHandle(handle);
-                
-                if result.is_ok() && length > 0 {
-                    // Get just the filename without path
-                    let full_path = OsString::from_wide(&buffer[..length as usize]);
-                    if let Some(path) = full_path.to_str() {
-                        if let Some(filename) = path.rsplit('\\').next() {
-                            // Remove .exe extension
-                            return filename.strip_suffix(".exe")
-                                .unwrap_or(filename)
-                                .to_string();
-                        }
+            let mut buffer = [0u16; 260]; // MAX_PATH
+            let mut length = buffer.len() as u32;
+            
+            let result = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            );
+            
+            let _ = CloseHandle(handle);
+            
+            if result.is_ok() && length > 0 {
+                // Get just the filename without path
+                let full_path = OsString::from_wide(&buffer[..length as usize]);
+                if let Some(path) = full_path.to_str() {
+                    if let Some(filename) = path.rsplit('\\').next() {
+                        // Remove .exe extension
+                        return filename.strip_suffix(".exe")
+                            .unwrap_or(filename)
+                            .to_string();
                     }
                 }
             }
@@ -1602,85 +1598,9 @@ pub mod windows_impl {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Non-Windows mock (rich demo data)
-// ═══════════════════════════════════════════════════════════════════════════════
-#[cfg(not(target_os = "windows"))]
-pub mod mock_impl {
-    use super::*;
+// ─── Public API ──────────────────────────────────────────────────────────────
 
-    pub fn capture_at_cursor() -> CaptureResult { mock() }
-    pub fn capture_at_point(_x: i32, _y: i32) -> CaptureResult { mock() }
-
-    pub fn enumerate_windows() -> Vec<WindowInfo> {
-        // Mock: return sample windows
-        vec![
-            WindowInfo {
-                title: "示例窗口 1".to_string(),
-                class_name: "MockWindow".to_string(),
-                process_id: 1001,
-                process_name: "mock_app1".to_string(),
-            },
-            WindowInfo {
-                title: "示例窗口 2".to_string(),
-                class_name: "MockWindow".to_string(),
-                process_id: 1002,
-                process_name: "mock_app2".to_string(),
-            },
-        ]
-    }
-
-    pub fn validate_selector_and_xpath_detailed(
-        _window_selector: &str,
-        _element_xpath: &str,
-        _hierarchy: &[HierarchyNode],
-    ) -> DetailedValidationResult {
-        DetailedValidationResult {
-            overall: ValidationResult::Found {
-                count: 1,
-                first_rect: Some(ElementRect { x: 200, y: 300, width: 120, height: 30 }),
-            },
-            segments: vec![
-                SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: "//Button".to_string(),
-                    matched: true,
-                    match_count: 1,
-                    duration_ms: 10,
-                    predicate_failures: Vec::new(),
-                }
-            ],
-            layers: vec![],
-            total_duration_ms: 50,
-        }
-    }
-
-    pub fn find_all_elements_detailed(
-        _window_selector: &str,
-        _element_xpath: &str,
-        _random_range: f32,
-    ) -> Vec<crate::api::types::ElementInfo> {
-        use crate::api::types::{ElementInfo, Rect, Point};
-        vec![
-            ElementInfo {
-                rect: Rect { x: 200, y: 300, width: 120, height: 30 },
-                center: Point { x: 260, y: 315 },
-                center_random: Point { x: 262, y: 317 },
-                control_type: "Button".to_string(),
-                name: "Mock Button".to_string(),
-                is_enabled: true,
-            }
-        ]
-    }
-}
-
-// ─── Public API (platform-agnostic) ──────────────────────────────────────────────
-
-#[cfg(target_os = "windows")]
 pub use windows_impl::*;
-
-#[cfg(not(target_os = "windows"))]
-pub use mock_impl::*;
 
 // ─── Rich mock data ──────────────────────────────────────────────────────────
 

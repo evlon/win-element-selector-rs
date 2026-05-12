@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use rand::Rng;
 
-#[cfg(target_os = "windows")]
 use windows::Win32::{
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
@@ -40,56 +39,50 @@ pub struct KeyResponse {
 
 /// 解析按键名称到虚拟键码
 fn parse_key_name(key_name: &str) -> u16 {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::Input::KeyboardAndMouse::*;
-        match key_name.to_lowercase().as_str() {
-            "enter" | "return" => VK_RETURN.0,
-            "tab" => VK_TAB.0,
-            "escape" | "esc" => VK_ESCAPE.0,
-            "home" => VK_HOME.0,
-            "end" => VK_END.0,
-            "delete" | "del" => VK_DELETE.0,
-            "backspace" | "back" => VK_BACK.0,
-            "insert" | "ins" => VK_INSERT.0,
-            "pageup" | "pgup" => VK_PRIOR.0,
-            "pagedown" | "pgdn" => VK_NEXT.0,
-            "left" => VK_LEFT.0,
-            "right" => VK_RIGHT.0,
-            "up" => VK_UP.0,
-            "down" => VK_DOWN.0,
-            "f1" => VK_F1.0,
-            "f2" => VK_F2.0,
-            "f3" => VK_F3.0,
-            "f4" => VK_F4.0,
-            "f5" => VK_F5.0,
-            "f6" => VK_F6.0,
-            "f7" => VK_F7.0,
-            "f8" => VK_F8.0,
-            "f9" => VK_F9.0,
-            "f10" => VK_F10.0,
-            "f11" => VK_F11.0,
-            "f12" => VK_F12.0,
-            // 单字符按键
-            c if c.len() == 1 => {
-                let ch = c.chars().next().unwrap();
-                if ch.is_ascii_alphabetic() {
-                    (ch.to_ascii_uppercase() as u16) - ('A' as u16) + 0x41
-                } else if ch.is_ascii_digit() {
-                    ch as u16
-                } else {
-                    0
-                }
-            },
-            _ => 0,
-        }
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    match key_name.to_lowercase().as_str() {
+        "enter" | "return" => VK_RETURN.0,
+        "tab" => VK_TAB.0,
+        "escape" | "esc" => VK_ESCAPE.0,
+        "home" => VK_HOME.0,
+        "end" => VK_END.0,
+        "delete" | "del" => VK_DELETE.0,
+        "backspace" | "back" => VK_BACK.0,
+        "insert" | "ins" => VK_INSERT.0,
+        "pageup" | "pgup" => VK_PRIOR.0,
+        "pagedown" | "pgdn" => VK_NEXT.0,
+        "left" => VK_LEFT.0,
+        "right" => VK_RIGHT.0,
+        "up" => VK_UP.0,
+        "down" => VK_DOWN.0,
+        "f1" => VK_F1.0,
+        "f2" => VK_F2.0,
+        "f3" => VK_F3.0,
+        "f4" => VK_F4.0,
+        "f5" => VK_F5.0,
+        "f6" => VK_F6.0,
+        "f7" => VK_F7.0,
+        "f8" => VK_F8.0,
+        "f9" => VK_F9.0,
+        "f10" => VK_F10.0,
+        "f11" => VK_F11.0,
+        "f12" => VK_F12.0,
+        // 单字符按键
+        c if c.len() == 1 => {
+            let ch = c.chars().next().unwrap();
+            if ch.is_ascii_alphabetic() {
+                (ch.to_ascii_uppercase() as u16) - ('A' as u16) + 0x41
+            } else if ch.is_ascii_digit() {
+                ch as u16
+            } else {
+                0
+            }
+        },
+        _ => 0,
     }
-    #[cfg(not(target_os = "windows"))]
-    { 0 }
 }
 
 /// 解析快捷键字符串并执行
-#[cfg(target_os = "windows")]
 fn execute_shortcut(keys_str: &str) -> anyhow::Result<()> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
@@ -226,7 +219,6 @@ pub struct TypeResponse {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// 发送单个字符的键盘输入
-#[cfg(target_os = "windows")]
 fn send_unicode_char(ch: char) {
     unsafe {
         // 按下
@@ -260,11 +252,6 @@ fn send_unicode_char(ch: char) {
         let inputs = [key_down, key_up];
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn send_unicode_char(_ch: char) {
-    // Non-Windows stub
 }
 
 /// 拟人化打字 - 每个字符随机延迟
@@ -434,7 +421,6 @@ pub async fn execute_key_api(body: web::Json<KeyRequest>) -> impl Responder {
 }
 
 /// 执行单个按键
-#[cfg(target_os = "windows")]
 fn execute_key(key_name: &str) -> anyhow::Result<()> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
@@ -482,11 +468,6 @@ fn execute_key(key_name: &str) -> anyhow::Result<()> {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
     
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn execute_key(_key_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 

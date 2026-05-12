@@ -7,7 +7,6 @@ use log::{debug, info};
 use std::time::{Duration, Instant};
 use rand::Rng;
 
-#[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::POINT,
     UI::Input::KeyboardAndMouse::{
@@ -41,38 +40,21 @@ impl Point {
 
 /// 获取当前鼠标位置
 pub fn get_cursor_position() -> super::api::types::Point {
-    #[cfg(target_os = "windows")]
-    {
-        unsafe {
-            let mut pt = POINT::default();
-            if GetCursorPos(&mut pt).is_ok() {
-                super::api::types::Point::new(pt.x, pt.y)
-            } else {
-                super::api::types::Point::new(0, 0)
-            }
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_ok() {
+            super::api::types::Point::new(pt.x, pt.y)
+        } else {
+            super::api::types::Point::new(0, 0)
         }
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    {
-        super::api::types::Point::new(0, 0)
     }
 }
 
 /// 直线移动鼠标（非拟人化）
 pub fn linear_move(start: super::api::types::Point, end: super::api::types::Point) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        set_cursor_position(end.x, end.y);
-        info!("Linear move: ({}, {}) -> ({}, {})", start.x, start.y, end.x, end.y);
-        Ok(())
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    {
-        info!("Linear move (stub): ({}, {}) -> ({}, {})", start.x, start.y, end.x, end.y);
-        Ok(())
-    }
+    set_cursor_position(end.x, end.y);
+    info!("Linear move: ({}, {}) -> ({}, {})", start.x, start.y, end.x, end.y);
+    Ok(())
 }
 
 /// 拟人化移动鼠标（贝塞尔曲线轨迹）
@@ -96,34 +78,25 @@ pub fn humanized_move(
 
 /// 在指定位置执行左键点击
 pub fn click_at(point: super::api::types::Point) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        // 先移动到目标位置
-        set_cursor_position(point.x, point.y);
-        
-        // 短暂停顿模拟真实点击
-        std::thread::sleep(Duration::from_millis(50));
-        
-        // 模拟按下
-        send_mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0);
-        
-        // 按下持续时间（50-100ms 随机）
-        let mut rng = rand::thread_rng();
-        let press_duration = rng.gen_range(50u64..100u64);
-        std::thread::sleep(Duration::from_millis(press_duration));
-        
-        // 模拟释放
-        send_mouse_event(MOUSEEVENTF_LEFTUP, 0, 0);
-        
-        info!("Click executed at ({}, {})", point.x, point.y);
-        Ok(())
-    }
+    // 先移动到目标位置
+    set_cursor_position(point.x, point.y);
     
-    #[cfg(not(target_os = "windows"))]
-    {
-        info!("Click (stub) at ({}, {})", point.x, point.y);
-        Ok(())
-    }
+    // 短暂停顿模拟真实点击
+    std::thread::sleep(Duration::from_millis(50));
+    
+    // 模拟按下
+    send_mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0);
+    
+    // 按下持续时间（50-100ms 随机）
+    let mut rng = rand::thread_rng();
+    let press_duration = rng.gen_range(50u64..100u64);
+    std::thread::sleep(Duration::from_millis(press_duration));
+    
+    // 模拟释放
+    send_mouse_event(MOUSEEVENTF_LEFTUP, 0, 0);
+    
+    info!("Click executed at ({}, {})", point.x, point.y);
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -257,7 +230,6 @@ fn linear_move_with_easing(start: super::api::types::Point, end: super::api::typ
 // Windows API 实现
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[cfg(target_os = "windows")]
 fn execute_trajectory(trajectory: &[(Point, Duration)]) {
     let start_time = Instant::now();
     
@@ -276,7 +248,6 @@ fn execute_trajectory(trajectory: &[(Point, Duration)]) {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn set_cursor_position(x: i32, y: i32) {
     unsafe {
         // 获取屏幕尺寸用于绝对坐标转换
@@ -291,7 +262,6 @@ fn set_cursor_position(x: i32, y: i32) {
     }
 }
 
-#[cfg(target_os = "windows")]
 fn send_mouse_event(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) {
     unsafe {
         let mouse_input = MOUSEINPUT {
@@ -310,17 +280,5 @@ fn send_mouse_event(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) {
         
         let inputs = [input];
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 非 Windows 平台 stub
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[cfg(not(target_os = "windows"))]
-fn execute_trajectory(trajectory: &[(Point, Duration)]) {
-    for (point, step_duration) in trajectory {
-        debug!("Move (stub) to ({}, {}) duration={}ms", point.x, point.y, step_duration.as_millis());
-        std::thread::sleep(*step_duration);
     }
 }
