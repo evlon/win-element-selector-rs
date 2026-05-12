@@ -1592,7 +1592,19 @@ pub mod windows_impl {
                         center_random,
                         control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
                         name: get_bstr(unsafe { elem.CurrentName() }),
+                        automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
+                        class_name: get_bstr(unsafe { elem.CurrentClassName() }),
+                        framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                        help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
+                        localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
                         is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+                        is_offscreen: unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) },
+                        is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
+                        accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
+                        access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
+                        item_type: get_bstr(unsafe { elem.CurrentItemType() }),
+                        item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
+                        process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
                     })
                 }).collect();
             }

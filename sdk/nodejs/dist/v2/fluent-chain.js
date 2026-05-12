@@ -340,9 +340,9 @@ class FluentChain {
         if (!result.found || !result.element) {
             await this.failWithScreenshot(`Assertion failed: element not found: ${xpath}`, 'assertVisible', { windowSelector: this.currentWindowSelector, xpath });
         }
-        // 检查可见性（通过 rect 是否有效判断）
+        // 检查可见性：isOffscreen 或 rect 无效
         const elem = result.element;
-        if (elem.rect.width <= 0 || elem.rect.height <= 0) {
+        if (elem.isOffscreen || elem.rect.width <= 0 || elem.rect.height <= 0) {
             await this.failWithScreenshot(`Assertion failed: element is not visible: ${xpath}`, 'assertVisible', { windowSelector: this.currentWindowSelector, xpath });
         }
         this.log(`  → assertion passed`);

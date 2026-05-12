@@ -34,7 +34,19 @@ export interface ElementInfo {
     centerRandom: Point;
     controlType: string;
     name: string;
+    automationId: string;
+    className: string;
+    frameworkId: string;
+    helpText: string;
+    localizedControlType: string;
     isEnabled: boolean;
+    isOffscreen: boolean;
+    isPassword: boolean;
+    acceleratorKey: string;
+    accessKey: string;
+    itemType: string;
+    itemStatus: string;
+    processId: number;
 }
 export interface ElementResponse {
     found: boolean;

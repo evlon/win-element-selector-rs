@@ -453,9 +453,9 @@ export class FluentChain {
             );
         }
         
-        // 检查可见性（通过 rect 是否有效判断）
+        // 检查可见性：isOffscreen 或 rect 无效
         const elem = result.element!;
-        if (elem.rect.width <= 0 || elem.rect.height <= 0) {
+        if (elem.isOffscreen || elem.rect.width <= 0 || elem.rect.height <= 0) {
             await this.failWithScreenshot(
                 `Assertion failed: element is not visible: ${xpath}`,
                 'assertVisible',

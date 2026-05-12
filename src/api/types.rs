@@ -103,8 +103,32 @@ pub struct ElementInfo {
     #[serde(rename = "controlType")]
     pub control_type: String,
     pub name: String,
+    #[serde(rename = "automationId")]
+    pub automation_id: String,
+    #[serde(rename = "className")]
+    pub class_name: String,
+    #[serde(rename = "frameworkId")]
+    pub framework_id: String,
+    #[serde(rename = "helpText")]
+    pub help_text: String,
+    #[serde(rename = "localizedControlType")]
+    pub localized_control_type: String,
     #[serde(rename = "isEnabled")]
     pub is_enabled: bool,
+    #[serde(rename = "isOffscreen")]
+    pub is_offscreen: bool,
+    #[serde(rename = "isPassword")]
+    pub is_password: bool,
+    #[serde(rename = "acceleratorKey")]
+    pub accelerator_key: String,
+    #[serde(rename = "accessKey")]
+    pub access_key: String,
+    #[serde(rename = "itemType")]
+    pub item_type: String,
+    #[serde(rename = "itemStatus")]
+    pub item_status: String,
+    #[serde(rename = "processId")]
+    pub process_id: u32,
 }
 
 /// 元素查找响应

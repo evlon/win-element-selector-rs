@@ -64,7 +64,19 @@ describe('FluentChain', () => {
                 centerRandom: { x: 252, y: 228 },
                 controlType: 'Edit',
                 name: 'TestEdit',
+                automationId: '',
+                className: '',
+                frameworkId: '',
+                helpText: '',
+                localizedControlType: '',
                 isEnabled: true,
+                isOffscreen: false,
+                isPassword: false,
+                acceleratorKey: '',
+                accessKey: '',
+                itemType: '',
+                itemStatus: '',
+                processId: 0,
             };
             mockClient.activateWindow.mockResolvedValue({ success: true });
             mockClient.getElement.mockResolvedValue({
@@ -110,7 +122,19 @@ describe('FluentChain', () => {
                 centerRandom: { x: 252, y: 228 },
                 controlType: 'Edit',
                 name: 'TestEdit',
+                automationId: '',
+                className: '',
+                frameworkId: '',
+                helpText: '',
+                localizedControlType: '',
                 isEnabled: true,
+                isOffscreen: false,
+                isPassword: false,
+                acceleratorKey: '',
+                accessKey: '',
+                itemType: '',
+                itemStatus: '',
+                processId: 0,
             };
             mockClient.activateWindow.mockResolvedValue({ success: true });
             mockClient.getElement.mockResolvedValue({
@@ -144,7 +168,19 @@ describe('FluentChain', () => {
                 centerRandom: { x: 252, y: 228 },
                 controlType: 'Edit',
                 name: 'TestEdit',
+                automationId: '',
+                className: '',
+                frameworkId: '',
+                helpText: '',
+                localizedControlType: '',
                 isEnabled: true,
+                isOffscreen: false,
+                isPassword: false,
+                acceleratorKey: '',
+                accessKey: '',
+                itemType: '',
+                itemStatus: '',
+                processId: 0,
             };
             mockClient.activateWindow.mockResolvedValue({ success: true });
             mockClient.getElement.mockResolvedValue({
@@ -185,7 +221,19 @@ describe('FluentChain', () => {
                 centerRandom: { x: 252, y: 228 },
                 controlType: 'Edit',
                 name: 'TestEdit',
+                automationId: '',
+                className: '',
+                frameworkId: '',
+                helpText: '',
+                localizedControlType: '',
                 isEnabled: true,
+                isOffscreen: false,
+                isPassword: false,
+                acceleratorKey: '',
+                accessKey: '',
+                itemType: '',
+                itemStatus: '',
+                processId: 0,
             };
             mockClient.activateWindow.mockResolvedValue({ success: true });
             mockClient.getElement.mockResolvedValue({
@@ -211,7 +259,19 @@ describe('FluentChain', () => {
                 centerRandom: { x: 252, y: 228 },
                 controlType: 'Edit',
                 name: 'TestEdit',
+                automationId: '',
+                className: '',
+                frameworkId: '',
+                helpText: '',
+                localizedControlType: '',
                 isEnabled: true,
+                isOffscreen: false,
+                isPassword: false,
+                acceleratorKey: '',
+                accessKey: '',
+                itemType: '',
+                itemStatus: '',
+                processId: 0,
             };
             mockClient.activateWindow.mockResolvedValue({ success: true });
             mockClient.getElement.mockResolvedValue({
