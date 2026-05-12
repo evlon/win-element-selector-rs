@@ -20,22 +20,131 @@ use super::capture_overlay::CaptureOverlay;
 use super::highlight;
 use super::mouse_hook::{self, CaptureMode};
 
-// ─── Palette ──────────────────────────────────────────────────────────────────
-const C_TITLE_BG:  Color32 = Color32::from_rgb(30,  58, 100);
-const C_TITLE_FG:  Color32 = Color32::from_rgb(226, 235, 246);
-const C_SEL_BG:    Color32 = Color32::from_rgb(219, 234, 254);
-const C_SEL_FG:    Color32 = Color32::from_rgb(30,  64, 175);
-const C_PANEL_HDR: Color32 = Color32::from_rgb(241, 245, 249);
-const C_BORDER:    Color32 = Color32::from_rgb(203, 213, 225);
-const C_TARGET_FG: Color32 = Color32::from_rgb(30,  64, 175);
-const C_OK:        Color32 = Color32::from_rgb(22,  163,  74);
-const C_ERR:       Color32 = Color32::from_rgb(220,  38,  38);
-const C_WARN:      Color32 = Color32::from_rgb(202, 138,   4);
-const C_MUTED:     Color32 = Color32::from_rgb(107, 114, 128);
-const C_MONO_FG:   Color32 = Color32::from_rgb(37,  99,  235);
-const C_DIVIDER:   Color32 = Color32::from_rgb(220, 228, 240);
-const C_CAPTURE_BG:Color32 = Color32::from_rgb(254, 252, 232); // amber-50
-const C_CAPTURE_FG:Color32 = Color32::from_rgb(133,  79,  11); // amber-800
+// ─── Theme ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct Theme {
+    title_bg:        Color32,
+    title_fg:        Color32,
+    sel_bg:          Color32,
+    sel_fg:          Color32,
+    panel_hdr:       Color32,
+    border:          Color32,
+    target_fg:       Color32,
+    ok:              Color32,
+    err:             Color32,
+    warn:            Color32,
+    muted:           Color32,
+    mono_fg:         Color32,
+    divider:         Color32,
+    capture_bg:      Color32,
+    capture_fg:      Color32,
+    panel_fill:      Color32,
+    central_bg:      Color32,
+    top_bar_bg:      Color32,
+    bottom_bg:       Color32,
+    preview_bg:      Color32,
+    info_bg:         Color32,
+    row_even:        Color32,
+    row_odd:         Color32,
+    segment_bg:      Color32,
+    text:            Color32,
+    btn_text:        Color32,
+    hdr_text:        Color32,
+    val_found_bg:    Color32,
+    val_notfound_bg: Color32,
+    fail_step_bg:    Color32,
+    expected_fg:     Color32,
+    actual_fg:       Color32,
+    warn_detail_fg:  Color32,
+    confirm_off:     Color32,
+    history_fg:      Color32,
+    capture_border:  Color32,
+}
+
+impl Theme {
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self {
+                title_bg:        Color32::from_rgb(15,  23,  42),   // slate-900
+                title_fg:        Color32::from_rgb(203, 213, 225),   // slate-300
+                sel_bg:          Color32::from_rgb(30,  58, 138),    // blue-800
+                sel_fg:          Color32::from_rgb(147, 197, 253),   // blue-300
+                panel_hdr:       Color32::from_rgb(30,  41,  59),    // slate-800
+                border:          Color32::from_rgb(51,  65,  85),    // slate-700
+                target_fg:       Color32::from_rgb(96, 165, 250),    // blue-400
+                ok:              Color32::from_rgb(74, 222, 128),    // green-400
+                err:             Color32::from_rgb(248, 113, 113),   // red-400
+                warn:            Color32::from_rgb(250, 204,  21),   // yellow-400
+                muted:           Color32::from_rgb(148, 163, 184),   // slate-400
+                mono_fg:         Color32::from_rgb(96, 165, 250),    // blue-400
+                divider:         Color32::from_rgb(51,  65,  85),    // slate-700
+                capture_bg:      Color32::from_rgb(55,  42,  10),    // dark amber
+                capture_fg:      Color32::from_rgb(252, 211,  77),   // amber-300
+                panel_fill:      Color32::from_rgb(15,  23,  42),    // slate-900
+                central_bg:      Color32::from_rgb(15,  23,  42),    // slate-900
+                top_bar_bg:      Color32::from_rgb(30,  41,  59),    // slate-800
+                bottom_bg:       Color32::from_rgb(30,  41,  59),    // slate-800
+                preview_bg:      Color32::from_rgb(30,  41,  59),    // slate-800
+                info_bg:         Color32::from_rgb(22,  33,  62),    // slate-900+blue
+                row_even:        Color32::from_rgb(20,  30,  50),
+                row_odd:         Color32::from_rgb(28,  38,  58),
+                segment_bg:      Color32::from_rgb(30,  41,  59),    // slate-800
+                text:            Color32::from_rgb(226, 232, 240),   // slate-200
+                btn_text:        Color32::from_rgb(226, 232, 240),   // slate-200
+                hdr_text:        Color32::from_rgb(203, 213, 225),   // slate-300
+                val_found_bg:    Color32::from_rgb(20,  45,  25),
+                val_notfound_bg: Color32::from_rgb(50,  20,  20),
+                fail_step_bg:    Color32::from_rgb(45,  35,  18),
+                expected_fg:     Color32::from_rgb(147, 197, 253),   // blue-300
+                actual_fg:       Color32::from_rgb(248, 113, 113),   // red-400
+                warn_detail_fg:  Color32::from_rgb(251, 191,  36),   // amber-400
+                confirm_off:     Color32::from_rgb(71,   85, 105),   // slate-600
+                history_fg:      Color32::from_rgb(148, 163, 184),   // slate-400
+                capture_border:  Color32::from_rgb(80,  65,  20),
+            }
+        } else {
+            Self {
+                title_bg:        Color32::from_rgb(30,  58, 100),
+                title_fg:        Color32::from_rgb(226, 235, 246),
+                sel_bg:          Color32::from_rgb(219, 234, 254),
+                sel_fg:          Color32::from_rgb(30,  64, 175),
+                panel_hdr:       Color32::from_rgb(241, 245, 249),
+                border:          Color32::from_rgb(203, 213, 225),
+                target_fg:       Color32::from_rgb(30,  64, 175),
+                ok:              Color32::from_rgb(22,  163,  74),
+                err:             Color32::from_rgb(220,  38,  38),
+                warn:            Color32::from_rgb(202, 138,   4),
+                muted:           Color32::from_rgb(107, 114, 128),
+                mono_fg:         Color32::from_rgb(37,  99, 235),
+                divider:         Color32::from_rgb(220, 228, 240),
+                capture_bg:      Color32::from_rgb(254, 252, 232),
+                capture_fg:      Color32::from_rgb(133,  79,  11),
+                panel_fill:      Color32::WHITE,
+                central_bg:      Color32::from_gray(250),
+                top_bar_bg:      Color32::from_gray(248),
+                bottom_bg:       Color32::from_gray(245),
+                preview_bg:      Color32::from_gray(252),
+                info_bg:         Color32::from_rgb(239, 246, 255),
+                row_even:        Color32::from_rgb(252, 252, 255),
+                row_odd:         Color32::from_rgb(245, 247, 253),
+                segment_bg:      Color32::from_rgb(248, 250, 252),
+                text:            Color32::from_gray(35),
+                btn_text:        Color32::from_gray(50),
+                hdr_text:        Color32::from_gray(70),
+                val_found_bg:    Color32::from_rgb(245, 255, 245),
+                val_notfound_bg: Color32::from_rgb(255, 245, 245),
+                fail_step_bg:    Color32::from_rgb(255, 250, 240),
+                expected_fg:     Color32::from_rgb(100, 100, 200),
+                actual_fg:       Color32::from_rgb(200, 100, 100),
+                warn_detail_fg:  Color32::from_rgb(200, 100,   0),
+                confirm_off:     Color32::from_gray(160),
+                history_fg:      Color32::from_gray(150),
+                capture_border:  Color32::from_rgb(253, 230, 138),
+            }
+        }
+    }
+}
 
 // ─── XPath 来源状态（替代双重 bool 标志）────────────────────────────────────────
 #[derive(Debug, Clone)]
@@ -137,10 +246,15 @@ pub struct SelectorApp {
     node_expanded:    Vec<bool>,
     left_panel_width: f32,
     divider_dragging: bool,
+
+    theme: Theme,
 }
 
 impl SelectorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let dark = cc.egui_ctx.global_style().visuals.dark_mode;
+        let theme = Theme::new(dark);
+
         let config: AppConfig = cc
             .storage
             .and_then(|s| {
@@ -274,6 +388,7 @@ impl SelectorApp {
             node_expanded: vec![true; n],
             left_panel_width: 300.0,
             divider_dragging: false,
+            theme,
         }
     }
 
@@ -563,8 +678,6 @@ impl SelectorApp {
         // 更新 hierarchy
         self.hierarchy = result.optimized_hierarchy.clone();
 
-        // 通过临时设为 AutoGenerated 来复用 rebuild_xpath，然后标记为 Optimized
-        // 注意：这里不使用 trick，而是直接调用内部逻辑
         let window_selector = self.build_window_selector_from_info();
         let element_xpath = if self.show_simplified {
             xpath::generate_simplified_elements(&self.hierarchy)
@@ -637,15 +750,16 @@ impl SelectorApp {
     // ── Panels ────────────────────────────────────────────────────────────────
 
     fn draw_titlebar(&self, ui: &mut Ui) {
+        let t = self.theme;
         egui::Panel::top("titlebar")
             .exact_size(32.0)
-            .frame(Frame::NONE.fill(C_TITLE_BG))
+            .frame(Frame::NONE.fill(t.title_bg))
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new("🔍  Windows 元素选择器")
-                            .color(C_TITLE_FG)
+                            .color(t.title_fg)
                             .size(13.5)
                             .strong(),
                     );
@@ -654,7 +768,7 @@ impl SelectorApp {
                         if !self.history.is_empty() {
                             ui.label(
                                 RichText::new(format!("历史: {}", self.history.len()))
-                                    .color(Color32::from_gray(150))
+                                    .color(t.history_fg)
                                     .size(10.5),
                             );
                         }
@@ -665,17 +779,18 @@ impl SelectorApp {
 
     /// 顶部控制栏：名称 + 捕获 + 校验
     fn draw_top_bar(&mut self, ui: &mut Ui) {
+        let t = self.theme;
         egui::Panel::top("top_bar")
             .exact_size(44.0)
             .frame(
                 Frame::NONE
-                    .fill(Color32::from_gray(248))
+                    .fill(t.top_bar_bg)
                     .inner_margin(Margin::symmetric(12, 8))
-                    .stroke(Stroke::new(1.0, C_BORDER)),
+                    .stroke(Stroke::new(1.0, t.border)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("元素名称:").color(C_MUTED).size(11.5));
+                    ui.label(RichText::new("元素名称:").color(t.muted).size(11.5));
                     ui.add_space(4.0);
                     ui.add(
                         TextEdit::singleline(&mut self.element_name)
@@ -687,9 +802,9 @@ impl SelectorApp {
                         // 校验按钮
                         let val_label = self.validation.label();
                         let val_color = match &self.validation {
-                            ValidationResult::Found { .. } => C_OK,
-                            ValidationResult::NotFound | ValidationResult::Error(_) => C_ERR,
-                            _ => Color32::from_gray(50),
+                            ValidationResult::Found { .. } => t.ok,
+                            ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
+                            _ => t.btn_text,
                         };
                         if ui.add(
                             egui::Button::new(RichText::new(&val_label).color(val_color).size(12.0))
@@ -708,10 +823,10 @@ impl SelectorApp {
                                 if ui.add(
                                     egui::Button::new(
                                         RichText::new(format!("取消捕获 ({}s)", s))
-                                            .color(C_WARN)
+                                            .color(t.warn)
                                             .size(12.0),
                                     )
-                                    .stroke(Stroke::new(1.0, C_WARN))
+                                    .stroke(Stroke::new(1.0, t.warn))
                                     .min_size(Vec2::new(120.0, 28.0)),
                                 ).on_hover_text("点击或按 Esc 取消").clicked() {
                                     self.cancel_capture(ui.ctx());
@@ -719,7 +834,7 @@ impl SelectorApp {
                             }
                             CaptureState::Capturing => {
                                 ui.add(
-                                    egui::Button::new(RichText::new("捕获中…").color(C_WARN).size(12.0))
+                                    egui::Button::new(RichText::new("捕获中…").color(t.warn).size(12.0))
                                         .min_size(Vec2::new(100.0, 28.0)),
                                 );
                             }
@@ -727,7 +842,7 @@ impl SelectorApp {
                                 if ui.add(
                                     egui::Button::new(
                                         RichText::new("重新捕获 F4")
-                                            .color(Color32::from_gray(50))
+                                            .color(t.btn_text)
                                             .size(12.0),
                                     )
                                     .min_size(Vec2::new(100.0, 28.0)),
@@ -746,19 +861,20 @@ impl SelectorApp {
         if !matches!(self.capture_state, CaptureState::WaitingClick { .. }) {
             return;
         }
+        let t = self.theme;
         egui::Panel::top("capture_banner")
             .exact_size(26.0)
             .frame(
                 Frame::NONE
-                    .fill(C_CAPTURE_BG)
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(253, 230, 138))),
+                    .fill(t.capture_bg)
+                    .stroke(Stroke::new(1.0, t.capture_border)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new("⏳  请点击目标控件 — 按 Esc 或顶栏按钮取消")
-                            .color(C_CAPTURE_FG)
+                            .color(t.capture_fg)
                             .size(11.5),
                     );
                 });
@@ -767,12 +883,13 @@ impl SelectorApp {
 
     /// 底部面板：XPath 预览 + 状态 + 确定/取消（合并为单一 Panel）
     fn draw_bottom_panel(&mut self, ui: &mut Ui) {
+        let t = self.theme;
         egui::Panel::bottom("bottom_panel")
             .frame(
                 Frame::NONE
-                    .fill(Color32::from_gray(245))
+                    .fill(t.bottom_bg)
                     .inner_margin(Margin::symmetric(12, 8))
-                    .stroke(Stroke::new(1.0, C_BORDER)),
+                    .stroke(Stroke::new(1.0, t.border)),
             )
             .show_inside(ui, |ui| {
                 // ── XPath 预览区 ─────────────────────────────────────────────
@@ -784,10 +901,10 @@ impl SelectorApp {
                 ui.horizontal(|ui| {
                     // 状态消息
                     let msg_color = match &self.validation {
-                        ValidationResult::Found { .. }              => C_OK,
-                        ValidationResult::NotFound | ValidationResult::Error(_) => C_ERR,
-                        ValidationResult::Running                   => C_WARN,
-                        _ => C_MUTED,
+                        ValidationResult::Found { .. }              => t.ok,
+                        ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
+                        ValidationResult::Running                   => t.warn,
+                        _ => t.muted,
                     };
                     ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
 
@@ -795,9 +912,9 @@ impl SelectorApp {
                         // 确定按钮（校验通过后变绿）
                         let (confirm_label, confirm_fill) = match &self.validation {
                             ValidationResult::Found { .. } =>
-                                ("✔ 确定（已校验）", C_OK),
+                                ("✔ 确定（已校验）", t.ok),
                             _ =>
-                                ("确定", Color32::from_gray(160)),
+                                ("确定", t.confirm_off),
                         };
                         if ui.add(
                             egui::Button::new(
@@ -814,7 +931,7 @@ impl SelectorApp {
                         // 取消按钮（强制关闭，不做校验）
                         if ui.add(
                             egui::Button::new(
-                                RichText::new("取消").color(Color32::from_gray(50)).size(12.0),
+                                RichText::new("取消").color(t.btn_text).size(12.0),
                             )
                             .min_size(Vec2::new(70.0, 30.0)),
                         ).on_hover_text("放弃本次操作并关闭").clicked() {
@@ -856,10 +973,11 @@ impl SelectorApp {
 
     /// XPath 预览内容（根据标签页切换）
     fn draw_xpath_preview_content(&mut self, ui: &mut Ui) {
+        let t = self.theme;
         Frame::NONE
-            .fill(Color32::from_gray(252))
+            .fill(t.preview_bg)
             .inner_margin(Margin::symmetric(10, 6))
-            .stroke(Stroke::new(1.0, C_BORDER))
+            .stroke(Stroke::new(1.0, t.border))
             .corner_radius(CornerRadius::same(4))
             .show(ui, |ui| {
                 match self.active_tab {
@@ -871,8 +989,9 @@ impl SelectorApp {
 
     /// 元素模式：XPath 预览内容
     fn draw_element_xpath_content(&mut self, ui: &mut Ui) {
+        let t = self.theme;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("元素 XPath:").color(C_MUTED).size(11.0));
+            ui.label(RichText::new("元素 XPath:").color(t.muted).size(11.0));
             ui.add_space(4.0);
 
             if ui.small_button("复制").on_hover_text("复制元素 XPath").clicked() {
@@ -902,7 +1021,7 @@ impl SelectorApp {
                         summary.simplified_attrs,
                         if summary.used_anchor { "· 锚点" } else { "" }
                     ))
-                    .color(C_OK)
+                    .color(t.ok)
                     .size(10.0),
                 );
             }
@@ -910,12 +1029,12 @@ impl SelectorApp {
             // 手动编辑标签
             if matches!(self.xpath_source, XPathSource::Manual) {
                 ui.add_space(4.0);
-                ui.label(RichText::new("[手动编辑]").color(C_WARN).size(10.0));
+                ui.label(RichText::new("[手动编辑]").color(t.warn).size(10.0));
             }
 
             if let Some(err) = &self.xpath_error {
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("⚠ {}", err)).color(C_ERR).size(10.5));
+                ui.label(RichText::new(format!("⚠ {}", err)).color(t.err).size(10.5));
             }
         });
 
@@ -925,7 +1044,7 @@ impl SelectorApp {
                 .desired_rows(2)
                 .desired_width(ui.available_width())
                 .hint_text("/ControlType[@Attr='val']")
-                .text_color(C_MONO_FG),
+                .text_color(t.mono_fg),
         );
         if edit_resp.changed() {
             self.xpath_source = XPathSource::Manual;
@@ -937,8 +1056,9 @@ impl SelectorApp {
 
     /// 窗口元素模式：XPath 预览内容
     fn draw_window_xpath_content(&mut self, ui: &mut Ui) {
+        let t = self.theme;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
+            ui.label(RichText::new("窗口选择器:").color(t.muted).size(11.0));
             ui.add_space(4.0);
 
             if ui.small_button("复制").on_hover_text("复制窗口选择器").clicked() {
@@ -952,7 +1072,7 @@ impl SelectorApp {
                     self.init_window_filters();
                     self.rebuild_xpath();
                 }
-                ui.label(RichText::new("[自定义]").color(C_WARN).size(10.0));
+                ui.label(RichText::new("[自定义]").color(t.warn).size(10.0));
             }
         });
 
@@ -962,7 +1082,7 @@ impl SelectorApp {
                 .desired_rows(2)
                 .desired_width(ui.available_width())
                 .hint_text("Window[@Name='...' and @ClassName='...']")
-                .text_color(C_MONO_FG),
+                .text_color(t.mono_fg),
         );
         if edit_resp.changed() {
             self.custom_window_xpath = true;
@@ -982,7 +1102,8 @@ impl SelectorApp {
     }
 
     fn draw_element_tree(&mut self, ui: &mut Ui) {
-        panel_header(ui, "📂  元素层级结构");
+        let t = self.theme;
+        panel_header(ui, "📂  元素层级结构", t);
         ui.add_space(2.0);
 
         if self.node_expanded.len() != self.hierarchy.len() {
@@ -995,7 +1116,7 @@ impl SelectorApp {
             .show(ui, |ui| {
                 let n = self.hierarchy.len();
                 if n == 0 {
-                    ui.label(RichText::new("尚未捕获元素").color(C_MUTED).italics());
+                    ui.label(RichText::new("尚未捕获元素").color(t.muted).italics());
                     return;
                 }
 
@@ -1012,6 +1133,7 @@ impl SelectorApp {
                     validation_segments,
                     show_validation_details,
                     validation_result,
+                    t,
                 );
 
                 if included_changed {
@@ -1027,31 +1149,31 @@ impl SelectorApp {
     }
 
     fn draw_window_tree(&mut self, ui: &mut Ui) {
-        panel_header(ui, "🪟  窗口信息");
+        let t = self.theme;
+        panel_header(ui, "🪟  窗口信息", t);
         ui.add_space(4.0);
 
         if let Some(ref win) = self.window_info {
             egui::Frame::NONE
-                .fill(Color32::from_rgb(239, 246, 255))
+                .fill(t.info_bg)
                 .corner_radius(CornerRadius::same(4))
                 .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
-                        prop_row(ui, "标题",  &win.title);
-                        prop_row(ui, "类名",  if win.class_name.is_empty()   { "(空)" } else { &win.class_name });
-                        prop_row(ui, "进程名", if win.process_name.is_empty() { "(空)" } else { &win.process_name });
-                        prop_row(ui, "进程ID", &win.process_id.to_string());
+                        prop_row(ui, "标题",  &win.title, t);
+                        prop_row(ui, "类名",  if win.class_name.is_empty()   { "(空)" } else { &win.class_name }, t);
+                        prop_row(ui, "进程名", if win.process_name.is_empty() { "(空)" } else { &win.process_name }, t);
+                        prop_row(ui, "进程ID", &win.process_id.to_string(), t);
                     });
                 });
         } else {
-            ui.label(RichText::new("尚未选择窗口").color(C_MUTED).italics());
+            ui.label(RichText::new("尚未选择窗口").color(t.muted).italics());
             ui.add_space(4.0);
-            ui.label(RichText::new("请先捕获元素").color(C_MUTED).size(10.5));
+            ui.label(RichText::new("请先捕获元素").color(t.muted).size(10.5));
         }
     }
 
     /// 平面列表形式的元素层级树
-    /// 注意：移除了已废弃的 _expanded 参数，折叠逻辑由外层 node_expanded 管理
     fn draw_tree_flat(
         ui: &mut Ui,
         hierarchy: &mut Vec<HierarchyNode>,
@@ -1059,6 +1181,7 @@ impl SelectorApp {
         validation_segments: Option<&Vec<SegmentValidationResult>>,
         show_validation_details: bool,
         validation_result: Option<&ValidationResult>,
+        t: Theme,
     ) -> bool {
         let n = hierarchy.len();
         let mut included_changed = false;
@@ -1070,10 +1193,10 @@ impl SelectorApp {
             let label_text   = hierarchy[idx].tree_label();
             let node_included = hierarchy[idx].included;
             let icon = if is_target { "🎯" } else { "" };
-            let label_color = if is_target        { C_TARGET_FG }
-                              else if is_sel       { C_SEL_FG }
-                              else if !node_included { C_MUTED }
-                              else                  { Color32::from_gray(35) };
+            let label_color = if is_target        { t.target_fg }
+                              else if is_sel       { t.sel_fg }
+                              else if !node_included { t.muted }
+                              else                  { t.text };
 
             let validation_marker = if show_validation_details {
                 validation_segments
@@ -1095,7 +1218,7 @@ impl SelectorApp {
                 .color(label_color)
                 .strong_if(is_sel || is_target);
 
-            let row_bg = if is_sel { C_SEL_BG } else { Color32::TRANSPARENT };
+            let row_bg = if is_sel { t.sel_bg } else { Color32::TRANSPARENT };
 
             egui::Frame::NONE
                 .fill(row_bg)
@@ -1124,7 +1247,7 @@ impl SelectorApp {
                         });
 
                         resp.on_hover_ui(|ui| {
-                            node_tooltip(ui, &hierarchy[idx]);
+                            node_tooltip(ui, &hierarchy[idx], t);
                         });
                     });
                 });
@@ -1151,8 +1274,6 @@ impl SelectorApp {
         ui.separator();
 
         // 高亮逻辑改进：根据校验状态决定使用哪个 rect
-        // - 校验成功：使用实际找到的元素 rect（更准确）
-        // - 校验失败/未校验：使用捕获时的 rect，但提示用户
         let highlight_label = match validation_result {
             Some(ValidationResult::Found { .. }) => "🔍 高亮显示此元素（校验位置）",
             Some(ValidationResult::NotFound) => "🔍 高亮显示此元素（捕获位置⚠）",
@@ -1163,7 +1284,7 @@ impl SelectorApp {
             // 校验成功时，优先使用校验结果的 rect
             let rect_to_use = match validation_result {
                 Some(ValidationResult::Found { first_rect: Some(r), .. }) => r.clone(),
-                _ => hierarchy[idx].rect.clone(),  // 校验失败或未校验，使用捕获时的 rect
+                _ => hierarchy[idx].rect.clone(),
             };
             let info = HighlightInfo::new(rect_to_use, &hierarchy[idx].control_type);
             highlight::flash_with_info(&info, 1500);
@@ -1194,7 +1315,8 @@ impl SelectorApp {
     }
 
     fn draw_element_properties(&mut self, ui: &mut Ui) {
-        panel_header(ui, "⚙  元素属性");
+        let t = self.theme;
+        panel_header(ui, "⚙  元素属性", t);
 
         ScrollArea::vertical()
             .id_salt("prop_scroll")
@@ -1202,7 +1324,7 @@ impl SelectorApp {
             .show(ui, |ui| {
                 let Some(sel_idx) = self.selected_node else {
                     ui.add_space(24.0);
-                    ui.label(RichText::new("← 点击左侧节点查看属性").color(C_MUTED).italics());
+                    ui.label(RichText::new("← 点击左侧节点查看属性").color(t.muted).italics());
                     return;
                 };
                 if sel_idx >= self.hierarchy.len() { return; }
@@ -1211,14 +1333,14 @@ impl SelectorApp {
                 {
                     let node = &self.hierarchy[sel_idx];
                     egui::Frame::NONE
-                        .fill(Color32::from_rgb(239, 246, 255))
+                        .fill(t.info_bg)
                         .corner_radius(CornerRadius::same(4))
                         .inner_margin(Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("控件类型").color(C_MUTED).size(11.0));
+                                ui.label(RichText::new("控件类型").color(t.muted).size(11.0));
                                 ui.add_space(6.0);
-                                ui.label(RichText::new(&node.control_type).color(C_TARGET_FG).strong().size(13.0));
+                                ui.label(RichText::new(&node.control_type).color(t.target_fg).strong().size(13.0));
                                 if node.rect.width > 0 {
                                     ui.add_space(12.0);
                                     ui.label(
@@ -1227,13 +1349,13 @@ impl SelectorApp {
                                             node.rect.width, node.rect.height,
                                             node.rect.x, node.rect.y,
                                         ))
-                                        .color(C_MUTED).size(10.5),
+                                        .color(t.muted).size(10.5),
                                     );
                                 }
                                 if node.process_id > 0 {
                                     ui.label(
                                         RichText::new(format!("pid:{}", node.process_id))
-                                            .color(C_MUTED).size(10.5),
+                                            .color(t.muted).size(10.5),
                                     );
                                 }
                             });
@@ -1244,15 +1366,15 @@ impl SelectorApp {
 
                 // 属性列表表头
                 egui::Frame::NONE
-                    .fill(C_PANEL_HDR)
+                    .fill(t.panel_hdr)
                     .inner_margin(Margin::symmetric(4, 2))
-                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .stroke(Stroke::new(0.5, t.border))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(22.0);
-                            col_label(ui, "属性名", 100.0);
-                            col_label(ui, "运算符",  80.0);
-                            col_label(ui, "值",       0.0);
+                            col_label(ui, "属性名", 100.0, t);
+                            col_label(ui, "运算符",  80.0, t);
+                            col_label(ui, "值",       0.0, t);
                         });
                     });
 
@@ -1261,11 +1383,7 @@ impl SelectorApp {
                 let filter_count = self.hierarchy[sel_idx].filters.len();
                 let mut dirty = false;
                 for fi in 0..filter_count {
-                    let row_color = if fi % 2 == 0 {
-                        Color32::from_rgb(252, 252, 255)
-                    } else {
-                        Color32::from_rgb(245, 247, 253)
-                    };
+                    let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
 
                     egui::Frame::NONE
                         .fill(row_color)
@@ -1313,19 +1431,19 @@ impl SelectorApp {
                 ui.add_space(4.0);
 
                 // 本节点 XPath 片段预览
-                ui.label(RichText::new("本节点 XPath 片段:").color(C_MUTED).size(11.0));
+                ui.label(RichText::new("本节点 XPath 片段:").color(t.muted).size(11.0));
                 ui.add_space(2.0);
                 let seg = self.hierarchy[sel_idx].xpath_segment();
                 egui::Frame::NONE
-                    .fill(Color32::from_rgb(248, 250, 252))
-                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .fill(t.segment_bg)
+                    .stroke(Stroke::new(0.5, t.border))
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(&seg)
                                 .font(egui::FontId::monospace(11.0))
-                                .color(C_MONO_FG),
+                                .color(t.mono_fg),
                         );
                     });
 
@@ -1333,7 +1451,7 @@ impl SelectorApp {
                 ui.add_space(8.0);
                 let included    = self.hierarchy[sel_idx].included;
                 let toggle_txt  = if included { "⊖ 从 XPath 中排除此节点" } else { "⊕ 将此节点加入 XPath" };
-                let toggle_color = if included { C_ERR } else { C_OK };
+                let toggle_color = if included { t.err } else { t.ok };
                 if ui.add(action_btn(toggle_txt, 0.0, toggle_color)).clicked() {
                     self.hierarchy[sel_idx].included = !included;
                     self.xpath_source = XPathSource::AutoGenerated;
@@ -1344,7 +1462,8 @@ impl SelectorApp {
     }
 
     fn draw_window_properties(&mut self, ui: &mut Ui) {
-        panel_header(ui, "⚙  窗口属性过滤器");
+        let t = self.theme;
+        panel_header(ui, "⚙  窗口属性过滤器", t);
 
         ScrollArea::vertical()
             .id_salt("window_prop_scroll")
@@ -1357,20 +1476,20 @@ impl SelectorApp {
 
                 if self.window_info.is_none() {
                     ui.add_space(24.0);
-                    ui.label(RichText::new("← 请先捕获元素以获取窗口信息").color(C_MUTED).italics());
+                    ui.label(RichText::new("← 请先捕获元素以获取窗口信息").color(t.muted).italics());
                     return;
                 }
 
                 egui::Frame::NONE
-                    .fill(C_PANEL_HDR)
+                    .fill(t.panel_hdr)
                     .inner_margin(Margin::symmetric(4, 2))
-                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .stroke(Stroke::new(0.5, t.border))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(22.0);
-                            col_label(ui, "属性名", 100.0);
-                            col_label(ui, "运算符",  80.0);
-                            col_label(ui, "值",       0.0);
+                            col_label(ui, "属性名", 100.0, t);
+                            col_label(ui, "运算符",  80.0, t);
+                            col_label(ui, "值",       0.0, t);
                         });
                     });
 
@@ -1379,11 +1498,7 @@ impl SelectorApp {
                 let filter_count = self.window_filters.len();
                 let mut dirty = false;
                 for fi in 0..filter_count {
-                    let row_color = if fi % 2 == 0 {
-                        Color32::from_rgb(252, 252, 255)
-                    } else {
-                        Color32::from_rgb(245, 247, 253)
-                    };
+                    let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
 
                     egui::Frame::NONE
                         .fill(row_color)
@@ -1431,18 +1546,18 @@ impl SelectorApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                ui.label(RichText::new("窗口选择器:").color(C_MUTED).size(11.0));
+                ui.label(RichText::new("窗口选择器:").color(t.muted).size(11.0));
                 ui.add_space(2.0);
                 egui::Frame::NONE
-                    .fill(Color32::from_rgb(248, 250, 252))
-                    .stroke(Stroke::new(0.5, C_BORDER))
+                    .fill(t.segment_bg)
+                    .stroke(Stroke::new(0.5, t.border))
                     .corner_radius(CornerRadius::same(4))
                     .inner_margin(Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(&self.window_selector)
                                 .font(egui::FontId::monospace(11.0))
-                                .color(C_MONO_FG),
+                                .color(t.mono_fg),
                         );
                     });
             });
@@ -1451,29 +1566,30 @@ impl SelectorApp {
     /// 校验详情（失败时展示逐段分析）
     fn draw_validation_details(&self, ui: &mut Ui) {
         let Some(detail) = &self.detailed_validation else { return };
+        let t = self.theme;
 
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
 
-        panel_header(ui, "🔍 校验结果");
+        panel_header(ui, "🔍 校验结果", t);
         ui.add_space(4.0);
 
         let (status_color, status_text) = match &detail.overall {
             ValidationResult::Found { count, .. } =>
-                (C_OK, format!("✓ 通过 — 找到 {} 个元素", count)),
+                (t.ok, format!("✓ 通过 — 找到 {} 个元素", count)),
             ValidationResult::NotFound =>
-                (C_ERR, "✗ 未找到匹配元素".to_string()),
+                (t.err, "✗ 未找到匹配元素".to_string()),
             ValidationResult::Error(e) =>
-                (Color32::from_rgb(200, 100, 0), format!("⚠ 错误: {}", e)),
+                (t.warn_detail_fg, format!("⚠ 错误: {}", e)),
             _ =>
-                (C_MUTED, "未校验".to_string()),
+                (t.muted, "未校验".to_string()),
         };
 
         let frame_fill = if detail.overall == ValidationResult::NotFound {
-            Color32::from_rgb(255, 245, 245)
+            t.val_notfound_bg
         } else {
-            Color32::from_rgb(245, 255, 245)
+            t.val_found_bg
         };
 
         egui::Frame::NONE
@@ -1483,62 +1599,62 @@ impl SelectorApp {
             .show(ui, |ui| {
                 ui.label(RichText::new(status_text).color(status_color).strong().size(13.0));
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("用时: {}ms", detail.total_duration_ms)).color(C_MUTED).size(11.0));
+                ui.label(RichText::new(format!("用时: {}ms", detail.total_duration_ms)).color(t.muted).size(11.0));
             });
 
         if detail.overall != ValidationResult::NotFound { return; }
 
         ui.add_space(8.0);
-        ui.label(RichText::new("失败步骤分析:").color(C_MUTED).size(11.0));
+        ui.label(RichText::new("失败步骤分析:").color(t.muted).size(11.0));
         ui.add_space(4.0);
 
         for seg in &detail.segments {
             if seg.matched || seg.match_count > 0 { continue; }
 
             egui::Frame::NONE
-                .fill(Color32::from_rgb(255, 250, 240))
+                .fill(t.fail_step_bg)
                 .corner_radius(CornerRadius::same(4))
                 .inner_margin(Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(format!("第 {} 步失败:", seg.segment_index + 1))
-                            .color(Color32::from_rgb(200, 100, 0))
+                            .color(t.warn_detail_fg)
                             .size(11.0),
                     );
                     ui.add_space(2.0);
                     ui.label(
                         RichText::new(&seg.segment_text)
                             .font(egui::FontId::monospace(10.0))
-                            .color(C_MONO_FG),
+                            .color(t.mono_fg),
                     );
 
                     if !seg.predicate_failures.is_empty() {
                         ui.add_space(4.0);
                         for pf in &seg.predicate_failures {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{}: ", pf.attr_name)).color(C_MUTED).size(10.0));
-                                ui.label(RichText::new(format!("期望 '{}'", pf.expected_value)).color(Color32::from_rgb(100, 100, 200)).size(10.0));
+                                ui.label(RichText::new(format!("{}: ", pf.attr_name)).color(t.muted).size(10.0));
+                                ui.label(RichText::new(format!("期望 '{}'", pf.expected_value)).color(t.expected_fg).size(10.0));
                                 if let Some(ref actual) = pf.actual_value {
-                                    ui.label(RichText::new(" vs ").color(C_MUTED).size(10.0));
-                                    ui.label(RichText::new(format!("实际 '{}'", actual)).color(Color32::from_rgb(200, 100, 100)).size(10.0));
+                                    ui.label(RichText::new(" vs ").color(t.muted).size(10.0));
+                                    ui.label(RichText::new(format!("实际 '{}'", actual)).color(t.actual_fg).size(10.0));
                                 }
                             });
-                            ui.label(RichText::new(&pf.reason).color(C_MUTED).size(10.0));
+                            ui.label(RichText::new(&pf.reason).color(t.muted).size(10.0));
                         }
                     } else {
-                        ui.label(RichText::new("• 属性值在验证时可能已变化").color(C_MUTED).size(10.0));
-                        ui.label(RichText::new("• 元素结构在捕获后可能已变化").color(C_MUTED).size(10.0));
+                        ui.label(RichText::new("• 属性值在验证时可能已变化").color(t.muted).size(10.0));
+                        ui.label(RichText::new("• 元素结构在捕获后可能已变化").color(t.muted).size(10.0));
                     }
                 });
             ui.add_space(4.0);
         }
 
         ui.add_space(8.0);
-        ui.label(RichText::new("建议:").color(C_MUTED).size(11.0));
+        ui.label(RichText::new("建议:").color(t.muted).size(11.0));
         ui.add_space(4.0);
-        ui.label(RichText::new("1. 点击【智能优化】按钮，移除动态属性").color(C_MUTED).size(10.0));
-        ui.label(RichText::new("2. 检查动态类名是否在捕获后发生了变化").color(C_MUTED).size(10.0));
-        ui.label(RichText::new("3. 重新捕获元素，确保元素状态稳定").color(C_MUTED).size(10.0));
+        ui.label(RichText::new("1. 点击【智能优化】按钮，移除动态属性").color(t.muted).size(10.0));
+        ui.label(RichText::new("2. 检查动态类名是否在捕获后发生了变化").color(t.muted).size(10.0));
+        ui.label(RichText::new("3. 重新捕获元素，确保元素状态稳定").color(t.muted).size(10.0));
     }
 }
 
@@ -1559,6 +1675,10 @@ impl eframe::App for SelectorApp {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // ── 更新主题 ────────────────────────────────────────────────────────
+        let dark = ui.ctx().global_style().visuals.dark_mode;
+        self.theme = Theme::new(dark);
+
         // 捕获状态下持续刷新
         if self.capture_state != CaptureState::Idle {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
@@ -1617,16 +1737,17 @@ impl eframe::App for SelectorApp {
         self.overlay.draw(ui.ctx());
 
         // ── 全局样式 ──────────────────────────────────────────────────────────
+        let t = self.theme;
         ui.ctx().set_global_style({
             let mut s = (*ui.ctx().global_style()).clone();
-            s.visuals.panel_fill   = Color32::WHITE;
-            s.visuals.window_fill  = Color32::WHITE;
+            s.visuals.panel_fill   = t.panel_fill;
+            s.visuals.window_fill  = t.panel_fill;
             s.spacing.item_spacing = egui::vec2(4.0, 2.0);
             s.spacing.window_margin     = egui::Margin::same(0);
             s.spacing.button_padding    = egui::vec2(6.0, 3.0);
             s.spacing.indent            = 14.0;
             s.spacing.interact_size     = egui::vec2(18.0, 18.0);
-            s.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, C_DIVIDER);
+            s.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.divider);
             s
         });
 
@@ -1637,7 +1758,7 @@ impl eframe::App for SelectorApp {
         self.draw_bottom_panel(ui);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
 
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(Color32::from_gray(250)))
+            .frame(Frame::NONE.fill(t.central_bg))
             .show_inside(ui, |ui| {
                 ui.add_space(6.0);
 
@@ -1711,7 +1832,7 @@ impl eframe::App for SelectorApp {
                 }
 
                 // 分隔线
-                let line_color = if self.divider_dragging { C_SEL_FG } else { C_BORDER };
+                let line_color = if self.divider_dragging { t.sel_fg } else { t.border };
                 ui.painter().line_segment(
                     [
                         egui::pos2(div_x, full_rect.min.y),
@@ -1721,7 +1842,7 @@ impl eframe::App for SelectorApp {
                 );
 
                 // 左栏
-                ui.painter().rect_filled(left_rect, 0.0, Color32::WHITE);
+                ui.painter().rect_filled(left_rect, 0.0, t.panel_fill);
                 let left_content = left_rect.shrink2(egui::vec2(6.0, 4.0));
                 let mut left_ui  = ui.new_child(
                     egui::UiBuilder::new()
@@ -1732,7 +1853,7 @@ impl eframe::App for SelectorApp {
                 self.draw_left_panel(&mut left_ui);
 
                 // 右栏
-                ui.painter().rect_filled(right_rect, 0.0, Color32::WHITE);
+                ui.painter().rect_filled(right_rect, 0.0, t.panel_fill);
                 let right_content = right_rect.shrink2(egui::vec2(8.0, 4.0));
                 let mut right_ui  = ui.new_child(
                     egui::UiBuilder::new()
@@ -1747,27 +1868,27 @@ impl eframe::App for SelectorApp {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-fn panel_header(ui: &mut Ui, title: &str) {
+fn panel_header(ui: &mut Ui, title: &str, t: Theme) {
     let w = ui.available_width();
     Frame::NONE
-        .fill(C_PANEL_HDR)
+        .fill(t.panel_hdr)
         .inner_margin(Margin::symmetric(8, 3))
-        .stroke(Stroke::new(0.5, C_BORDER))
+        .stroke(Stroke::new(0.5, t.border))
         .show(ui, |ui| {
             ui.set_max_width(w);
-            ui.label(RichText::new(title).color(Color32::from_gray(70)).size(11.5).strong());
+            ui.label(RichText::new(title).color(t.hdr_text).size(11.5).strong());
         });
     ui.add_space(2.0);
 }
 
-fn col_label(ui: &mut Ui, text: &str, width: f32) {
+fn col_label(ui: &mut Ui, text: &str, width: f32, t: Theme) {
     if width > 0.0 {
         ui.add_sized(
             Vec2::new(width, 16.0),
-            egui::Label::new(RichText::new(text).color(C_MUTED).size(10.5).strong()),
+            egui::Label::new(RichText::new(text).color(t.muted).size(10.5).strong()),
         );
     } else {
-        ui.label(RichText::new(text).color(C_MUTED).size(10.5).strong());
+        ui.label(RichText::new(text).color(t.muted).size(10.5).strong());
     }
 }
 
@@ -1776,16 +1897,16 @@ fn action_btn(label: &str, width: f32, color: Color32) -> egui::Button<'static> 
     if width > 0.0 { b.min_size(Vec2::new(width, 26.0)) } else { b }
 }
 
-fn prop_row(ui: &mut Ui, key: &str, val: &str) {
+fn prop_row(ui: &mut Ui, key: &str, val: &str, t: Theme) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(key).color(C_MUTED).size(10.5).monospace());
+        ui.label(RichText::new(key).color(t.muted).size(10.5).monospace());
         ui.add_space(6.0);
-        ui.label(RichText::new(val).color(Color32::from_gray(35)).size(10.5).monospace());
+        ui.label(RichText::new(val).color(t.text).size(10.5).monospace());
     });
     ui.add_space(2.0);
 }
 
-fn node_tooltip(ui: &mut Ui, node: &HierarchyNode) {
+fn node_tooltip(ui: &mut Ui, node: &HierarchyNode, t: Theme) {
     ui.label(RichText::new("元素详情").strong().size(11.0));
     ui.separator();
     for (k, v) in [
@@ -1795,7 +1916,7 @@ fn node_tooltip(ui: &mut Ui, node: &HierarchyNode) {
         ("Name",         node.name.as_str()),
     ] {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(k).color(C_MUTED).size(10.0));
+            ui.label(RichText::new(k).color(t.muted).size(10.0));
             ui.add_space(4.0);
             ui.label(RichText::new(v).monospace().size(10.0));
         });
@@ -1807,7 +1928,7 @@ fn node_tooltip(ui: &mut Ui, node: &HierarchyNode) {
                 node.rect.width, node.rect.height, node.rect.x, node.rect.y,
             ))
             .size(10.0)
-            .color(C_MUTED),
+            .color(t.muted),
         );
     }
 }
