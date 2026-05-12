@@ -39,12 +39,10 @@ pub async fn get_element(query: web::Query<ElementQuery>) -> impl Responder {
     
     // UI Automation 操作需要在 STA 线程中执行
     let result = tokio::task::spawn_blocking(move || {
-        // 在阻塞线程中初始化 COM (STA) - UI Automation 需要
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         
@@ -160,9 +158,8 @@ pub async fn get_all_elements(query: web::Query<ElementQuery>) -> impl Responder
     let result = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         

@@ -522,9 +522,8 @@ pub async fn start_idle_motion(body: web::Json<IdleMotionStartRequest>) -> impl 
     let rect_result = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = crate::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         

@@ -87,12 +87,10 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     // Step 2: 获取元素坐标
     let xpath = request.xpath.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        // 在阻塞线程中初始化 COM (STA) - UI Automation 需要
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         

@@ -16,9 +16,8 @@ pub async fn list_windows() -> impl Responder {
     let windows = tokio::task::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         
@@ -66,9 +65,8 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     let success = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         
@@ -111,9 +109,8 @@ pub async fn focus_element(req: web::Json<FocusElementRequest>) -> impl Responde
     let success = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                log::error!("COM STA init failed: {}", e);
             }
         }
         

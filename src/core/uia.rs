@@ -53,6 +53,29 @@ pub mod windows_impl {
         })
     }
 
+    /// Initialize COM in STA (Single-Threaded Apartment) mode for UI Automation.
+    /// Must be called on each `spawn_blocking` thread before any UIA operation.
+    /// 
+    /// - `S_OK`: First initialization on this thread (success)
+    /// - `S_FALSE`: Already initialized on this thread (success, call CoUninitialize later)
+    /// - `RPC_E_CHANGED_MODE`: Thread already initialized in MTA mode (log warning, continue)
+    /// - Other errors: Fatal, return error
+    pub fn ensure_com_sta() -> anyhow::Result<()> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // CoInitializeEx returns HRESULT directly (not Result)
+        // S_OK (0) = success, S_FALSE (1) = already initialized, both are OK
+        // RPC_E_CHANGED_MODE (0x80010106) = thread already in MTA, warn but continue
+        if hr == windows::core::HRESULT(0) || hr == windows::core::HRESULT(1) {
+            Ok(())
+        } else if hr == windows::core::HRESULT(0x80010106u32 as i32) {
+            log::warn!("COM already initialized in MTA mode on this thread, UIA may not work correctly");
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("COM STA initialization failed: HRESULT={:#010x}", hr.0 as u32))
+        }
+    }
+
     /// Capture the element under the mouse cursor.
     #[allow(dead_code)]
     pub fn capture_at_cursor() -> CaptureResult {
@@ -430,8 +453,8 @@ pub mod windows_impl {
     // ── Validation ────────────────────────────────────────────────────────────
 
     /// Validate using window selector and element XPath (new format).
-    /// Stage 1: Parse window selector to find target window
-    /// Stage 2: Search elements using element XPath inside the window
+    /// Stage 1: Parse window selector to find target window(s)
+    /// Stage 2: For each matching window, try element XPath until one succeeds
     /// Returns detailed validation result with per-segment information.
     pub fn validate_selector_and_xpath_detailed(
         window_selector: &str,
@@ -453,75 +476,100 @@ pub mod windows_impl {
             }
         };
 
-        // Stage 1: Find target window using window selector
+        // Stage 1: Find all target windows using window selector
         log::info!("[XPath Validation] Stage 1/2: Locating window with selector: {}", window_selector);
         
-        let search_root = match find_window_by_selector(&auto, window_selector) {
-            Some(window) => {
-                log::info!("[XPath Validation] ✓ Window found, searching inside window");
-                window
+        let matched_windows = find_window_by_selector(&auto, window_selector);
+        
+        if matched_windows.is_empty() {
+            return DetailedValidationResult {
+                overall: ValidationResult::Error(
+                    format!("窗口未找到: {}", window_selector)
+                ),
+                segments: vec![],
+                layers: vec![],
+                total_duration_ms: total_start.elapsed().as_millis() as u64,
+            };
+        }
+        
+        log::info!("[XPath Validation] ✓ Found {} matching window(s), trying XPath on each", matched_windows.len());
+
+        // Stage 2: Try XPath on each matching window, return first success
+        // This handles multi-process scenarios (e.g., multiple Tauri app instances)
+        let mut last_error: Option<String> = None;
+        let mut best_result: Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> = None;
+
+        for (win_idx, search_root) in matched_windows.iter().enumerate() {
+            log::info!("[XPath Validation] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, matched_windows.len());
+            
+            // Debug: 打印窗口的直接子节点
+            if win_idx == 0 {
+                log::info!("[XPath Validation] Window's direct children:");
+                let walker = unsafe { auto.ControlViewWalker().ok() };        
+                if let Some(walker) = walker {
+                    let mut child = unsafe { walker.GetFirstChildElement(search_root).ok() };
+                    let mut idx = 0;
+                    while let Some(c) = child {
+                        let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };                
+                        let class = get_bstr(unsafe { c.CurrentClassName() });
+                        let name = get_bstr(unsafe { c.CurrentName() });
+                        let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+                        log::info!("  child[{}] {} class='{}' name='{}' frameworkId='{}'", idx, ct, class, name, fwid);
+                        
+                        // 打印第一个子节点的子节点
+                        if idx == 0 {
+                            log::info!("  WRY_WEBVIEW's children:");
+                            let mut sub_child = unsafe { walker.GetFirstChildElement(&c).ok() };
+                            let mut sub_idx = 0;
+                            while let Some(sc) = sub_child {
+                                let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };                        
+                                let sub_class = get_bstr(unsafe { sc.CurrentClassName() });
+                                let sub_name = get_bstr(unsafe { sc.CurrentName() });
+                                let sub_fwid = get_bstr(unsafe { sc.CurrentFrameworkId() });
+                                log::info!("    sub[{}] {} class='{}' name='{}' frameworkId='{}'", sub_idx, sub_ct, sub_class, sub_name, sub_fwid);
+                                sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };                        
+                                sub_idx += 1;
+                                if sub_idx > 5 { break; }
+                            }
+                        }
+                        
+                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };                
+                        idx += 1;
+                        if idx > 10 { break; }
+                    }
+                }
             }
+            
+            log::info!("[XPath Validation] Debug: searching for parent group nodes...");
+
+            match find_by_xpath_with_fallback(&auto, search_root, element_xpath) {
+                Ok((results, segments)) => {
+                    if !results.is_empty() {
+                        // Found! Use this window's results
+                        best_result = Some((results, segments));
+                        break;
+                    }
+                    // No match in this window, try next
+                    log::info!("[XPath Validation] Window {} - XPath matched 0 elements, trying next window", win_idx + 1);
+                    if best_result.is_none() {
+                        // Keep empty results as fallback
+                        best_result = Some((results, segments));
+                    }
+                }
+                Err(e) => {
+                    log::info!("[XPath Validation] Window {} - XPath error: {}, trying next window", win_idx + 1, e);
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+
+        let (results, segments) = match best_result {
+            Some(r) => r,
             None => {
                 return DetailedValidationResult {
                     overall: ValidationResult::Error(
-                        format!("窗口未找到: {}", window_selector)
+                        last_error.unwrap_or_else(|| "XPath 执行失败".to_string())
                     ),
-                    segments: vec![],
-                    layers: vec![],
-                    total_duration_ms: total_start.elapsed().as_millis() as u64,
-                };
-            }
-        };
-
-        log::info!("[XPath Validation] Stage 2/2: Searching elements with XPath: {}", element_xpath);
-        
-        // Debug: 打印窗口的直接子节点，以及第一个子节点的子节点
-        log::info!("[XPath Validation] Window's direct children:");
-        let walker = unsafe { auto.ControlViewWalker().ok() };        
-        if let Some(walker) = walker {
-            let mut child = unsafe { walker.GetFirstChildElement(&search_root).ok() };
-            let mut idx = 0;
-            while let Some(c) = child {
-                let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };                
-                let class = get_bstr(unsafe { c.CurrentClassName() });
-                let name = get_bstr(unsafe { c.CurrentName() });
-                let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
-                log::info!("  child[{}] {} class='{}' name='{}' frameworkId='{}'", idx, ct, class, name, fwid);
-                        
-                // 打印第一个子节点的子节点（检查 WRY_WEBVIEW 的内部结构）                
-                if idx == 0 {
-                    log::info!("  WRY_WEBVIEW's children:");
-                    let mut sub_child = unsafe { walker.GetFirstChildElement(&c).ok() };
-                    let mut sub_idx = 0;
-                    while let Some(sc) = sub_child {
-                        let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };                        
-                        let sub_class = get_bstr(unsafe { sc.CurrentClassName() });
-                        let sub_name = get_bstr(unsafe { sc.CurrentName() });
-                        let sub_fwid = get_bstr(unsafe { sc.CurrentFrameworkId() });
-                        log::info!("    sub[{}] {} class='{}' name='{}' frameworkId='{}'", sub_idx, sub_ct, sub_class, sub_name, sub_fwid);
-                        sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };                        
-                        sub_idx += 1;
-                        if sub_idx > 5 { break; }
-                    }
-                }
-                        
-                child = unsafe { walker.GetNextSiblingElement(&c).ok() };                
-                idx += 1;
-                if idx > 10 { break; } // 最多打印10个
-            }
-        }
-                
-        // Debug: 查找目标元素的父节点并打印其子节点的 ClassName
-        // 用于检查 predicate 匹配失败的原因
-        log::info!("[XPath Validation] Debug: searching for parent group nodes...");
-        
-        // Stage 2: Search elements from search_root with detailed tracking
-        
-        let (results, segments) = match find_by_xpath_detailed(&auto, &search_root, element_xpath) {
-            Ok((results, segments)) => (results, segments),
-            Err(e) => {
-                return DetailedValidationResult {
-                    overall: ValidationResult::Error(e.to_string()),
                     segments: vec![],
                     layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
@@ -744,6 +792,7 @@ pub mod windows_impl {
     /// Returns true if successful, false if window not found or activation failed.
     /// 
     /// Uses UI Automation SetFocus() to activate the window element.
+    /// When multiple windows match the selector, activates the first one.
     pub fn activate_window_by_selector(window_selector: &str) -> bool {
         debug!("Activating window: {}", window_selector);
         
@@ -752,8 +801,9 @@ pub mod windows_impl {
             Err(_) => return false,
         };
 
-        // Find the window element
-        let window_element = match find_window_by_selector(&auto, window_selector) {
+        // Find the window element(s)
+        let windows = find_window_by_selector(&auto, window_selector);
+        let window_element = match windows.first() {
             Some(w) => w,
             None => {
                 error!("Window not found for activation: {}", window_selector);
@@ -769,6 +819,7 @@ pub mod windows_impl {
 
     /// Activate window and set focus to a specific element.
     /// First activates the window, then focuses the element.
+    /// When multiple windows match the selector, tries each until one succeeds.
     pub fn activate_and_focus_element(window_selector: &str, xpath: &str) -> bool {
         debug!("Activating window and focusing element: {} / {}", window_selector, xpath);
         
@@ -777,57 +828,76 @@ pub mod windows_impl {
             Err(_) => return false,
         };
 
-        // Find and activate the window
-        let window_element = match find_window_by_selector(&auto, window_selector) {
-            Some(w) => w,
-            None => return false,
-        };
-
-        // Activate window via SetFocus
-        unsafe {
-            if window_element.SetFocus().is_err() {
-                return false;
-            }
+        // Find all matching windows and try each
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return false;
         }
-        
-        // Small delay for window activation
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        
-        // Find target element using find_by_xpath_detailed
-        match find_by_xpath_detailed(&auto, &window_element, xpath) {
-            Ok((elements, _)) if !elements.is_empty() => {
-                // Focus the first matching element
-                unsafe {
-                    elements[0].SetFocus().ok().is_some()
+
+        for window_element in &windows {
+            // Activate window via SetFocus
+            if unsafe { window_element.SetFocus() }.is_err() {
+                continue;
+            }
+            
+            // Small delay for window activation
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            
+            // Find target element using find_by_xpath_detailed
+            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window_element, xpath) {
+                if !elements.is_empty() {
+                    // Focus the first matching element
+                    if unsafe { elements[0].SetFocus() }.ok().is_some() {
+                        return true;
+                    }
                 }
             }
-            _ => false,
         }
+        
+        false
     }
 
 
-    /// Find target window by parsing window selector XPath.
-    /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
+    /// Find target windows by parsing window selector XPath.
+    /// Example: "Window[@Name='微信' and @ClassName='mmui::MainWindow' and @ProcessName='Weixin']"
+    /// Returns all matching windows (for multi-process scenario, try XPath on each).
     fn find_window_by_selector(
         auto: &IUIAutomation,
         window_selector: &str,
-    ) -> Option<IUIAutomationElement> {
+    ) -> Vec<IUIAutomationElement> {
         use windows::Win32::UI::Accessibility::*;
         
         // Parse window selector to extract conditions
-        let (expected_name, expected_class) = parse_window_selector(window_selector);
+        let (expected_name, expected_class, expected_process_name) = parse_window_selector(window_selector);
         
-        let desktop = unsafe { auto.GetRootElement().ok()? };
-        let condition = unsafe { auto.CreateTrueCondition().ok()? };
-        let windows = unsafe { desktop.FindAll(TreeScope_Children, &condition).ok()? };
+        let desktop = match unsafe { auto.GetRootElement() } {
+            Ok(d) => d,
+            Err(_) => return vec![],
+        };
+        let condition = match unsafe { auto.CreateTrueCondition() } {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let windows = match unsafe { desktop.FindAll(TreeScope_Children, &condition) } {
+            Ok(w) => w,
+            Err(_) => return vec![],
+        };
         
-        let count = unsafe { windows.Length().ok()? };
+        let count = match unsafe { windows.Length() } {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
         
         // 支持多种窗口类型：Window, Pane, Document 等
         let valid_window_types = ["Window", "Pane", "Document", "Application"];
         
+        let mut matched_windows = Vec::new();
+        
         for i in 0..count {
-            let win = unsafe { windows.GetElement(i).ok()? };
+            let win = match unsafe { windows.GetElement(i) } {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
             let ct = unsafe {
                 win.CurrentControlType()
                     .map(control_type_name)
@@ -843,20 +913,28 @@ pub mod windows_impl {
                 let name_match = expected_name.as_ref().map_or(true, |n| &title == n);
                 let class_match = expected_class.as_ref().map_or(true, |c| &class == c);
                 
-                if name_match && class_match {
-                    return Some(win);
+                // Match by ProcessName: get PID -> get process name -> compare
+                let process_name_match = expected_process_name.as_ref().map_or(true, |pn| {
+                    let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
+                    let actual_pn = get_process_name_by_id(pid);
+                    actual_pn == *pn
+                });
+                
+                if name_match && class_match && process_name_match {
+                    matched_windows.push(win);
                 }
             }
         }
         
-        None
+        matched_windows
     }
 
-    /// Parse window selector to extract Name and ClassName conditions.
-    /// Returns (Option<Name>, Option<ClassName>)
-    fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>) {
+    /// Parse window selector to extract Name, ClassName, and ProcessName conditions.
+    /// Returns (Option<Name>, Option<ClassName>, Option<ProcessName>)
+    fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>, Option<String>) {
         let mut name = None;
         let mut class = None;
+        let mut process_name = None;
         
         // Extract content between [ and ]
         if let Some(start) = selector.find('[') {
@@ -878,10 +956,193 @@ pub mod windows_impl {
                         class = Some(predicates[start_pos..start_pos + end_pos].to_string());
                     }
                 }
+                
+                // Parse @ProcessName='value'
+                if let Some(pos) = predicates.find("@ProcessName='") {
+                    let start_pos = pos + 14;
+                    if let Some(end_pos) = predicates[start_pos..].find('\'') {
+                        process_name = Some(predicates[start_pos..start_pos + end_pos].to_string());
+                    }
+                }
             }
         }
         
-        (name, class)
+        (name, class, process_name)
+    }
+
+    /// Find the content root inside a window for XPath searching.
+    /// 
+    /// Some apps (e.g., Tauri/WRY) have intermediate panes between the window root
+    /// and the actual content (e.g., "Intermediate D3D Window" / "WRY_WEBVIEW" wrapping Chrome WebView).
+    /// This function detects such intermediate panes and returns the best search root.
+    /// 
+    /// Detection strategies (in priority order):
+    /// 1. Well-known WebView container class names (WRY_WEBVIEW, Chrome_WidgetWin_*, etc.)
+    /// 2. Deep framework transition search (Win32 → Chrome at any depth)
+    fn find_content_root(auto: &IUIAutomation, window: &IUIAutomationElement) -> Option<IUIAutomationElement> {
+        let walker = unsafe { auto.ControlViewWalker().ok() }?;
+        let window_fwid = get_bstr(unsafe { window.CurrentFrameworkId() });
+        
+        log::info!("[Content Root] Window FrameworkId='{}', scanning children...", window_fwid);
+        
+        // Well-known WebView/browser container class name prefixes
+        // These are panes that wrap web content in various frameworks
+        const WEBVIEW_CLASS_PREFIXES: &[&str] = &[
+            "WRY_WEBVIEW",           // Tauri/WRY apps
+            "Chrome_WidgetWin",      // Chromium-based (Electron, Edge, etc.)
+            "Intermediate D3D",      // D3D intermediate window (some WRY versions)
+            "WebView2",              // WebView2 apps
+            "CefBrowserWindow",      // CEF-based apps
+        ];
+        
+        let mut child = unsafe { walker.GetFirstChildElement(window).ok() };
+        let mut idx = 0;
+        while let Some(c) = child {
+            let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
+            let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+            let class = get_bstr(unsafe { c.CurrentClassName() });
+            
+            // Skip non-container types (TitleBar, etc.)
+            if ct != "Pane" && ct != "Window" && ct != "Group" {
+                child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                idx += 1;
+                continue;
+            }
+            
+            // Strategy 1: Match well-known WebView container class names
+            let is_webview_container = WEBVIEW_CLASS_PREFIXES.iter()
+                .any(|prefix| class.starts_with(prefix));
+            if is_webview_container {
+                log::info!("[Content Root] Found WebView container at child[{}]: class='{}' (FrameworkId='{}')", 
+                    idx, class, fwid);
+                return Some(c);
+            }
+            
+            // Strategy 2: Check for framework transition (including deep search)
+            // If this child or any descendant has a different FrameworkId, this is the content root
+            if !fwid.is_empty() && fwid != window_fwid {
+                log::info!("[Content Root] Found framework transition at child[{}]: '{}' → '{}' (class='{}')", 
+                    idx, window_fwid, fwid, class);
+                return Some(c);
+            }
+            
+            // Deep search: check if any descendant (up to 5 levels) has different FrameworkId
+            if has_framework_transition(&walker, &c, &window_fwid, 5) {
+                log::info!("[Content Root] Found deep framework transition under child[{}]: class='{}'", 
+                    idx, class);
+                return Some(c);
+            }
+            
+            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+            idx += 1;
+            if idx > 10 { break; }
+        }
+        
+        log::info!("[Content Root] No content root found");
+        None
+    }
+
+    /// Recursively check if any descendant of `elem` has a different FrameworkId.
+    /// Searches up to `max_depth` levels deep.
+    fn has_framework_transition(
+        walker: &IUIAutomationTreeWalker,
+        elem: &IUIAutomationElement,
+        parent_fwid: &str,
+        max_depth: usize,
+    ) -> bool {
+        if max_depth == 0 {
+            return false;
+        }
+        
+        let mut child = unsafe { walker.GetFirstChildElement(elem).ok() };
+        let mut count = 0;
+        
+        while let Some(c) = child {
+            let sub_fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+            
+            // Found a different FrameworkId → transition detected
+            if !sub_fwid.is_empty() && sub_fwid != parent_fwid {
+                return true;
+            }
+            
+            // Recurse deeper
+            if has_framework_transition(walker, &c, parent_fwid, max_depth - 1) {
+                return true;
+            }
+            
+            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+            count += 1;
+            if count > 10 { break; } // Limit breadth too
+        }
+        
+        false
+    }
+
+    /// Find elements by XPath with automatic fallback for intermediate layers.
+    /// 
+    /// Strategy (ordered by speed, fast → slow):
+    /// 1. Try /XPath from window root (direct child — fastest)
+    /// 2. Try /XPath from content root (WebView container — fast)
+    /// 3. Try //XPath from content root (descendant in WebView — medium)
+    /// 4. Try //XPath from window root (descendant in full window — slowest)
+    fn find_by_xpath_with_fallback(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        // Step 1: Try from window root
+        let (results, segments) = find_by_xpath_detailed(auto, window, xpath)?;
+        if !results.is_empty() {
+            return Ok((results, segments));
+        }
+        
+        log::info!("[XPath Fallback] Window root search returned 0, trying fallbacks...");
+        
+        // Compute descendant XPath once (used in steps 3 & 4)
+        let descendant_xpath = if xpath.starts_with('/') && !xpath.starts_with("//") {
+            Some(format!("/{}", xpath)) // /xpath → //xpath
+        } else {
+            None
+        };
+        
+        // Step 2: Find content root and try /XPath (direct child from content root)
+        if let Some(content_root) = find_content_root(auto, window) {
+            // Step 2a: Try direct child search from content root
+            log::info!("[XPath Fallback] Step 2a: Trying /XPath from content root");
+            if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath) {
+                if !r2.is_empty() {
+                    log::info!("[XPath Fallback] ✓ Step 2a: Found {} results from content root (direct)", r2.len());
+                    return Ok((r2, s2));
+                }
+            }
+            
+            // Step 2b: Try descendant search from content root
+            // This handles extra intermediate layers between content root and target
+            // (e.g., WRY_WEBVIEW → Chrome_WidgetWin_1 → BrowserRootView)
+            if let Some(ref desc_xpath) = descendant_xpath {
+                log::info!("[XPath Fallback] Step 2b: Trying //XPath from content root");
+                if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, desc_xpath) {
+                    if !r3.is_empty() {
+                        log::info!("[XPath Fallback] ✓ Step 2b: Found {} results from content root (descendant)", r3.len());
+                        return Ok((r3, s3));
+                    }
+                }
+            }
+        }
+        
+        // Step 3: Try descendant search from window root (slowest, last resort)
+        if let Some(ref desc_xpath) = descendant_xpath {
+            log::info!("[XPath Fallback] Step 3: Trying //XPath from window root");
+            if let Ok((r4, s4)) = find_by_xpath_detailed(auto, window, desc_xpath) {
+                if !r4.is_empty() {
+                    log::info!("[XPath Fallback] ✓ Step 3: Found {} results from window root (descendant)", r4.len());
+                    return Ok((r4, s4));
+                }
+            }
+        }
+        
+        log::info!("[XPath Fallback] All fallbacks exhausted, returning empty results");
+        Ok((results, segments))
     }
 
     /// Find elements by XPath with detailed per-segment validation results.
@@ -953,6 +1214,7 @@ pub mod windows_impl {
 
     /// Find all matching elements and return their detailed info
     /// Used for findAll API
+    /// When multiple windows match the selector, tries each until one succeeds.
     pub fn find_all_elements_detailed(
         window_selector: &str,
         element_xpath: &str,
@@ -961,51 +1223,60 @@ pub mod windows_impl {
         use crate::api::types::{ElementInfo, Rect, Point};
         use rand::Rng;
         
-        let auto = get_automation().ok().unwrap();
-        let window_element = find_window_by_selector(&auto, window_selector);
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+        let windows = find_window_by_selector(&auto, window_selector);
         
-        if window_element.is_none() {
+        if windows.is_empty() {
             return vec![];
         }
         
-        let window = window_element.unwrap();
-        let (elements, _) = match find_by_xpath_detailed(&auto, &window, element_xpath) {
-            Ok(result) => result,
-            Err(_) => return vec![],
-        };
-        
-        let mut rng = rand::thread_rng();
-        
-        elements.iter().filter_map(|elem| {
-            let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
-            if rect.is_none() {
-                return None;
-            }
-            let r = rect.unwrap();
-            let api_rect = Rect {
-                x: r.left,
-                y: r.top,
-                width: r.right - r.left,
-                height: r.bottom - r.top,
+        // Try each matching window until we find elements
+        for window in &windows {
+            let (elements, _) = match find_by_xpath_with_fallback(&auto, window, element_xpath) {
+                Ok(result) => result,
+                Err(_) => continue,
             };
-            let center = api_rect.center();
             
-            // Calculate random center
-            let half_range_w = api_rect.width as f32 * random_range / 2.0;
-            let half_range_h = api_rect.height as f32 * random_range / 2.0;
-            let offset_x = rng.gen_range(-half_range_w..half_range_w) as i32;
-            let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
-            let center_random = Point::new(center.x + offset_x, center.y + offset_y);
-            
-            Some(ElementInfo {
-                rect: api_rect,
-                center,
-                center_random,
-                control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                name: get_bstr(unsafe { elem.CurrentName() }),
-                is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
-            })
-        }).collect()
+            if !elements.is_empty() {
+                let mut rng = rand::thread_rng();
+                
+                return elements.iter().filter_map(|elem| {
+                    let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
+                    if rect.is_none() {
+                        return None;
+                    }
+                    let r = rect.unwrap();
+                    let api_rect = Rect {
+                        x: r.left,
+                        y: r.top,
+                        width: r.right - r.left,
+                        height: r.bottom - r.top,
+                    };
+                    let center = api_rect.center();
+                    
+                    // Calculate random center
+                    let half_range_w = api_rect.width as f32 * random_range / 2.0;
+                    let half_range_h = api_rect.height as f32 * random_range / 2.0;
+                    let offset_x = rng.gen_range(-half_range_w..half_range_w) as i32;
+                    let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
+                    let center_random = Point::new(center.x + offset_x, center.y + offset_y);
+                    
+                    Some(ElementInfo {
+                        rect: api_rect,
+                        center,
+                        center_random,
+                        control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                        name: get_bstr(unsafe { elem.CurrentName() }),
+                        is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+                    })
+                }).collect();
+            }
+        }
+        
+        vec![]
     }
 }
 
