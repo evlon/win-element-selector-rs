@@ -30,7 +30,7 @@ async function main() {
 
         // 3. 流式调用 - 基础示例
         console.log('3. 流式调用 - 基础示例...');
-        await sdk.chain()
+        await sdk.flow()
             .humanize()                     // 开启拟人化
             .window({
                 // title: notepad.title,
@@ -46,7 +46,7 @@ async function main() {
 
         // 4. 流式调用 - 性能监控
         console.log('4. 性能监控示例...');
-        const chain = sdk.chain()
+        const chain = sdk.flow()
             .profile()                      // 开启性能监控
             .window({
                 // title: notepad.title,
@@ -65,7 +65,7 @@ async function main() {
 
         // 5. 元素信息查询
         console.log('5. 元素信息查询...');
-        const info = await sdk.chain()
+        const info = await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,
@@ -84,7 +84,7 @@ async function main() {
 
         // 6. 等待元素出现
         console.log('6. 等待元素示例...');
-        const elem = await sdk.chain()
+        const elem = await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,
@@ -96,7 +96,7 @@ async function main() {
 
         // 7. 快捷键示例
         console.log('7. 快捷键示例...');
-        await sdk.chain()
+        await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,
@@ -113,7 +113,7 @@ async function main() {
 
         // 8. 断言示例
         console.log('8. 断言示例...');
-        await sdk.chain()
+        await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,
@@ -121,7 +121,7 @@ async function main() {
             })
             .assertExists('//Document');    // 断言元素存在
         
-        await sdk.chain()
+        await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,
@@ -133,7 +133,7 @@ async function main() {
 
         // 9. 数据提取示例
         console.log('9. 数据提取示例...');
-        const items = await sdk.chain()
+        const items = await sdk.flow()
             .window({
                 // title: notepad.title,
                 className: notepad.className,

@@ -2,7 +2,7 @@
 // Element Selector SDK - 流式 XPath 自动化
 
 import { HttpClient } from './client';
-import { FluentChain, ElementInfo, ProfileStats } from './v2/fluent-chain';
+import { Chain, ElementInfo, ProfileStats } from './chain';
 import { SDKConfig, DEFAULTS, WindowSelector } from './types';
 import { buildWindowSelector } from './utils';
 
@@ -21,7 +21,7 @@ import { buildWindowSelector } from './utils';
  * const sdk = new SDK();
  * 
  * // 基础用法
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
  *     .click()
@@ -29,7 +29,7 @@ import { buildWindowSelector } from './utils';
  *     .run();
  * 
  * // 拟人化
- * await sdk.chain()
+ * await sdk.flow()
  *     .humanize({ speed: 'slow' })
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
@@ -38,15 +38,15 @@ import { buildWindowSelector } from './utils';
  *     .run();
  * 
  * // 等待元素
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("Chrome")
  *     .waitFor("//Button[@Name='登录']", { timeout: 10000 })
  *     .click()
  *     .run();
  * 
  * // 数据提取
- * const items = await sdk.chain().window("微信").findAll("//ListItem");
- * const texts = await sdk.chain().window("微信").extractList("//ListItem");
+ * const items = await sdk.flow().window("微信").findAll("//ListItem");
+ * const texts = await sdk.flow().window("微信").extractList("//ListItem");
  */
 export class SDK {
     private client: HttpClient;
@@ -61,22 +61,22 @@ export class SDK {
     /**
      * 创建流式链式调用
      */
-    chain(): FluentChain {
-        return new FluentChain(this.client);
+    flow(): Chain {
+        return new Chain(this.client);
     }
     
     /**
      * 快捷方式：开启拟人化
      */
-    humanize(options?: { speed?: 'slow' | 'normal' | 'fast' }): FluentChain {
-        return this.chain().humanize(options);
+    humanize(options?: { speed?: 'slow' | 'normal' | 'fast' }): Chain {
+        return this.flow().humanize(options);
     }
     
     /**
      * 快捷方式：指定窗口
      */
-    window(selector: string | WindowSelector): FluentChain {
-        return this.chain().window(selector);
+    window(selector: string | WindowSelector): Chain {
+        return this.flow().window(selector);
     }
     
     /**
@@ -99,10 +99,10 @@ export class SDK {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // 类导出（值）
-export { FluentChain } from './v2/fluent-chain';
+export { Chain } from './chain';
 
 // 类型导出
-export type { ElementInfo, ProfileStats } from './v2/fluent-chain';
+export type { ElementInfo, ProfileStats } from './chain';
 
 export { DEFAULTS } from './types';
 export type {

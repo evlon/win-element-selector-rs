@@ -26,7 +26,7 @@ async function main() {
         }
 
         console.log('3. 切换到元宝窗口...');
-        await sdk.chain()
+        await sdk.flow()
             .window({
                 title: yuanbaoWindow.title,
                 processName: yuanbaoWindow.processName,

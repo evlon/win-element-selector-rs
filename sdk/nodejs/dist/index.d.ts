@@ -1,4 +1,4 @@
-import { FluentChain } from './v2/fluent-chain';
+import { Chain } from './chain';
 import { SDKConfig, WindowSelector } from './types';
 /**
  * Element Selector SDK
@@ -11,7 +11,7 @@ import { SDKConfig, WindowSelector } from './types';
  * const sdk = new SDK();
  *
  * // 基础用法
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
  *     .click()
@@ -19,7 +19,7 @@ import { SDKConfig, WindowSelector } from './types';
  *     .run();
  *
  * // 拟人化
- * await sdk.chain()
+ * await sdk.flow()
  *     .humanize({ speed: 'slow' })
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
@@ -28,15 +28,15 @@ import { SDKConfig, WindowSelector } from './types';
  *     .run();
  *
  * // 等待元素
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("Chrome")
  *     .waitFor("//Button[@Name='登录']", { timeout: 10000 })
  *     .click()
  *     .run();
  *
  * // 数据提取
- * const items = await sdk.chain().window("微信").findAll("//ListItem");
- * const texts = await sdk.chain().window("微信").extractList("//ListItem");
+ * const items = await sdk.flow().window("微信").findAll("//ListItem");
+ * const texts = await sdk.flow().window("微信").extractList("//ListItem");
  */
 export declare class SDK {
     private client;
@@ -44,17 +44,17 @@ export declare class SDK {
     /**
      * 创建流式链式调用
      */
-    chain(): FluentChain;
+    flow(): Chain;
     /**
      * 快捷方式：开启拟人化
      */
     humanize(options?: {
         speed?: 'slow' | 'normal' | 'fast';
-    }): FluentChain;
+    }): Chain;
     /**
      * 快捷方式：指定窗口
      */
-    window(selector: string | WindowSelector): FluentChain;
+    window(selector: string | WindowSelector): Chain;
     /**
      * 健康检查
      */
@@ -64,8 +64,8 @@ export declare class SDK {
      */
     listWindows(): Promise<import("./types").WindowInfo[]>;
 }
-export { FluentChain } from './v2/fluent-chain';
-export type { ElementInfo, ProfileStats } from './v2/fluent-chain';
+export { Chain } from './chain';
+export type { ElementInfo, ProfileStats } from './chain';
 export { DEFAULTS } from './types';
 export type { SDKConfig, WindowSelector, WindowInfo, Point, Rect, } from './types';
 export { buildWindowSelector } from './utils';

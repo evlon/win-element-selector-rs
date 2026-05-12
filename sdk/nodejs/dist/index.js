@@ -2,9 +2,9 @@
 // sdk/nodejs/src/index.ts
 // Element Selector SDK - 流式 XPath 自动化
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.buildWindowSelector = exports.DEFAULTS = exports.FluentChain = exports.SDK = void 0;
+exports.buildWindowSelector = exports.DEFAULTS = exports.Chain = exports.SDK = void 0;
 const client_1 = require("./client");
-const fluent_chain_1 = require("./v2/fluent-chain");
+const chain_1 = require("./chain");
 const types_1 = require("./types");
 // ═══════════════════════════════════════════════════════════════════════════════
 // SDK 入口
@@ -20,7 +20,7 @@ const types_1 = require("./types");
  * const sdk = new SDK();
  *
  * // 基础用法
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
  *     .click()
@@ -28,7 +28,7 @@ const types_1 = require("./types");
  *     .run();
  *
  * // 拟人化
- * await sdk.chain()
+ * await sdk.flow()
  *     .humanize({ speed: 'slow' })
  *     .window("微信")
  *     .find("//Edit[@Name='输入']")
@@ -37,15 +37,15 @@ const types_1 = require("./types");
  *     .run();
  *
  * // 等待元素
- * await sdk.chain()
+ * await sdk.flow()
  *     .window("Chrome")
  *     .waitFor("//Button[@Name='登录']", { timeout: 10000 })
  *     .click()
  *     .run();
  *
  * // 数据提取
- * const items = await sdk.chain().window("微信").findAll("//ListItem");
- * const texts = await sdk.chain().window("微信").extractList("//ListItem");
+ * const items = await sdk.flow().window("微信").findAll("//ListItem");
+ * const texts = await sdk.flow().window("微信").extractList("//ListItem");
  */
 class SDK {
     constructor(config) {
@@ -57,20 +57,20 @@ class SDK {
     /**
      * 创建流式链式调用
      */
-    chain() {
-        return new fluent_chain_1.FluentChain(this.client);
+    flow() {
+        return new chain_1.Chain(this.client);
     }
     /**
      * 快捷方式：开启拟人化
      */
     humanize(options) {
-        return this.chain().humanize(options);
+        return this.flow().humanize(options);
     }
     /**
      * 快捷方式：指定窗口
      */
     window(selector) {
-        return this.chain().window(selector);
+        return this.flow().window(selector);
     }
     /**
      * 健康检查
@@ -90,8 +90,8 @@ exports.SDK = SDK;
 // 导出
 // ═══════════════════════════════════════════════════════════════════════════════
 // 类导出（值）
-var fluent_chain_2 = require("./v2/fluent-chain");
-Object.defineProperty(exports, "FluentChain", { enumerable: true, get: function () { return fluent_chain_2.FluentChain; } });
+var chain_2 = require("./chain");
+Object.defineProperty(exports, "Chain", { enumerable: true, get: function () { return chain_2.Chain; } });
 var types_2 = require("./types");
 Object.defineProperty(exports, "DEFAULTS", { enumerable: true, get: function () { return types_2.DEFAULTS; } });
 // 工具导出

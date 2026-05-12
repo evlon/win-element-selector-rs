@@ -1,4 +1,4 @@
-// sdk/nodejs/src/v2/screenshot.ts
+// sdk/nodejs/src/screenshot.ts
 // 截图管理模块
 
 import * as fs from 'fs';

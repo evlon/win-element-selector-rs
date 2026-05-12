@@ -27,7 +27,7 @@ async function main() {
 
     // 2. 测试流式链式调用 - 打字
     console.log('2. 测试流式链式调用...');
-    const stats = await sdk.chain()
+    const stats = await sdk.flow()
         .profile()                      // 开启性能监控
         .humanize({ speed: 'fast' })    // 快速拟人化
         .debug()                        // 调试日志
@@ -51,7 +51,7 @@ async function main() {
 
     // 3. 测试等待元素
     console.log('3. 测试 waitFor...');
-    const elem = await sdk.chain()
+    const elem = await sdk.flow()
         .window(winSelector)
         .waitFor('//Document', { timeout: 5000 });
     console.log(`找到元素: ${elem.name}`);
@@ -59,15 +59,15 @@ async function main() {
 
     // 4. 测试断言
     console.log('4. 测试断言...');
-    await sdk.chain().window(winSelector).assertExists('//Document');
-    await sdk.chain().window(winSelector).assertEnabled('//Document');
-    await sdk.chain().window(winSelector).assertVisible('//Document');
+    await sdk.flow().window(winSelector).assertExists('//Document');
+    await sdk.flow().window(winSelector).assertEnabled('//Document');
+    await sdk.flow().window(winSelector).assertVisible('//Document');
     console.log('断言通过！');
     console.log();
 
     // 5. 测试元素信息查询
     console.log('5. 测试元素信息查询...');
-    const info = await sdk.chain()
+    const info = await sdk.flow()
         .window(winSelector)
         .find('//Document')
         .inspect();
@@ -84,16 +84,16 @@ async function main() {
 
     // 6. 测试条件判断
     console.log('6. 测试条件判断...');
-    const exists = await sdk.chain().window(winSelector).exists('//Document');
+    const exists = await sdk.flow().window(winSelector).exists('//Document');
     console.log(`Document 存在: ${exists}`);
     
-    const notExists = await sdk.chain().window(winSelector).exists('//Button[@Name="不存在"]');
+    const notExists = await sdk.flow().window(winSelector).exists('//Button[@Name="不存在"]');
     console.log(`不存在按钮: ${notExists}`);
     console.log();
 
     // 7. 测试重试
     console.log('7. 测试重试机制...');
-    await sdk.chain()
+    await sdk.flow()
         .retry(3, 1000)                  // 失败重试3次，间隔1秒
         .window(winSelector)
         .find('//Document')
@@ -103,7 +103,7 @@ async function main() {
 
     // 8. 清空内容
     console.log('8. 清空内容...');
-    await sdk.chain()
+    await sdk.flow()
         .window(winSelector)
         .find('//Document')
         .click()

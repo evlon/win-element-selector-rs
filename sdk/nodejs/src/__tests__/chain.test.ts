@@ -1,15 +1,15 @@
-// sdk/nodejs/src/v2/__tests__/fluent-chain.test.ts
-// FluentChain 单元测试
+// sdk/nodejs/src/__tests__/chain.test.ts
+// Chain 单元测试
 
-import { FluentChain, ElementInfo } from '../fluent-chain';
-import { HttpClient } from '../../client';
+import { Chain, ElementInfo } from '../chain';
+import { HttpClient } from '../client';
 
 // Mock HttpClient
-jest.mock('../../client');
+jest.mock('../client');
 
-describe('FluentChain', () => {
+describe('Chain', () => {
     let mockClient: jest.Mocked<HttpClient>;
-    let chain: FluentChain;
+    let chain: Chain;
 
     beforeEach(() => {
         mockClient = {
@@ -19,7 +19,7 @@ describe('FluentChain', () => {
             typeText: jest.fn(),
             listWindows: jest.fn(),
         } as any;
-        chain = new FluentChain(mockClient);
+        chain = new Chain(mockClient);
     });
 
     describe('链式方法', () => {

@@ -48,14 +48,14 @@ describe('Integration Tests', () => {
     });
 
     // 链式调用测试
-    describe('FluentChain', () => {
+    describe('Chain', () => {
         test('should create chain', () => {
-            const chain = sdk.chain();
+            const chain = sdk.flow();
             expect(chain).toBeDefined();
         });
 
         test('should chain methods', () => {
-            const chain = sdk.chain()
+            const chain = sdk.flow()
                 .humanize()
                 .window({ title: 'test' })
                 .find('//Button')

@@ -16,7 +16,7 @@ import { SDK } from 'element-selector-sdk';
 const sdk = new SDK();
 
 // 流式链式调用
-await sdk.chain()
+await sdk.flow()
     .humanize()                     // 开启拟人化
     .window('微信')                  // 激活窗口
     .find('//Edit[@Name="输入"]')    // 找不到自动截图退出
@@ -31,13 +31,13 @@ await sdk.chain()
 
 | 方法 | 说明 |
 |------|------|
-| `chain()` | 创建流式链式调用 |
+| `flow()` | 创建自动化工作流 |
 | `humanize(options?)` | 快捷方式：开启拟人化 |
 | `window(selector)` | 快捷方式：指定窗口 |
 | `health()` | 健康检查 |
 | `listWindows()` | 获取窗口列表 |
 
-### FluentChain 流式链
+### Chain 链式构建器
 
 #### 初始化
 
@@ -122,7 +122,7 @@ await sdk.chain()
 ### 基础自动化
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .humanize()
     .window({ title: '微信', className: 'mmui::MainWindow' })
     .find('//Edit[@Name="输入"]')
@@ -137,7 +137,7 @@ await sdk.chain()
 ### 等待加载
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .window('Chrome')
     .waitFor('//Button[@Name="登录"]', { timeout: 10000 })
     .click()
@@ -148,7 +148,7 @@ await sdk.chain()
 ### 快捷键操作
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .window('Excel')
     .find('//Cell[@Name="A1"]')
     .click()
@@ -162,12 +162,12 @@ await sdk.chain()
 
 ```typescript
 // 提取列表项
-const items = await sdk.chain()
+const items = await sdk.flow()
     .window('微信')
     .findAll('//ListItem');
 
 // 提取属性
-const data = await sdk.chain()
+const data = await sdk.flow()
     .window('Excel')
     .extract('//Cell', ['name', 'value', 'rect']);
 ```
@@ -175,7 +175,7 @@ const data = await sdk.chain()
 ### 性能监控
 
 ```typescript
-const stats = await sdk.chain()
+const stats = await sdk.flow()
     .profile()
     .humanize()
     .window('微信')
@@ -191,7 +191,7 @@ console.log(`步骤: ${stats.steps}`);
 ### 断言验证
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .window('微信')
     .assertExists('//Edit[@Name="输入"]')
     .assertEnabled('//Button[@Name="发送"]')
@@ -201,7 +201,7 @@ await sdk.chain()
 ### 空闲移动 + 自动化
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .window('微信')
     .idle({ xpath: '//Pane[@ClassName="ChatView"]', speed: 'normal' })
     .find('//Edit[@Name="输入"]')
@@ -214,7 +214,7 @@ await sdk.chain()
 ### 重试机制
 
 ```typescript
-await sdk.chain()
+await sdk.flow()
     .retry(3, 2000)                      // 失败重试3次，间隔2秒
     .window('Chrome')
     .find('//Button[@Name="提交"]')

@@ -32,7 +32,7 @@ async function main() {
 
     // 3. 查找所有 Edit 元素
     console.log('2. 查找 Edit 元素...');
-    const edits = await sdk.chain().window(winSelector).findAll('//Edit');
+    const edits = await sdk.flow().window(winSelector).findAll('//Edit');
     console.log(`找到 ${edits.length} 个 Edit 元素`);
     edits.forEach(e => {
         console.log(`  - ${e.name} (${e.controlType})`);
@@ -42,7 +42,7 @@ async function main() {
 
     // 4. 查找 Document 元素
     console.log('3. 查找 Document 元素...');
-    const docs = await sdk.chain().window(winSelector).findAll('//Document');
+    const docs = await sdk.flow().window(winSelector).findAll('//Document');
     console.log(`找到 ${docs.length} 个 Document 元素`);
     docs.forEach(e => {
         console.log(`  - ${e.name} (${e.controlType})`);
@@ -52,7 +52,7 @@ async function main() {
 
     // 5. 查找所有 Button
     console.log('4. 查找 Button 元素...');
-    const buttons = await sdk.chain().window(winSelector).findAll('//Button');
+    const buttons = await sdk.flow().window(winSelector).findAll('//Button');
     console.log(`找到 ${buttons.length} 个 Button 元素`);
     buttons.forEach(e => {
         console.log(`  - ${e.name}`);
@@ -61,7 +61,7 @@ async function main() {
 
     // 6. 查找所有 MenuItem
     console.log('5. 查找 MenuItem 元素...');
-    const menus = await sdk.chain().window(winSelector).findAll('//MenuItem');
+    const menus = await sdk.flow().window(winSelector).findAll('//MenuItem');
     console.log(`找到 ${menus.length} 个 MenuItem 元素`);
     menus.slice(0, 10).forEach(e => {
         console.log(`  - ${e.name}`);
@@ -70,7 +70,7 @@ async function main() {
 
     // 7. 获取单个元素
     console.log('6. 获取单个 Document 元素...');
-    const chain = sdk.chain().window(winSelector).find('//Document');
+    const chain = sdk.flow().window(winSelector).find('//Document');
     const info = await chain.inspect();
     if (info) {
         console.log('元素信息:');

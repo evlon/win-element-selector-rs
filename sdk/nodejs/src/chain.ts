@@ -1,9 +1,9 @@
-// sdk/nodejs/src/v2/fluent-chain.ts
-// SDK V2 流式链式调用核心实现
+// sdk/nodejs/src/chain.ts
+// SDK 流式链式调用核心实现
 
-import { HttpClient } from '../client';
-import { WindowSelector, DEFAULTS, Point, Rect, ElementInfo } from '../types';
-import { buildWindowSelector } from '../utils';
+import { HttpClient } from './client';
+import { WindowSelector, DEFAULTS, Point, Rect, ElementInfo } from './types';
+import { buildWindowSelector } from './utils';
 import { ScreenshotManager } from './screenshot';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -15,7 +15,7 @@ export interface ProfileStats {
 }
 
 // 使用 types.ts 中定义的 ElementInfo（类型导出）
-export type { ElementInfo } from '../types';
+export type { ElementInfo } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 链式操作动作定义
@@ -31,10 +31,10 @@ interface ChainAction {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FluentChain 类 - 流式链式调用
+// Chain 类 - 流式链式调用
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export class FluentChain {
+export class Chain {
     private client: HttpClient;
     private actions: ChainAction[] = [];
     private screenshotManager: ScreenshotManager;
