@@ -139,9 +139,18 @@ impl SelectorApp {
                             process_name: String::new(), // 无法从 hierarchy 获取
                         })
                     });
-                    let xpath_result = xpath::generate(&c.hierarchy, window_info.as_ref());
-                    let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
-                    (c.hierarchy, c.selected_node, xpath, xpath_result.window_selector, xpath_result.element_xpath, window_info)
+                    // 直接使用保存的 xpath_text，而不是重新生成
+                    // 因为用户可能已经做了智能优化（修改了 included 状态等）
+                    let xpath_text = c.xpath_text.clone();
+                    // 从保存的 xpath_text 中解析 window_selector 和 element_xpath
+                    let (window_selector, element_xpath) = if let Some(comma_pos) = xpath_text.find(", ") {
+                        (xpath_text[..comma_pos].to_string(), xpath_text[comma_pos + 2..].to_string())
+                    } else {
+                        // Fallback: 重新生成
+                        let xpath_result = xpath::generate(&c.hierarchy, window_info.as_ref());
+                        (xpath_result.window_selector, xpath_result.element_xpath)
+                    };
+                    (c.hierarchy, c.selected_node, xpath_text, window_selector, element_xpath, window_info)
                 }
                 None => {
                     info!("Failed to parse last_capture.json, using mock");
