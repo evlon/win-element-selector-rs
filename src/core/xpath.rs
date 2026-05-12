@@ -86,7 +86,9 @@ pub fn generate_simplified_elements(nodes: &[HierarchyNode]) -> String {
 }
 
 /// Generate element XPath from nodes after the Window node.
-/// Uses "/" for direct children, "//" when intermediate nodes are skipped.
+/// Uses `depth_from_window` to determine the correct prefix:
+/// - depth差值=1 → 父子关系，用 `/`
+/// - depth差值>1 → 跳过中间层，用 `//`
 fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
     if nodes.is_empty() {
         return String::new();
@@ -102,28 +104,27 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
     
     included.iter().enumerate().map(|(i, &node)| {
         if i == 0 {
-            // 第一个元素节点：使用 // 从窗口内部搜索
-            // 窗口内部结构可能复杂，// 更稳定
-            // 例如 Tauri 窗口的 WebView2 嵌入节点可能不在预期层级
-            // 先去掉为了速度，以后遇到复杂情况再优化
-            format!("/{}", node.xpath_segment())
-        } else {
-            // Check if we skipped any intermediate nodes
-            let prev_node = included[i - 1];
-            
-            // Find original indices in the nodes slice
-            let curr_idx = nodes.iter()
-                .position(|n| std::ptr::eq(n, node))
-                .unwrap();
-            let prev_idx = nodes.iter()
-                .position(|n| std::ptr::eq(n, prev_node))
-                .unwrap();
-            
-            // If indices are not consecutive, nodes were skipped → use //
-            if curr_idx > prev_idx + 1 {
-                format!("//{}", node.xpath_segment())
-            } else {
+            // 第一个元素节点：根据其 depth_from_window 判断前缀
+            // depth=0 表示是窗口节点本身（不应该出现在 element_nodes 中）
+            // depth=1 表示是窗口的直接子节点，用 `/`
+            // depth>1 表示中间有被跳过的层级，用 `//`
+            if node.depth_from_window <= 1 {
                 format!("/{}", node.xpath_segment())
+            } else {
+                format!("//{}", node.xpath_segment())
+            }
+        } else {
+            // 后续节点：比较与前一个节点的深度差
+            let prev_node = included[i - 1];
+            let depth_diff = node.depth_from_window.saturating_sub(prev_node.depth_from_window);
+            
+            // 根据深度差判断前缀
+            if depth_diff == 1 {
+                // 父子关系（相邻层级）：用 `/`
+                format!("/{}", node.xpath_segment())
+            } else {
+                // 跳过了中间层级：用 `//`
+                format!("//{}", node.xpath_segment())
             }
         }
     }).collect::<Vec<_>>().join("")

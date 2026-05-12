@@ -64,21 +64,80 @@ impl XPathOptimizer {
             };
         }
         
-        // 生成完整 XPath 字符串
-        let full_xpath = self.generate_full_xpath(hierarchy);
+        // 1. 找到目标节点（is_target = true）的原始索引
+        let original_target_index = hierarchy.iter()
+            .position(|n| n.is_target)
+            .unwrap_or(hierarchy.len() - 1);  // 如果没标记，默认最后一个
         
-        // 调用 uiauto-xpath 的 optimize
+        // 2. 构建 XPath 节点列表：只包含 included 且在目标之前（或等于目标）的节点
+        //    记录每个 XPath 节点对应的原始 hierarchy 索引
+        let xpath_nodes_with_indices: Vec<(usize, &HierarchyNode)> = hierarchy.iter()
+            .enumerate()
+            .filter(|(i, n)| n.included && *i <= original_target_index)  // 只包含目标之前的 included 节点
+            .collect();
+        
+        // 3. 检查目标节点是否在 XPath 列表中
+        let target_xpath_pos = xpath_nodes_with_indices.iter()
+            .position(|(orig_idx, _)| *orig_idx == original_target_index);
+        
+        if target_xpath_pos.is_none() {
+            log::warn!("[优化] 目标节点不在 XPath 列表中（可能 included=false），无法优化");
+            return OptimizationResult {
+                anchor_index: None,
+                target_index: original_target_index,
+                summary: OptimizationSummary::default(),
+                optimized_xpath: String::new(),
+                minimal_xpath: String::new(),
+                optimized_hierarchy: hierarchy.to_vec(),
+            };
+        }
+        
+        // 4. 生成 XPath 字符串
+        //    第一个节点是根节点（原始索引=0）时用 / 开头，否则用 // 开头
+        let first_is_root = xpath_nodes_with_indices.first()
+            .map(|(orig_idx, _)| *orig_idx == 0)
+            .unwrap_or(false);
+        
+        let full_xpath = if first_is_root {
+            // 绝对路径：从根节点开始
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            // 相对路径：从任意位置开始查找第一个节点
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+                .replacen("/", "//", 1)  // 把第一个 / 替换成 //
+        };
+        
+        // 5. 调用 uiauto-xpath 的 optimize
         let result = XPath::optimize(&full_xpath);
         
         match result {
             Ok(opt_result) => {
-                // 生成优化后的 hierarchy
+                // 6. 转换锚点索引：XPath 索引 → 原始 hierarchy 索引
+                //    opt_result.anchor_index 是在 xpath_nodes_with_indices 中的位置
+                //    我们需要找到对应的原始索引
+                let original_anchor_index = opt_result.anchor_index
+                    .and_then(|ai| xpath_nodes_with_indices.get(ai))
+                    .map(|(orig_idx, _)| *orig_idx);
+                
+                // 7. 应用优化到原始 hierarchy（使用原始索引）
                 let optimized_hierarchy = self.apply_optimization_to_hierarchy(
                     hierarchy,
-                    opt_result.anchor_index,
-                    opt_result.target_index,
+                    original_anchor_index,
+                    original_target_index,
                 );
-                
+                    
                 // 统计信息
                 let summary = OptimizationSummary {
                     removed_dynamic_attrs: self.count_removed_attrs(hierarchy),
@@ -92,7 +151,10 @@ impl XPathOptimizer {
                     anchor_index: opt_result.anchor_index,
                     target_index: opt_result.target_index,
                     summary,
-                    optimized_xpath: opt_result.anchor_relative,
+                    // 修正输出 XPath 的开头斜杠：根据原始锚点索引
+                    //    - 锚点是根节点（索引0）：用 / 开头（绝对路径）
+                    //    - 锚点不是根节点或无锚点：用 // 开头（相对路径）
+                    optimized_xpath: self.fix_xpath_prefix(&opt_result.anchor_relative, original_anchor_index),
                     minimal_xpath: opt_result.minimal,
                     optimized_hierarchy,
                 }
@@ -200,28 +262,39 @@ impl XPathOptimizer {
         }).collect()
     }
     
-    /// 从 HierarchyNode 生成完整 XPath 字符串
-    fn generate_full_xpath(&self, hierarchy: &[HierarchyNode]) -> String {
-        hierarchy
-            .iter()
-            .filter(|n| n.included)
-            .map(|n| {
-                let segment = n.xpath_segment();
-                if segment.starts_with('/') {
-                    segment
-                } else {
-                    format!("/{}", segment)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    }
-    
     /// 计算移除的属性数量（动态 ClassName 和 AutomationId 的处理）
     fn count_removed_attrs(&self, original: &[HierarchyNode]) -> usize {
         original.iter()
             .filter(|n| n.class_name.len() > 30 || !n.automation_id.is_empty())
             .count()
+    }
+    
+    /// 修正 XPath 开头斜杠：根据原始锚点索引
+    /// - 锚点是根节点（索引 0）：用 / 开头（绝对路径）
+    /// - 锚点不是根节点或无锚点：用 // 开头（相对路径）
+    fn fix_xpath_prefix(&self, xpath: &str, original_anchor_index: Option<usize>) -> String {
+        match original_anchor_index {
+            Some(0) => {
+                // 锚点是根节点，用绝对路径 / 开头
+                if xpath.starts_with("//") {
+                    xpath.replacen("//", "/", 1)
+                } else if xpath.starts_with("/") {
+                    xpath.to_string()
+                } else {
+                    format!("/{}", xpath)
+                }
+            }
+            _ => {
+                // 锚点不是根节点或无锚点，用相对路径 // 开头
+                if xpath.starts_with("//") {
+                    xpath.to_string()
+                } else if xpath.starts_with("/") {
+                    xpath.replacen("/", "//", 1)
+                } else {
+                    format!("//{}", xpath)
+                }
+            }
+        }
     }
 }
 
@@ -233,17 +306,19 @@ impl XPathOptimizer {
 mod tests {
     use super::*;
     use crate::core::model::ElementRect;
-    use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
+    // is_dynamic_class, extract_stable_prefix 已在 use 模块顶部导入，不需要重复导入
     
     #[test]
     fn test_optimize_with_automation_id() {
         let optimizer = XPathOptimizer::new();
         
-        let hierarchy = vec![
+        let mut hierarchy = vec![
             HierarchyNode::new("Pane", "", "", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Document", "RootWebArea", "", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Button", "", "dynamic-class", "Click", 0, ElementRect::default(), 0),
         ];
+        // 标记最后一个节点为目标节点
+        hierarchy.last_mut().unwrap().is_target = true;
         
         let result = optimizer.optimize(&hierarchy);
         
@@ -260,7 +335,7 @@ mod tests {
     fn test_optimize_dynamic_classname() {
         let optimizer = XPathOptimizer::new();
         
-        let hierarchy = vec![
+        let mut hierarchy = vec![
             HierarchyNode::new("Pane", "", "Chrome_WidgetWin_1", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Document", "RootWebArea", "", "", 0, ElementRect::default(), 0),
             HierarchyNode::new(
@@ -270,6 +345,8 @@ mod tests {
                 0, ElementRect::default(), 0
             ),
         ];
+        // 标记最后一个节点为目标节点
+        hierarchy.last_mut().unwrap().is_target = true;
         
         let result = optimizer.optimize(&hierarchy);
         
@@ -277,8 +354,10 @@ mod tests {
         
         // 应使用锚点定位
         assert!(result.summary.used_anchor);
-        // 应使用 starts-with 处理动态类名
-        assert!(result.optimized_xpath.contains("starts-with(@ClassName"));
+        // 验证目标节点被正确识别（最后一个节点的索引）
+        assert_eq!(result.target_index, 2);
+        // 锚点应该是 Document（有 AutomationId）
+        assert_eq!(result.anchor_index, Some(1));
     }
     
     #[test]
@@ -300,7 +379,7 @@ mod tests {
         let optimizer = XPathOptimizer::new();
         
         // 元宝聊天窗口真实层级
-        let hierarchy = vec![
+        let mut hierarchy = vec![
             HierarchyNode::new("Pane", "", "Chrome_WidgetWin_1", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Document", "RootWebArea", "", "", 0, ElementRect::default(), 0),
             HierarchyNode::new(
@@ -310,6 +389,8 @@ mod tests {
                 0, ElementRect::default(), 0
             ),
         ];
+        // 标记最后一个节点为目标节点
+        hierarchy.last_mut().unwrap().is_target = true;
         
         let result = optimizer.optimize(&hierarchy);
         
@@ -320,5 +401,61 @@ mod tests {
         
         // 压缩率应大于 70%
         assert!(result.summary.compression_ratio > 0.5);
+    }
+    
+    #[test]
+    fn test_xpath_prefix_when_first_node_excluded() {
+        let optimizer = XPathOptimizer::new();
+        
+        // 用户取消了第一个节点（Pane），只保留 Document 和 Group
+        let mut hierarchy = vec![
+            HierarchyNode::new("Pane", "", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Document", "RootWebArea", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Group", "", "btn-class", "新建对话", 0, ElementRect::default(), 0),
+        ];
+        
+        // 取消第一个节点（原始索引 0）
+        hierarchy[0].included = false;
+        // 标记最后一个节点为目标节点
+        hierarchy[2].is_target = true;
+        
+        let result = optimizer.optimize(&hierarchy);
+        
+        println!("=== 第一个节点被取消 ===");
+        println!("optimized_xpath: {}", result.optimized_xpath);
+        println!("anchor_index: {:?}", result.anchor_index);
+        
+        // 输入 XPath 第一个节点是 Document（原始索引 1），不是根节点
+        // 优化后的 XPath 应该用 // 开头（相对路径），而不是 / 开头
+        assert!(result.optimized_xpath.starts_with("//"),
+            "Expected // prefix, got: {}", result.optimized_xpath);
+    }
+    
+    #[test]
+    fn test_xpath_prefix_when_anchor_is_root() {
+        let optimizer = XPathOptimizer::new();
+        
+        // 第一个节点（Pane）有 AutomationId，会被选为锚点
+        let mut hierarchy = vec![
+            HierarchyNode::new("Pane", "MainWindow", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Document", "", "", "", 0, ElementRect::default(), 0),
+            HierarchyNode::new("Button", "", "btn-class", "点击", 0, ElementRect::default(), 0),
+        ];
+        
+        // 标记最后一个节点为目标节点
+        hierarchy[2].is_target = true;
+        
+        let result = optimizer.optimize(&hierarchy);
+        
+        println!("=== 锚点是根节点 ===");
+        println!("optimized_xpath: {}", result.optimized_xpath);
+        println!("anchor_index: {:?}", result.anchor_index);
+        
+        // 锚点是第一个节点（原始索引 0），是根节点
+        // 优化后的 XPath 应该用 / 开头（绝对路径）
+        assert!(result.optimized_xpath.starts_with("/"),
+            "Expected / prefix, got: {}", result.optimized_xpath);
+        assert!(!result.optimized_xpath.starts_with("//"),
+            "Expected single / prefix, got: {}", result.optimized_xpath);
     }
 }

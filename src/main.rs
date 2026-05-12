@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
                 let font_data = egui::FontData::from_static(include_bytes!(
                     "C:/Windows/Fonts/msyh.ttc"
                 ));
-                fonts.font_data.insert("msyh".to_owned(), font_data);
+                fonts.font_data.insert("msyh".to_owned(), std::sync::Arc::new(font_data));
                 
                 // Insert at the beginning of font families
                 for family in [

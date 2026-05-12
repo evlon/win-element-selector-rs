@@ -235,15 +235,73 @@ pub mod windows_impl {
 
         chain.reverse(); // root → target
 
+        // 验证并补充遗漏的中间节点
+        // GetParentElement 可能返回"逻辑父节点"而非"树结构父节点"，导致中间节点被跳过
+        // 我们需要验证：父节点的子节点列表是否包含当前节点
+        // 如果不包含，说明有遗漏，需要补充中间节点
+        let mut verified_chain: Vec<IUIAutomationElement> = Vec::new();
+        for (i, elem) in chain.iter().enumerate() {
+            verified_chain.push(elem.clone());
+            if i + 1 < chain.len() {
+                let parent = elem;
+                let child = &chain[i + 1];
+                // 检查 parent 的直接子节点是否包含 child
+                let child_found = unsafe {
+                    let mut found = false;
+                    let mut c = walker.GetFirstChildElement(parent).ok();
+                    while let Some(ref current_child) = c {
+                        if auto.CompareElements(current_child, child)
+                            .map(|b| b.as_bool())
+                            .unwrap_or(false) {
+                            found = true;
+                            break;
+                        }
+                        c = walker.GetNextSiblingElement(current_child).ok();
+                    }
+                    found
+                };
+                
+                if !child_found {
+                    // 子节点不在父节点的直接子节点列表中，说明有遗漏
+                    // 尾递归搜索：从 parent 开始向下查找 child，补充路径上的所有中间节点
+                    info!("[Capture] 发现遗漏的中间节点：父节点 {} 的子节点中不包含 {}", 
+                          unsafe { parent.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                          unsafe { child.CurrentControlType().map(control_type_name).unwrap_or_default() });
+                    
+                    // 搜索从 parent 到 child 的路径
+                    if let Some(intermediates) = find_path_to_element(&auto, &walker, parent, child) {
+                        for intermediate in intermediates {
+                            verified_chain.push(intermediate);
+                        }
+                    }
+                }
+            }
+        }
+        
+        chain = verified_chain;
+        
+        // 计算每个节点相对于窗口根的深度
+        // chain 结构：[Desktop, 顶层窗口, ..., target]
+        // 顶层窗口 = Desktop 的直接子节点（chain[1]）
+        // depth_from_window = chain_index - 1
+        let window_index = 1; // 顶层窗口始终在 chain[1]
+
         let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
-        for elem in &chain {
+        for (chain_idx, elem) in chain.iter().enumerate() {
             if let Some(node) = element_to_node(elem, &auto) {
+                // 计算真实深度：从窗口到该节点需要走多少步
+                // depth = chain_idx - window_index
+                // 例如：window_index=1，chain_idx=2 → depth=1（窗口的直接子节点）
+                let mut node = node;
+                node.depth_from_window = chain_idx.saturating_sub(window_index);
                 hierarchy.push(node);
             }
         }
 
         // Compute sibling index for the last element (target).
+        // Mark the last node as the target element for optimizer.
         if let Some(last) = hierarchy.last_mut() {
+            last.is_target = true;  // 标记为目标节点
             last.index = sibling_index(&target, &walker).unwrap_or(0);
             if last.index > 0 {
                 // Update the Index filter value.
@@ -339,6 +397,43 @@ pub mod windows_impl {
         }
         
         Some(node)
+    }
+
+    /// 从 parent 开始向下搜索 target，返回路径上的所有中间节点
+    /// 使用递归 DFS 搜索，找到目标后返回路径
+    fn find_path_to_element(
+        auto: &IUIAutomation,
+        walker: &IUIAutomationTreeWalker,
+        parent: &IUIAutomationElement,
+        target: &IUIAutomationElement,
+    ) -> Option<Vec<IUIAutomationElement>> {
+        // 直接检查 parent 的子节点是否包含 target
+        let mut child = unsafe { walker.GetFirstChildElement(parent).ok() };
+        
+        while let Some(ref c) = child {
+            let is_target = unsafe {
+                auto.CompareElements(c, target)
+                    .map(|b| b.as_bool())
+                    .unwrap_or(false)
+            };
+            
+            if is_target {
+                // target 是 parent 的直接子节点，不需要中间节点
+                return Some(Vec::new());
+            }
+            
+            // 递归搜索子节点
+            if let Some(path) = find_path_to_element(auto, walker, c, target) {
+                // 找到了！c 是路径上的第一个中间节点
+                let mut result = vec![c.clone()];
+                result.extend(path);
+                return Some(result);
+            }
+            
+            child = unsafe { walker.GetNextSiblingElement(c).ok() };
+        }
+        
+        None
     }
 
     /// 1-based index among same-type siblings under the parent.
@@ -728,7 +823,7 @@ pub mod windows_impl {
             if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
-                let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
+                let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
 
                 // Only include windows with non-empty title
                 if !title.is_empty() {
@@ -868,7 +963,7 @@ pub mod windows_impl {
         use windows::Win32::UI::Accessibility::*;
         
         // Parse window selector to extract conditions
-        let (expected_name, expected_class, expected_process_name) = parse_window_selector(window_selector);
+        let (expected_name, expected_class, expected_process) = parse_window_selector(window_selector);
         
         let desktop = match unsafe { auto.GetRootElement() } {
             Ok(d) => d,
@@ -908,19 +1003,15 @@ pub mod windows_impl {
             if valid_window_types.contains(&ct.as_str()) {
                 let title = get_bstr(unsafe { win.CurrentName() });
                 let class = get_bstr(unsafe { win.CurrentClassName() });
+                let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
+                let process_name = get_process_name_by_id(pid);
                 
                 // Match by parsed conditions
                 let name_match = expected_name.as_ref().map_or(true, |n| &title == n);
                 let class_match = expected_class.as_ref().map_or(true, |c| &class == c);
+                let process_match = expected_process.as_ref().map_or(true, |p| &process_name == p);
                 
-                // Match by ProcessName: get PID -> get process name -> compare
-                let process_name_match = expected_process_name.as_ref().map_or(true, |pn| {
-                    let pid = unsafe { win.CurrentProcessId().unwrap_or(0) as u32 };
-                    let actual_pn = get_process_name_by_id(pid);
-                    actual_pn == *pn
-                });
-                
-                if name_match && class_match && process_name_match {
+                if name_match && class_match && process_match {
                     matched_windows.push(win);
                 }
             }
