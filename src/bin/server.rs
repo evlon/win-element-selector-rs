@@ -13,6 +13,8 @@ use element_selector::api::{element, mouse, window, idle_motion, keyboard};
 /// Element Selector Server - Windows UI Automation HTTP 服务
 /// 
 /// 提供元素查找、鼠标控制、窗口列表等 API 接口
+/// 
+/// 调试日志：设置环境变量 RUST_LOG=debug 查看详细日志
 #[derive(Parser, Debug)]
 #[command(name = "element-selector-server")]
 #[command(version = "1.0.0")]
@@ -27,6 +29,8 @@ struct Args {
     port: u16,
 
     /// 详细日志级别 (可多次使用: -v, -vv, -vvv)
+    /// 
+    /// 提示：也可以使用环境变量 RUST_LOG=debug 启用详细日志
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 }
