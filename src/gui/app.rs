@@ -677,6 +677,15 @@ impl SelectorApp {
             self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
         }
 
+        // 确保 COM STA 已初始化（防止长时间运行后 COM 状态失效）
+        if let Err(e) = element_selector::core::uia::windows_impl::ensure_com_sta() {
+            info!("COM STA initialization failed before capture: {}", e);
+            self.status_msg = format!("COM 初始化失败: {}", e);
+            self.capture_state = CaptureState::Idle;
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+            return;
+        }
+
         let result = capture::capture_at(x, y);
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);

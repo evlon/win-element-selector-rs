@@ -31,8 +31,11 @@ async function main() {
         .find('//Document[@ControlType=\'Document\' and @AutomationId=\'RootWebArea\' and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'文档\']/Group[@ControlType=\'Group\' and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'chat_mainPage__wilLn\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'temp-dialogue-btn_temp-dialogue\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']')
         .wait(500)
         .click()
-        .wait(500)
-        .run();
+        .wait(1500)
+          .find('//Document[@ControlType=\'Document\' and @AutomationId=\'RootWebArea\' and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'文档\']/Group[@ControlType=\'Group\' and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'chat_mainPage__wilLn\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'chat_chat\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'index_v2_search\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and starts-with(@ClassName, \'chat-command-editor-specail\') and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']/Group[@ControlType=\'Group\' and @ClassName=\'ql-editor ql-blank\' and @FrameworkId=\'Chrome\' and @LocalizedControlType=\'组\']')
+        .click()
+        .type('测试')
+          .run();
 
         // console.log('3. 切换到元宝窗口...');
         // await sdk.flow()
