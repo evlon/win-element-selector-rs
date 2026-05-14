@@ -55,7 +55,7 @@ async function main() {
             })
             .find('//Document')
             .click()
-            .type('\n第二行内容')
+            .type('{ENTER}第二行内容')
             .wait(500);
         
         const stats = await chain.run() as ProfileStats;

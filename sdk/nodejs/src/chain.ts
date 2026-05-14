@@ -40,7 +40,9 @@ export class Chain {
     private screenshotManager: ScreenshotManager;
     
     // 当前状态
-    private currentWindowSelector: string | null = null;
+    private currentWindowSelector: string | null = null;  // XPath 格式的窗口选择器
+    private currentWindowObj: WindowSelector | null = null;  // 原始的 WindowSelector 对象
+    private currentXpath: string | null = null;  // 保存当前找到的元素的 xpath
     private currentElement: ElementInfo | null = null;
     private humanizeEnabled: boolean = false;
     private humanizeOptions: { speed?: 'slow' | 'normal' | 'fast' } = {};
@@ -97,6 +99,8 @@ export class Chain {
             ? selector 
             : buildWindowSelector(selector);
         this.currentWindowSelector = windowSelector;
+        // 保存原始的 WindowSelector 对象
+        this.currentWindowObj = typeof selector === 'string' ? null : selector;
         this.actions.push({ type: 'window', params: windowSelector });
         return this;
     }
@@ -808,6 +812,7 @@ export class Chain {
         // result.element 已检查不为 null
         const element = result.element!;
         this.currentElement = element;
+        this.currentXpath = xpath;  // 保存 xpath 供后续 click 使用
         this.log(`  → found: rect(${element.rect.x}, ${element.rect.y}, ${element.rect.width}x${element.rect.height})`);
     }
     
@@ -825,23 +830,33 @@ export class Chain {
     
     private async executeClick(mode: 'single' | 'double' | 'right' = 'single'): Promise<void> {
         if (!this.currentElement) throw new Error('必须先调用 find() 找到元素');
+        if (!this.currentWindowSelector) throw new Error('必须先调用 window() 激活窗口');
+        if (!this.currentXpath) throw new Error('未找到有效的 XPath');
+        
         const modeText = mode === 'single' ? 'click' : mode === 'double' ? 'doubleClick' : 'rightClick';
         this.log(`${modeText}()`);
         
-        const target = this.currentElement.centerRandom;
-        const duration = this.getHumanizedDuration();
+        // 使用保存的 WindowSelector 对象，如果没有则解析 XPath
+        const windowSelector: WindowSelector = this.currentWindowObj || this.parseWindowSelector(this.currentWindowSelector);
         
-        const result = await this.client.moveMouse(target, {
-            humanize: this.humanizeEnabled,
-            trajectory: DEFAULTS.move.trajectory,
-            duration,
+        // 调用后端的 click API（会自动移动鼠标并点击）
+        // humanize=true: 拟人化移动到目标位置后点击
+        // humanize=false: 直线移动到目标位置后点击
+        const result = await this.client.clickMouse({
+            window: windowSelector,
+            xpath: this.currentXpath,  // 传递保存的 xpath，让后端重新查找元素并获取坐标
+            options: {
+                humanize: this.humanizeEnabled,
+                randomRange: DEFAULTS.click.randomRange,
+            },
         });
         
         if (!result.success) {
             await this.failWithScreenshot(`${modeText} failed`, modeText);
             return;
         }
-        this.log(`  → clicked at (${target.x}, ${target.y}), ${result.durationMs}ms`);
+        
+        this.log(`  → clicked at (${result.clickPoint.x}, ${result.clickPoint.y})`);
     }
     
     private async executeType(text: string): Promise<void> {

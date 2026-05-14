@@ -60,6 +60,8 @@ struct Theme {
     confirm_off:     Color32,
     history_fg:      Color32,
     capture_border:  Color32,
+    code_bg:         Color32,
+    code_fg:         Color32,
 }
 
 impl Theme {
@@ -102,6 +104,8 @@ impl Theme {
                 confirm_off:     Color32::from_rgb(71,   85, 105),   // slate-600
                 history_fg:      Color32::from_rgb(148, 163, 184),   // slate-400
                 capture_border:  Color32::from_rgb(80,  65,  20),
+                code_bg:         Color32::from_rgb(30,  41,  59),    // slate-800
+                code_fg:         Color32::from_rgb(147, 197, 253),   // blue-300
             }
         } else {
             Self {
@@ -141,6 +145,8 @@ impl Theme {
                 confirm_off:     Color32::from_gray(160),
                 history_fg:      Color32::from_gray(150),
                 capture_border:  Color32::from_rgb(253, 230, 138),
+                code_bg:         Color32::from_rgb(243, 244, 246),   // gray-100
+                code_fg:         Color32::from_rgb(29,  78, 216),    // blue-700
             }
         }
     }
@@ -164,6 +170,20 @@ impl XPathSource {
     fn optimization_summary(&self) -> Option<&element_selector::core::OptimizationSummary> {
         if let XPathSource::Optimized(s) = self { Some(s) } else { None }
     }
+}
+
+/// TypeScript 代码格式
+#[derive(Debug, Clone, PartialEq)]
+enum CodeFormat {
+    /// 完整链式调用: sdk.flow().window({...}).find('xpath')
+    /// 适用场景：从头开始编写新脚本
+    FullChain,
+    /// 参数对象: { window: {...}, xpath: '...' }
+    /// 适用场景：在已有代码中插入新步骤
+    ParamsObject,
+    /// 仅 XPath 字符串: 'xpath'
+    /// 适用场景：快速复制 XPath 用于其他用途
+    XPathOnly,
 }
 
 // ─── Capture state ────────────────────────────────────────────────────────────
@@ -248,6 +268,11 @@ pub struct SelectorApp {
     divider_dragging: bool,
 
     theme: Theme,
+    
+    // TypeScript 代码生成相关
+    show_code_dialog: bool,
+    generated_ts_code: String,
+    code_format: CodeFormat,
 }
 
 impl SelectorApp {
@@ -389,6 +414,11 @@ impl SelectorApp {
             left_panel_width: 300.0,
             divider_dragging: false,
             theme,
+            
+            // TypeScript 代码生成相关
+            show_code_dialog: false,
+            generated_ts_code: String::new(),
+            code_format: CodeFormat::FullChain,
         }
     }
 
@@ -464,6 +494,93 @@ impl SelectorApp {
         self.xpath_text      = format!("{}, {}", self.window_selector, self.element_xpath);
         self.xpath_error     = xpath::lint(&self.xpath_text);
         self.validation      = ValidationResult::Idle;
+    }
+
+    // ── TypeScript 代码生成 ────────────────────────────────────────────────────
+
+    /// 生成 TypeScript 代码
+    fn generate_typescript_code(&self) -> String {
+        match self.code_format {
+            CodeFormat::FullChain => self.generate_full_chain_format(),
+            CodeFormat::ParamsObject => self.generate_params_object_format(),
+            CodeFormat::XPathOnly => self.generate_xpath_only_format(),
+        }
+    }
+
+    /// 完整链式调用格式
+    /// 适用场景：从头开始编写新脚本
+    fn generate_full_chain_format(&self) -> String {
+        let window_obj = self.build_window_selector_object();
+        let element_xpath = &self.element_xpath;
+        
+        format!(
+            "sdk.flow()\n  .window({})\n  .find('{}')",
+            window_obj,
+            escape_js_string(element_xpath)
+        )
+    }
+
+    /// 参数对象格式
+    /// 适用场景：在已有代码中插入新步骤
+    fn generate_params_object_format(&self) -> String {
+        let window_obj = self.build_window_selector_object();
+        let element_xpath = &self.element_xpath;
+        
+        format!(
+          "{{\n  window: {},\n  xpath: '{}',\n}}",
+          window_obj,
+          escape_js_string(element_xpath)
+        )
+    }
+
+    /// 仅 XPath 格式
+    /// 适用场景：快速复制 XPath 用于其他用途
+    fn generate_xpath_only_format(&self) -> String {
+        self.element_xpath.clone()
+    }
+
+    /// 构建窗口选择器对象（公共方法）
+    fn build_window_selector_object(&self) -> String {
+        if let Some(ref _win) = self.window_info {
+            let mut fields = Vec::new();
+            
+            // 根据 window_filters 的 enabled 状态决定包含哪些字段
+            for filter in &self.window_filters {
+                if filter.enabled && !filter.value.is_empty() {
+                    let js_key = match filter.name.as_str() {
+                        "Name" => "title",
+                        "ClassName" => "className",
+                        "ProcessName" => "processName",
+                        _ => &filter.name.to_lowercase(),
+                    };
+                    fields.push(format!("{}: '{}'", js_key, escape_js_string(&filter.value)));
+                }
+            }
+            
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{ {} }}", fields.join(", "))
+            }
+        } else {
+            "{}".to_string()
+        }
+    }
+
+    /// 打开代码生成对话框
+    fn open_code_dialog(&mut self) {
+        self.generated_ts_code = self.generate_typescript_code();
+        self.show_code_dialog = true;
+    }
+
+    /// 关闭代码生成对话框
+    fn close_code_dialog(&mut self) {
+        self.show_code_dialog = false;
+    }
+
+    /// 复制代码到剪贴板
+    fn copy_code_to_clipboard(&self, ctx: &egui::Context) {
+        ctx.copy_text(self.generated_ts_code.clone());
     }
 
     /// 从 window_info 构建窗口选择器字符串
@@ -1001,6 +1118,10 @@ impl SelectorApp {
 
             if ui.small_button("智能优化").on_hover_text("自动优化 XPath，移除动态属性，使用锚点定位").clicked() {
                 self.do_optimize();
+            }
+
+            if ui.small_button("生成 TS 代码").on_hover_text("生成 TypeScript SDK 选择器代码").clicked() {
+                self.open_code_dialog();
             }
 
             // 重置：仅在 Optimized 或 Manual 状态下显示
@@ -1565,16 +1686,16 @@ impl SelectorApp {
 
     /// 校验详情（失败时展示逐段分析）
     fn draw_validation_details(&self, ui: &mut Ui) {
-        let Some(detail) = &self.detailed_validation else { return };
+        let Some(detail) = &self.detailed_validation else { return; };
         let t = self.theme;
-
+    
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
-
+    
         panel_header(ui, "🔍 校验结果", t);
         ui.add_space(4.0);
-
+    
         let (status_color, status_text) = match &detail.overall {
             ValidationResult::Found { count, .. } =>
                 (t.ok, format!("✓ 通过 — 找到 {} 个元素", count)),
@@ -1585,13 +1706,13 @@ impl SelectorApp {
             _ =>
                 (t.muted, "未校验".to_string()),
         };
-
+    
         let frame_fill = if detail.overall == ValidationResult::NotFound {
             t.val_notfound_bg
         } else {
             t.val_found_bg
         };
-
+    
         egui::Frame::NONE
             .fill(frame_fill)
             .corner_radius(CornerRadius::same(4))
@@ -1601,16 +1722,16 @@ impl SelectorApp {
                 ui.add_space(4.0);
                 ui.label(RichText::new(format!("用时: {}ms", detail.total_duration_ms)).color(t.muted).size(11.0));
             });
-
+    
         if detail.overall != ValidationResult::NotFound { return; }
-
+    
         ui.add_space(8.0);
         ui.label(RichText::new("失败步骤分析:").color(t.muted).size(11.0));
         ui.add_space(4.0);
-
+    
         for seg in &detail.segments {
             if seg.matched || seg.match_count > 0 { continue; }
-
+    
             egui::Frame::NONE
                 .fill(t.fail_step_bg)
                 .corner_radius(CornerRadius::same(4))
@@ -1627,7 +1748,7 @@ impl SelectorApp {
                             .font(egui::FontId::monospace(10.0))
                             .color(t.mono_fg),
                     );
-
+    
                     if !seg.predicate_failures.is_empty() {
                         ui.add_space(4.0);
                         for pf in &seg.predicate_failures {
@@ -1648,13 +1769,126 @@ impl SelectorApp {
                 });
             ui.add_space(4.0);
         }
-
+    
         ui.add_space(8.0);
         ui.label(RichText::new("建议:").color(t.muted).size(11.0));
         ui.add_space(4.0);
         ui.label(RichText::new("1. 点击【智能优化】按钮，移除动态属性").color(t.muted).size(10.0));
         ui.label(RichText::new("2. 检查动态类名是否在捕获后发生了变化").color(t.muted).size(10.0));
         ui.label(RichText::new("3. 重新捕获元素，确保元素状态稳定").color(t.muted).size(10.0));
+    }
+    
+    /// TypeScript 代码生成对话框
+    fn draw_code_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_code_dialog {
+            return;
+        }
+        
+        let t = self.theme;
+        let mut should_close = false;
+        let mut new_format: Option<CodeFormat> = None;
+        let mut should_copy = false;
+        
+        // 使用局部变量避免借用冲突
+        let mut show_dialog = self.show_code_dialog;
+        let generated_code = &mut self.generated_ts_code;
+        let current_format = self.code_format.clone();
+        
+        egui::Window::new("TypeScript 代码生成")
+            .open(&mut show_dialog)
+            .default_size([600.0, 400.0])
+            .resizable(true)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                // 标题说明
+                ui.label(
+                    RichText::new("生成的 TypeScript SDK 选择器代码：")
+                        .color(t.text)
+                        .size(12.0),
+                );
+                ui.add_space(8.0);
+                
+                // 代码编辑区
+                egui::Frame::NONE
+                    .fill(t.code_bg)
+                    .inner_margin(Margin::same(12))
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(CornerRadius::same(4))
+                    .show(ui, |ui| {
+                        let _edit_resp = ui.add(
+                            TextEdit::multiline(generated_code)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(8)
+                                .desired_width(ui.available_width())
+                                .text_color(t.code_fg),
+                        );
+                    });
+                
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                
+                // 底部操作按钮和格式切换
+                ui.horizontal(|ui| {
+                    // 左侧：格式切换单选按钮
+                    ui.label(RichText::new("代码格式:").color(t.muted).size(11.0));
+                    ui.add_space(8.0);
+                    
+                    if ui.selectable_label(current_format == CodeFormat::FullChain, "完整链式调用")
+                        .on_hover_text("适合从头开始编写新脚本\nsdk.flow().window(...).find('...')")
+                        .clicked() {
+                        new_format = Some(CodeFormat::FullChain);
+                    }
+                    
+                    if ui.selectable_label(current_format == CodeFormat::ParamsObject, "参数对象")
+                        .on_hover_text("适合在已有代码中插入新步骤\n{ window: {...}, xpath: '...' }")
+                        .clicked() {
+                        new_format = Some(CodeFormat::ParamsObject);
+                    }
+                    
+                    if ui.selectable_label(current_format == CodeFormat::XPathOnly, "仅 XPath")
+                        .on_hover_text("快速复制 XPath 字符串\n//Document")
+                        .clicked() {
+                        new_format = Some(CodeFormat::XPathOnly);
+                    }
+                    
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // 关闭按钮
+                        if ui.button("关闭").clicked() {
+                            should_close = true;
+                        }
+                        
+                        ui.add_space(8.0);
+                        
+                        // 复制按钮
+                        if ui.button("复制到剪贴板").clicked() {
+                            should_copy = true;
+                        }
+                    });
+                });
+            });
+        
+        // 更新 show_code_dialog 状态
+        self.show_code_dialog = show_dialog;
+        
+        // 处理格式切换
+        if let Some(format) = new_format {
+            if self.code_format != format {
+                self.code_format = format;
+                self.generated_ts_code = self.generate_typescript_code();
+            }
+        }
+        
+        // 处理复制
+        if should_copy {
+            self.copy_code_to_clipboard(ctx);
+            self.status_msg = "TypeScript 代码已复制到剪贴板".to_string();
+        }
+        
+        // 处理关闭
+        if should_close {
+            self.close_code_dialog();
+        }
     }
 }
 
@@ -1863,6 +2097,9 @@ impl eframe::App for SelectorApp {
                 right_ui.set_clip_rect(right_rect);
                 self.draw_right_panel(&mut right_ui);
             });
+        
+        // 绘制代码生成对话框
+        self.draw_code_dialog(ui.ctx());
     }
 }
 
@@ -1982,6 +2219,15 @@ impl RichTextExt for RichText {
     fn strong_if(self, cond: bool) -> Self {
         if cond { self.strong() } else { self }
     }
+}
+
+/// 转义 JavaScript 字符串中的特殊字符
+fn escape_js_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('\'', "\\'")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+     .replace('\t', "\\t")
 }
 
 /// 截断字符串（预留功能）
