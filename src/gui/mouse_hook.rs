@@ -157,6 +157,7 @@ thread_local! {
 }
 
 // Thread handle for the hook thread
+#[allow(dead_code)]
 static mut HOOK_THREAD_HANDLE: Option<std::thread::JoinHandle<()>> = None;
 
 // ═══════════════════════════════════════════════════════════════════════════════

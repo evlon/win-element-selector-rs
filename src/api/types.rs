@@ -111,7 +111,7 @@ impl<'de> serde::Deserialize<'de> for WindowSelectorOrString {
                 Ok(WindowSelectorOrString::String(value))
             }
             
-            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
             where
                 M: de::MapAccess<'de>,
             {

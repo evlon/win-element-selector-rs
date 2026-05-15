@@ -11,11 +11,51 @@ use eframe::egui;
 use log::info;
 
 fn main() -> anyhow::Result<()> {
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    
+    // Show help if requested
+    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
+        println!("Windows Element Selector v1.0.1");
+        println!();
+        println!("USAGE:");
+        println!("    element-selector [OPTIONS]");
+        println!();
+        println!("OPTIONS:");
+        println!("    -v          Set log level to WARN");
+        println!("    -vv         Set log level to INFO (default)");
+        println!("    -vvv        Set log level to DEBUG (verbose mode)");
+        println!("    --verbose   Same as -vvv");
+        println!("    -h, --help  Show this help message");
+        println!();
+        println!("EXAMPLES:");
+        println!("    element-selector              # Normal mode (INFO level)");
+        println!("    element-selector -vvv         # Verbose mode (DEBUG level)");
+        println!("    element-selector --verbose    # Verbose mode (DEBUG level)");
+        return Ok(());
+    }
+    
+    // Determine log level based on -v flags
+    let log_level = if args.contains(&"-vvv".to_string()) || args.contains(&"--verbose".to_string()) {
+        "debug"
+    } else if args.contains(&"-vv".to_string()) {
+        "info"
+    } else if args.contains(&"-v".to_string()) {
+        "warn"
+    } else {
+        "info"  // default
+    };
+    
+    // Initialize logger with specified level
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
+        env_logger::Env::default().default_filter_or(log_level),
     )
     .init();
-    info!("element-selector starting");
+    
+    info!("element-selector starting (log level: {})", log_level);
+    if args.contains(&"-vvv".to_string()) || args.contains(&"--verbose".to_string()) {
+        info!("Verbose mode enabled - detailed logs will be shown");
+    }
 
     // COM must be initialized on the main thread (STA) for UI Automation.
     {

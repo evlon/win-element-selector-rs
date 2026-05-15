@@ -2281,6 +2281,7 @@ fn escape_backtick(s: &str) -> String {
     s.replace('`', "\\`")
 }
 
+#[allow(dead_code)]
 fn escape_js_string(s: &str) -> String {
     s.replace('\\', "\\\\")
      .replace('\'', "\\'")

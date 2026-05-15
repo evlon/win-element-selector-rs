@@ -770,9 +770,12 @@ pub mod windows_impl {
         use std::time::Instant;
         let total_start = Instant::now();
         
+        log::info!("[PERF] Starting validation for window_selector='{}' xpath='{}'", window_selector, element_xpath);
+        
         let auto = match get_automation() {
             Ok(a)  => a,
             Err(e) => {
+                log::error!("[PERF] Failed to get automation instance: {}", e);
                 return DetailedValidationResult {
                     overall: ValidationResult::Error(e.to_string()),
                     segments: vec![],
@@ -783,9 +786,13 @@ pub mod windows_impl {
         };
 
         // Stage 1: Find all target windows using window selector
-        log::info!("[XPath Validation] Stage 1/2: Locating window with selector: {}", window_selector);
+        log::info!("[PERF] Stage 1/2: Locating window with selector: {}", window_selector);
+        let stage1_start = Instant::now();
         
         let matched_windows = find_window_by_selector(&auto, window_selector);
+        
+        let stage1_duration = stage1_start.elapsed().as_millis();
+        log::info!("[PERF] Stage 1 completed in {}ms, found {} windows", stage1_duration, matched_windows.len());
         
         if matched_windows.is_empty() {
             return DetailedValidationResult {
@@ -798,7 +805,7 @@ pub mod windows_impl {
             };
         }
         
-        log::info!("[XPath Validation] ✓ Found {} matching window(s), trying XPath on each", matched_windows.len());
+        log::info!("[PERF] ✓ Found {} matching window(s), trying XPath on each", matched_windows.len());
 
         // Stage 2: Try XPath on each matching window, return first success
         // This handles multi-process scenarios (e.g., multiple Tauri app instances)
@@ -806,7 +813,8 @@ pub mod windows_impl {
         let mut best_result: Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> = None;
 
         for (win_idx, search_root) in matched_windows.iter().enumerate() {
-            log::info!("[XPath Validation] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, matched_windows.len());
+            log::info!("[PERF] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, matched_windows.len());
+            let stage2_window_start = Instant::now();
 
             // Debug-only: print window's direct children tree for diagnostics
             #[cfg(debug_assertions)]
@@ -848,20 +856,23 @@ pub mod windows_impl {
 
             match find_by_xpath_with_fallback(&auto, search_root, element_xpath) {
                 Ok((results, segments)) => {
+                    let window_duration = stage2_window_start.elapsed().as_millis();
                     if !results.is_empty() {
                         // Found! Use this window's results
+                        log::info!("[PERF] ✓ Window {} XPath succeeded in {}ms, found {} results", win_idx + 1, window_duration, results.len());
                         best_result = Some((results, segments));
                         break;
                     }
                     // No match in this window, try next
-                    log::info!("[XPath Validation] Window {} - XPath matched 0 elements, trying next window", win_idx + 1);
+                    log::info!("[PERF] Window {} - XPath matched 0 elements in {}ms, trying next window", win_idx + 1, window_duration);
                     if best_result.is_none() {
                         // Keep empty results as fallback
                         best_result = Some((results, segments));
                     }
                 }
                 Err(e) => {
-                    log::info!("[XPath Validation] Window {} - XPath error: {}, trying next window", win_idx + 1, e);
+                    let window_duration = stage2_window_start.elapsed().as_millis();
+                    log::info!("[PERF] Window {} - XPath error in {}ms: {}, trying next window", win_idx + 1, window_duration, e);
                     last_error = Some(e.to_string());
                 }
             }
