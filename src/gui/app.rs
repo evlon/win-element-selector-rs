@@ -514,9 +514,9 @@ impl SelectorApp {
         let element_xpath = &self.element_xpath;
         
         format!(
-            "sdk.flow()\n  .window({})\n  .find('{}')",
+            "sdk.flow()\n  .window({})\n  .find(`{}`)",
             window_obj,
-            escape_js_string(element_xpath)
+            escape_backtick(element_xpath)
         )
     }
 
@@ -527,9 +527,9 @@ impl SelectorApp {
         let element_xpath = &self.element_xpath;
         
         format!(
-          "{{\n  window: {},\n  xpath: '{}',\n}}",
+          "{{\n  window: {},\n  xpath: `{}`,\n}}",
           window_obj,
-          escape_js_string(element_xpath)
+          escape_backtick(element_xpath)
         )
     }
 
@@ -553,7 +553,7 @@ impl SelectorApp {
                         "ProcessName" => "processName",
                         _ => &filter.name.to_lowercase(),
                     };
-                    fields.push(format!("{}: '{}'", js_key, escape_js_string(&filter.value)));
+                    fields.push(format!("{}: `{}`", js_key, escape_backtick(&filter.value)));
                 }
             }
             
@@ -2262,6 +2262,11 @@ impl RichTextExt for RichText {
 }
 
 /// 转义 JavaScript 字符串中的特殊字符
+/// Escape backticks for JavaScript template literals
+fn escape_backtick(s: &str) -> String {
+    s.replace('`', "\\`")
+}
+
 fn escape_js_string(s: &str) -> String {
     s.replace('\\', "\\\\")
      .replace('\'', "\\'")
