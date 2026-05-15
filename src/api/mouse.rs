@@ -117,6 +117,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         let options_copy = options.clone();
                         
                         with_auto_pause(|| async {
+                            let move_start = std::time::Instant::now();
                             let start_point = mouse_control::get_cursor_position();
                             
                             let move_result = if options_copy.humanize {
@@ -129,6 +130,9 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             } else {
                                 mouse_control::linear_move(start_point, click_point_copy)
                             };
+                            
+                            let move_duration = move_start.elapsed();
+                            info!("Mouse move completed in {:?}", move_duration);
                             
                             if let Err(e) = move_result {
                                 warn!("Move to click position failed: {}", e);
@@ -146,7 +150,10 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             }
                             
                             // 执行点击
+                            let click_start = std::time::Instant::now();
                             let click_result = mouse_control::click_at(click_point_copy);
+                            let click_duration = click_start.elapsed();
+                            info!("Mouse click completed in {:?}", click_duration);
                             
                             // 点击后停顿
                             if options_copy.pause_after > 0 {
