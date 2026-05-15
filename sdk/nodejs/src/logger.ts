@@ -38,6 +38,9 @@ export class Logger {
                     translateTime: 'SYS:standard',
                     ignore: 'pid,hostname',
                     messageFormat: '{module}: {msg}',
+                    // Windows 终端兼容性：使用 UTF-8 编码
+                    destination: 1, // stdout
+                    mkdir: true,
                 }
             } : undefined,
             base: undefined, // 不输出 pid, hostname 等基础信息

@@ -735,26 +735,57 @@ export class Chain {
     
     /**
      * 执行整条链
+     * 
+     * 执行策略：按顺序串行执行所有动作
+     * - find() 会更新内部状态（currentXpath, currentElement）
+     * - click()/type() 等操作使用最近一次 find() 的结果
+     * 
+     * @example
+     * ```typescript
+     * sdk.flow()
+     *   .find('//Button')    // 查找按钮，更新 currentXpath
+     *   .click()             // 点击刚才找到的按钮
+     *   .find('//Input')     // 查找输入框，更新 currentXpath
+     *   .type('hello')       // 在刚才找到的输入框中输入
+     *   .run();
+     * ```
+     * 
      * @returns 如果开启 profile，返回性能统计；否则返回 void
      */
     async run(): Promise<ProfileStats | void> {
         this.profileStartTime = Date.now();
         this.profileSteps = [];
         
-        this.logger.info('Starting chain execution', { 
+        this.logger.info('开始执行自动化流程', { 
             actionsCount: this.actions.length,
             humanizeEnabled: this.humanizeEnabled,
             debugMode: this.debugMode
         });
         
         const executeChain = async () => {
-            await this.executePrefixActions();
+            // 按顺序执行所有动作，而不是先执行所有 prefix 再执行其他
+            let executedCount = 0;
             
             for (const action of this.actions) {
-                if (action.type === 'window' || action.type === 'find' || action.type === 'humanize') {
+                if (action.type === 'humanize') {
                     continue;
                 }
                 
+                // 对于 window 和 find，直接执行
+                if (action.type === 'window') {
+                    await this.executeWindow(action.params as string);
+                    executedCount++;
+                    continue;
+                }
+                
+                if (action.type === 'find') {
+                    await this.executeFind(action.xpath!);
+                    executedCount++;
+                    continue;
+                }
+                
+                // 对于其他动作（click, type, wait等），确保前面的 prefix 已执行
+                // （实际上由于我们按顺序执行，prefix 已经在前面的循环中执行了）
                 const stepStart = Date.now();
                 this.logger.debug('Executing action', { type: action.type });
                 
@@ -770,6 +801,8 @@ export class Chain {
                         xpath: action.xpath,
                     });
                 }
+                
+                executedCount++;
             }
         };
         
@@ -780,9 +813,8 @@ export class Chain {
         }
         
         const totalTime = Date.now() - this.profileStartTime;
-        this.logger.info('Chain execution completed', {
-            totalTime,
-            stepsCompleted: this.profileSteps.length
+        this.logger.info(`✅ 流程执行完成`, {
+            totalTime: `${totalTime}ms`
         });
         
         if (this.profileEnabled) {
@@ -810,19 +842,19 @@ export class Chain {
         const result = await this.client.activateWindow(windowSelector);
         
         if (!result.success) {
-            this.logger.error(`Window activation failed: ${result.error || 'Unknown error'}`, { 
+            this.logger.error(`窗口激活失败: ${result.error || '未知错误'}`, { 
                 windowSelector
             });
-            await this.failWithScreenshot(`Window not found: ${windowSelector}`, 'window');
+            await this.failWithScreenshot(`未找到窗口: ${windowSelector}`, 'window');
         }
         
-        this.logger.info('Window activated', { windowSelector });
+        this.logger.info('✓ 窗口已激活');
     }
     
     private async executeFind(xpath: string): Promise<void> {
         if (!this.currentWindowSelector) {
             throw new StateError(
-                'Must call window() before find()',
+                '必须先调用 window() 才能使用 find()',
                 'no_window_activated'
             );
         }
@@ -838,12 +870,12 @@ export class Chain {
         });
         
         if (!result.found || !result.element) {
-            this.logger.error(`Element not found`, { 
+            this.logger.error(`元素未找到`, { 
                 xpath,
                 windowSelector: this.currentWindowSelector 
             });
             await this.failWithScreenshot(
-                `Element not found: ${xpath}`,
+                `未找到元素: ${xpath}`,
                 'find',
                 { windowSelector: this.currentWindowSelector, xpath }
             );
@@ -855,9 +887,8 @@ export class Chain {
         this.currentElement = element;
         this.currentXpath = xpath;  // 保存 xpath 供后续 click 使用
         
-        this.logger.info('Element found', { 
+        this.logger.info(`✓ 找到元素: ${element.name || '(未命名)'}`, {
             controlType: element.controlType,
-            name: element.name || '(unnamed)',
             rect: `(${element.rect.x}, ${element.rect.y}, ${element.rect.width}x${element.rect.height})`
         });
     }
@@ -898,10 +929,11 @@ export class Chain {
         });
         
         if (!result.success) {
-            await this.failWithScreenshot(`${modeText} failed`, modeText);
+            await this.failWithScreenshot(`${modeText} 失败`, modeText);
             return;
         }
         
+        this.logger.info(`✓ 点击成功 (${modeText})`);
         this.log(`  → clicked at (${result.clickPoint.x}, ${result.clickPoint.y})`);
     }
     
@@ -909,7 +941,8 @@ export class Chain {
         this.log(`type("${text}")`);
         const charDelay = this.getHumanizedCharDelay();
         const result = await this.client.typeText(text, { charDelay });
-        if (!result.success) await this.failWithScreenshot(`Type failed`, 'type');
+        if (!result.success) await this.failWithScreenshot(`打字失败`, 'type');
+        this.logger.info(`✓ 输入完成: ${result.charsTyped} 个字符`);
         this.log(`  → typed ${result.charsTyped} chars, ${result.durationMs}ms`);
     }
     

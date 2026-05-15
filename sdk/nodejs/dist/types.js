@@ -9,7 +9,7 @@ exports.DEFAULTS = void 0;
 // ═══════════════════════════════════════════════════════════════════════════════
 exports.DEFAULTS = {
     baseUrl: 'http://127.0.0.1:8080',
-    timeout: 30000,
+    timeout: 60000, // 增加到 60 秒，避免长时间操作超时
     move: {
         humanize: true,
         trajectory: 'bezier',

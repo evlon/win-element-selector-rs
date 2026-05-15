@@ -64,7 +64,7 @@ export class HttpClient {
             });
             
             const duration = Date.now() - startTime;
-            this.logger.info('Element query completed', { 
+            this.logger.debug('Element query completed', { 
                 duration, 
                 found: response.data.found 
             });
@@ -108,7 +108,7 @@ export class HttpClient {
             });
             
             const duration = Date.now() - startTime;
-            this.logger.info('Click completed', { 
+            this.logger.debug('Click completed', { 
                 duration, 
                 success: response.data.success,
                 clickPoint: response.data.success ? response.data.clickPoint : undefined
