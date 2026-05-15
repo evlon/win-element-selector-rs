@@ -156,6 +156,9 @@ thread_local! {
     static HOOK_HANDLE: std::cell::RefCell<Option<HHOOK>> = std::cell::RefCell::new(None);
 }
 
+// Thread handle for the hook thread
+static mut HOOK_THREAD_HANDLE: Option<std::thread::JoinHandle<()>> = None;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Windows implementation
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -189,8 +192,8 @@ pub mod win_hook {
         if state.active {
             let msg = w_param.0 as u32;
             
-            // Track mouse movement for debounce in hook thread.
-            // Simply record the latest position and timestamp to shared state.
+            // Track mouse movement with debounce/throttle mechanism.
+            // Only update shared state and send events at a controlled rate to avoid flooding.
             if state.report_moves && msg == WM_MOUSEMOVE {
                 let hook_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
                 let x = hook_struct.pt.x;
@@ -201,8 +204,26 @@ pub mod win_hook {
                     .unwrap()
                     .as_millis() as u64;
                 
-                // Update shared state for main thread to access.
+                // Update shared state for main thread to access (always update).
                 update_mouse_state(x, y, now_ms);
+                
+                // Throttle: only send move events every 50ms to avoid flooding the channel
+                // This prevents performance issues when there are many rapid mouse movements
+                const MOVE_THROTTLE_MS: u64 = 50;
+                
+                // Use a thread-local variable to track last sent time
+                thread_local! {
+                    static LAST_MOVE_SENT: std::cell::Cell<u64> = std::cell::Cell::new(0);
+                }
+                
+                let last_sent = LAST_MOVE_SENT.with(|cell| cell.get());
+                if now_ms - last_sent >= MOVE_THROTTLE_MS {
+                    // Send a lightweight notification that mouse moved
+                    // Main thread can then poll get_mouse_state() for actual position
+                    if state.moved_sender.send(MouseMovedEvent).is_ok() {
+                        LAST_MOVE_SENT.with(|cell| cell.set(now_ms));
+                    }
+                }
             }
             
             // Only process left button events.

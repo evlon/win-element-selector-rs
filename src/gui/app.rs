@@ -262,6 +262,7 @@ pub struct SelectorApp {
 
     last_mouse_move:    Option<Instant>,
     last_highlight_pos: Option<(i32, i32)>,
+    last_highlight_time: Option<u64>,  // Timestamp of last highlight operation (in ms)
 
     node_expanded:    Vec<bool>,
     left_panel_width: f32,
@@ -410,6 +411,7 @@ impl SelectorApp {
             countdown_str: String::new(),
             last_mouse_move: None,
             last_highlight_pos: None,
+            last_highlight_time: None,
             node_expanded: vec![true; n],
             left_panel_width: 300.0,
             divider_dragging: false,
@@ -1987,18 +1989,32 @@ impl eframe::App for SelectorApp {
             }
 
             // 悬停高亮（防抖 500ms）
+            // 使用节流机制避免频繁调用 capture
             let (mx, my, mt) = mouse_hook::get_mouse_state();
             if mt > 0 {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64;
-                if now_ms.saturating_sub(mt) >= 500 {
-                    if self.last_highlight_pos != Some((mx, my)) {
+                
+                // Only attempt highlight if mouse has been stationary for at least 500ms
+                // and position has changed since last highlight
+                let time_since_move = now_ms.saturating_sub(mt);
+                if time_since_move >= 500 && self.last_highlight_pos != Some((mx, my)) {
+                    // Check if we should throttle to avoid too frequent captures
+                    let should_highlight = if let Some(last_highlight_time) = self.last_highlight_time {
+                        now_ms - last_highlight_time >= 100  // At least 100ms between highlights
+                    } else {
+                        true
+                    };
+                    
+                    if should_highlight {
                         self.highlight_element_at(mx, my);
                         self.last_highlight_pos = Some((mx, my));
+                        self.last_highlight_time = Some(now_ms);
                     }
-                } else {
+                } else if time_since_move < 500 {
+                    // Mouse is still moving, clear the highlight position
                     self.last_highlight_pos = None;
                 }
             }
