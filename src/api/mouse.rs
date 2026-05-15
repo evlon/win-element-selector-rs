@@ -74,8 +74,11 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     let options = request.options.unwrap_or(MouseClickOptions::default());
     
     info!(
-        "API: /api/mouse/click window.title='{}' xpath='{}' humanize={} random_range={}",
-        request.window.title.as_deref().unwrap_or(""),
+        "API: /api/mouse/click window='{}' xpath='{}' humanize={} random_range={}",
+        match &request.window {
+            super::types::WindowSelectorOrString::String(s) => s.as_str(),
+            super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or(""),
+        },
         request.xpath,
         options.humanize,
         options.random_range
@@ -83,6 +86,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     
     // Step 1: 构建窗口选择器
     let window_selector = build_window_selector(&request.window);
+    let window_selector_for_click = window_selector.clone();  // 克隆一份用于点击
     
     // Step 2: 获取元素坐标
     let xpath = request.xpath.clone();
@@ -117,6 +121,17 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         let options_copy = options.clone();
                         
                         with_auto_pause(|| async {
+                            // 确保窗口在前台
+                            info!("Activating window before click: {}", window_selector_for_click);
+                            let activated = super::super::core::uia::activate_window_by_selector(&window_selector_for_click);
+                            if !activated {
+                                warn!("Failed to activate window, but continuing...");
+                                // 继续尝试点击，可能窗口已经在前台
+                            }
+                            
+                            // 短暂等待让窗口激活
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            
                             let move_start = std::time::Instant::now();
                             let start_point = mouse_control::get_cursor_position();
                             
@@ -234,23 +249,28 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
 }
 
 /// 构建窗口选择器字符串
-fn build_window_selector(selector: &super::types::WindowSelector) -> String {
-    let mut predicates: Vec<String> = Vec::new();
-    
-    if let Some(ref title) = selector.title {
-        predicates.push(format!("@Name='{}'", title));
-    }
-    if let Some(ref class_name) = selector.class_name {
-        predicates.push(format!("@ClassName='{}'", class_name));
-    }
-    if let Some(ref process_name) = selector.process_name {
-        predicates.push(format!("@ProcessName='{}'", process_name));
-    }
-    
-    if predicates.is_empty() {
-        "Window".to_string()
-    } else {
-        format!("Window[{}]", predicates.join(" and "))
+fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> String {
+    match selector {
+        super::types::WindowSelectorOrString::String(s) => s.clone(),
+        super::types::WindowSelectorOrString::Object(obj) => {
+            let mut predicates: Vec<String> = Vec::new();
+            
+            if let Some(ref title) = obj.title {
+                predicates.push(format!("@Name='{}'", title));
+            }
+            if let Some(ref class_name) = obj.class_name {
+                predicates.push(format!("@ClassName='{}'", class_name));
+            }
+            if let Some(ref process_name) = obj.process_name {
+                predicates.push(format!("@ProcessName='{}'", process_name));
+            }
+            
+            if predicates.is_empty() {
+                "Window".to_string()
+            } else {
+                format!("Window[{}]", predicates.join(" and "))
+            }
+        }
     }
 }
 
@@ -263,8 +283,18 @@ fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32) -
     let half_range_h = rect.height as f32 * range_percent / 2.0;
     
     let mut rng = rand::thread_rng();
-    let offset_x = rng.gen_range(-half_range_w..half_range_w) as i32;
-    let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
+    
+    // 防止空范围导致 panic
+    let offset_x = if half_range_w > 0.0 {
+        rng.gen_range(-half_range_w..half_range_w) as i32
+    } else {
+        0
+    };
+    let offset_y = if half_range_h > 0.0 {
+        rng.gen_range(-half_range_h..half_range_h) as i32
+    } else {
+        0
+    };
     
     Point::new(center.x + offset_x, center.y + offset_y)
 }

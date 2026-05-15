@@ -72,6 +72,58 @@ pub struct WindowSelector {
     pub process_name: Option<String>,
 }
 
+/// 窗口选择器（支持字符串或对象形式）
+#[derive(Debug, Clone)]
+pub enum WindowSelectorOrString {
+    /// 字符串形式："Window[@Name='xxx' and @ClassName='yyy']"
+    String(String),
+    /// 对象形式：{title: "xxx", className: "yyy"}
+    Object(WindowSelector),
+}
+
+impl<'de> serde::Deserialize<'de> for WindowSelectorOrString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+        
+        struct WindowSelectorVisitor;
+        
+        impl<'de> Visitor<'de> for WindowSelectorVisitor {
+            type Value = WindowSelectorOrString;
+            
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or a WindowSelector object")
+            }
+            
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(WindowSelectorOrString::String(value.to_string()))
+            }
+            
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(WindowSelectorOrString::String(value))
+            }
+            
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: de::MapAccess<'de>,
+            {
+                let selector = WindowSelector::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(WindowSelectorOrString::Object(selector))
+            }
+        }
+        
+        deserializer.deserialize_any(WindowSelectorVisitor)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 元素 API
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -201,7 +253,8 @@ pub struct MouseClickOptions {
 /// 鼠标点击请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct MouseClickRequest {
-    pub window: WindowSelector,
+    /// 窗口选择器，支持字符串形式 "Window[@Name='xxx']" 或对象形式
+    pub window: WindowSelectorOrString,
     pub xpath: String,
     pub options: Option<MouseClickOptions>,
 }
