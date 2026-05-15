@@ -78,6 +78,11 @@ async fn main() -> anyhow::Result<()> {
         info!("COM initialized (STA)");
     }
     
+    // Initialize global COM worker thread (single-threaded COM management)
+    element_selector::core::com_worker::init_global_com_worker()
+        .expect("Failed to initialize COM worker");
+    info!("COM worker thread initialized");
+    
     // 配置 HTTP 服务
     HttpServer::new(|| {
         App::new()

@@ -35,47 +35,255 @@ pub mod windows_impl {
         },
     };
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // COM Management Layer - Unified COM lifecycle management
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /// COM 线程模型状态
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum ComApartmentType {
+        /// 未初始化
+        Uninitialized,
+        /// STA (Single-Threaded Apartment) - UIA 需要
+        Sta,
+        /// MTA (Multi-Threaded Apartment) - 不兼容 UIA
+        Mta,
+    }
+
+    /// COM 管理器 - 统一的 COM 生命周期管理
+    pub struct ComManager;
+
+    impl ComManager {
+        /// 检查当前线程的 COM 状态
+        pub fn check_current_apartment() -> ComApartmentType {
+            use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+            
+            let mut apt_type = APTTYPE::default();
+            let mut qualifier = APTTYPEQUALIFIER::default();
+            
+            match unsafe { CoGetApartmentType(&mut apt_type, &mut qualifier) } {
+                Ok(_) => {
+                    match apt_type {
+                        APTTYPE(0) => ComApartmentType::Sta,  // APTTYPE_STA
+                        APTTYPE(1) => ComApartmentType::Mta,  // APTTYPE_MTA
+                        _ => ComApartmentType::Uninitialized,
+                    }
+                }
+                Err(_) => ComApartmentType::Uninitialized,
+            }
+        }
+        
+        /// 确保当前线程处于 STA 模式
+        /// 
+        /// 返回结果：
+        /// - Ok(true): 成功初始化或已是 STA
+        /// - Ok(false): 已在 MTA 模式，无法切换（需要警告）
+        /// - Err: 初始化失败
+        pub fn ensure_sta() -> anyhow::Result<bool> {
+            let current = Self::check_current_apartment();
+            
+            match current {
+                ComApartmentType::Sta => {
+                    log::debug!("COM already in STA mode");
+                    Ok(true)
+                }
+                ComApartmentType::Mta => {
+                    log::warn!("Thread is in MTA mode, UIA operations may fail!");
+                    log::warn!("Consider using a dedicated STA thread for UI Automation");
+                    Ok(false)
+                }
+                ComApartmentType::Uninitialized => {
+                    Self::init_sta()
+                }
+            }
+        }
+        
+        /// 初始化 COM STA 模式
+        fn init_sta() -> anyhow::Result<bool> {
+            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+            
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            
+            // HRESULT 值：
+            // S_OK (0x00000000) = 首次初始化成功
+            // S_FALSE (0x00000001) = 已经初始化
+            // RPC_E_CHANGED_MODE (0x80010106) = 已在 MTA 模式
+            
+            if hr == windows::core::HRESULT(0) {
+                log::debug!("COM STA initialized successfully");
+                Ok(true)
+            } else if hr == windows::core::HRESULT(1) {
+                log::debug!("COM already initialized (S_FALSE)");
+                Ok(true)
+            } else if hr == windows::core::HRESULT(0x80010106u32 as i32) {
+                log::error!("Cannot switch from MTA to STA! Thread already in MTA mode.");
+                Ok(false)
+            } else {
+                Err(anyhow::anyhow!(
+                    "CoInitializeEx failed with HRESULT={:#010x}", 
+                    hr.0 as u32
+                ))
+            }
+        }
+        
+        /// 安全地重新初始化 COM（用于检测到状态失效时）
+        pub fn safe_reinitialize() -> anyhow::Result<()> {
+            use windows::Win32::System::Com::{CoUninitialize, CoInitializeEx, COINIT_APARTMENTTHREADED};
+            
+            // 先卸载
+            unsafe { CoUninitialize() };
+            log::debug!("COM uninitialized for reinitialization");
+            
+            // 短暂等待，确保清理完成
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            
+            // 重新初始化
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            
+            if hr == windows::core::HRESULT(0) || hr == windows::core::HRESULT(1) {
+                log::info!("COM reinitialized successfully");
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "COM reinitialization failed: HRESULT={:#010x}", 
+                    hr.0 as u32
+                ))
+            }
+        }
+    }
+
+    /// 带有健康检查的 IUIAutomation 提供者
+    pub struct AutomationProvider;
+
+    impl AutomationProvider {
+        /// 获取 IUIAutomation 实例，带健康检查
+        pub fn get_healthy() -> anyhow::Result<IUIAutomation> {
+            AUTOMATION.with(|cell| {
+                let mut opt = cell.borrow_mut();
+                
+                // 检查现有实例是否有效
+                if let Some(ref auto) = *opt {
+                    // 尝试一个简单的操作来验证实例是否仍然有效
+                    if Self::validate_instance(auto) {
+                        log::debug!("Reusing existing IUIAutomation instance");
+                        return Ok(auto.clone());
+                    } else {
+                        log::warn!("Existing IUIAutomation instance is invalid, recreating...");
+                        *opt = None;
+                    }
+                }
+                
+                // 创建新实例
+                log::debug!("Creating new IUIAutomation instance");
+                let auto: IUIAutomation = unsafe {
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                }
+                .map_err(|e| anyhow::anyhow!("CoCreateInstance IUIAutomation: {e}"))?;
+                
+                *opt = Some(auto.clone());
+                Ok(auto)
+            })
+        }
+        
+        /// 验证 IUIAutomation 实例是否有效
+        fn validate_instance(auto: &IUIAutomation) -> bool {
+            // 尝试获取根元素作为健康检查
+            unsafe {
+                auto.GetRootElement().is_ok()
+            }
+        }
+        
+        /// 强制重置 IUIAutomation 实例
+        pub fn force_reset() {
+            AUTOMATION.with(|cell| {
+                let mut opt = cell.borrow_mut();
+                *opt = None;
+                log::debug!("IUIAutomation instance reset");
+            });
+        }
+    }
+
+    /// 带有自动重试的 UIA 操作执行器
+    pub struct UiaExecutor;
+
+    impl UiaExecutor {
+        /// 执行 UIA 操作，带自动重试和 COM 状态恢复
+        pub fn execute_with_retry<T, F>(
+            operation: F,
+            max_retries: usize,
+        ) -> anyhow::Result<T>
+        where
+            F: Fn() -> anyhow::Result<T>,
+        {
+            let mut last_error = None;
+            
+            for attempt in 0..=max_retries {
+                if attempt > 0 {
+                    log::warn!("Retrying UIA operation (attempt {}/{})", 
+                              attempt + 1, max_retries + 1);
+                    
+                    // 尝试重新初始化 COM
+                    if let Err(e) = ComManager::safe_reinitialize() {
+                        log::error!("COM reinitialization failed: {}", e);
+                    }
+                    
+                    // 重置 IUIAutomation 实例
+                    Self::force_reset_automation();
+                    
+                    // 短暂等待
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                
+                match operation() {
+                    Ok(result) => {
+                        if attempt > 0 {
+                            log::info!("UIA operation succeeded after {} retries", attempt);
+                        }
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        log::warn!("UIA operation failed (attempt {}): {}", 
+                                  attempt + 1, e);
+                        last_error = Some(e);
+                    }
+                }
+            }
+            
+            Err(last_error.unwrap_or_else(|| 
+                anyhow::anyhow!("UIA operation failed after {} retries", max_retries + 1)
+            ))
+        }
+        
+        /// 重置 IUIAutomation 实例（内部辅助函数）
+        fn force_reset_automation() {
+            AUTOMATION.with(|cell| {
+                let mut opt = cell.borrow_mut();
+                *opt = None;
+            });
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Legacy API - Backward compatibility
+    // ═══════════════════════════════════════════════════════════════════════════
+
     // Lazily created IUIAutomation instance (COM STA — must stay on UI thread).
     thread_local! {
         static AUTOMATION: std::cell::RefCell<Option<IUIAutomation>> =
             std::cell::RefCell::new(None);
     }
 
+    /// Legacy function - Use AutomationProvider::get_healthy() instead
     fn get_automation() -> anyhow::Result<IUIAutomation> {
-        AUTOMATION.with(|cell| {
-            let mut opt = cell.borrow_mut();
-            if opt.is_none() {
-                let auto: IUIAutomation = unsafe {
-                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                }
-                .map_err(|e| anyhow::anyhow!("CoCreateInstance IUIAutomation: {e}"))?;
-                *opt = Some(auto);
-            }
-            Ok(opt.as_ref().unwrap().clone())
-        })
+        AutomationProvider::get_healthy()
     }
 
     /// Initialize COM in STA (Single-Threaded Apartment) mode for UI Automation.
     /// Must be called on each `spawn_blocking` thread before any UIA operation.
     /// 
-    /// - `S_OK`: First initialization on this thread (success)
-    /// - `S_FALSE`: Already initialized on this thread (success, call CoUninitialize later)
-    /// - `RPC_E_CHANGED_MODE`: Thread already initialized in MTA mode (log warning, continue)
-    /// - Other errors: Fatal, return error
+    /// Deprecated: Use ComManager::ensure_sta() instead
     pub fn ensure_com_sta() -> anyhow::Result<()> {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        // CoInitializeEx returns HRESULT directly (not Result)
-        // S_OK (0) = success, S_FALSE (1) = already initialized, both are OK
-        // RPC_E_CHANGED_MODE (0x80010106) = thread already in MTA, warn but continue
-        if hr == windows::core::HRESULT(0) || hr == windows::core::HRESULT(1) {
-            Ok(())
-        } else if hr == windows::core::HRESULT(0x80010106u32 as i32) {
-            log::warn!("COM already initialized in MTA mode on this thread, UIA may not work correctly");
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("COM STA initialization failed: HRESULT={:#010x}", hr.0 as u32))
-        }
+        ComManager::ensure_sta().map(|_| ())
     }
 
     /// Capture the element under the mouse cursor.
@@ -1326,36 +1534,60 @@ pub mod windows_impl {
     }
 
     /// Recursively check if any descendant of `elem` has a different FrameworkId.
-    /// Searches up to `max_depth` levels deep.
+    /// Uses iterative BFS to avoid stack overflow on deep UI trees.
     fn has_framework_transition(
         walker: &IUIAutomationTreeWalker,
         elem: &IUIAutomationElement,
         parent_fwid: &str,
         max_depth: usize,
     ) -> bool {
-        if max_depth == 0 {
-            return false;
+        use std::collections::VecDeque;
+        
+        // Use BFS (breadth-first search) instead of DFS to avoid stack overflow
+        let mut queue: VecDeque<(IUIAutomationElement, usize)> = VecDeque::new();
+        
+        // Add direct children to queue
+        let mut child = unsafe { walker.GetFirstChildElement(elem).ok() };
+        while let Some(c) = child {
+            let next = unsafe { walker.GetNextSiblingElement(&c).ok() };
+            queue.push_back((c, 1));
+            child = next;
         }
         
-        let mut child = unsafe { walker.GetFirstChildElement(elem).ok() };
-        let mut count = 0;
+        let mut visited_count = 0;
+        const MAX_NODES: usize = 100; // Limit total nodes to visit
         
-        while let Some(c) = child {
-            let sub_fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+        while let Some((node, depth)) = queue.pop_front() {
+            visited_count += 1;
+            if visited_count > MAX_NODES {
+                log::info!("[Content Root] BFS limit reached ({} nodes), stopping", MAX_NODES);
+                return false;
+            }
+            
+            if depth > max_depth {
+                continue;
+            }
+            
+            let sub_fwid = get_bstr(unsafe { node.CurrentFrameworkId() });
             
             // Found a different FrameworkId → transition detected
             if !sub_fwid.is_empty() && sub_fwid != parent_fwid {
+                log::info!("[Content Root] Found framework transition at depth {}: '{}'", depth, sub_fwid);
                 return true;
             }
             
-            // Recurse deeper
-            if has_framework_transition(walker, &c, parent_fwid, max_depth - 1) {
-                return true;
+            // Add children to queue for next level
+            if depth < max_depth {
+                let mut sub_child = unsafe { walker.GetFirstChildElement(&node).ok() };
+                let mut sub_count = 0;
+                while let Some(sc) = sub_child {
+                    let next_sc = unsafe { walker.GetNextSiblingElement(&sc).ok() };
+                    queue.push_back((sc, depth + 1));
+                    sub_child = next_sc;
+                    sub_count += 1;
+                    if sub_count > 10 { break; } // Limit breadth per node
+                }
             }
-            
-            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
-            count += 1;
-            if count > 10 { break; } // Limit breadth too
         }
         
         false

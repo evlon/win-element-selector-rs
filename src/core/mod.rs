@@ -9,6 +9,7 @@ pub mod xpath_optimizer;
 pub mod error;
 pub mod uia;
 pub mod enum_windows;
+pub mod com_worker;
 
 // Re-export commonly used types for convenience
 pub use model::*;

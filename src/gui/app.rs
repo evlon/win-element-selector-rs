@@ -677,55 +677,86 @@ impl SelectorApp {
             self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
         }
 
-        // 确保 COM STA 已初始化（防止长时间运行后 COM 状态失效）
-        if let Err(e) = element_selector::core::uia::windows_impl::ensure_com_sta() {
-            info!("COM STA initialization failed before capture: {}", e);
-            self.status_msg = format!("COM 初始化失败: {}", e);
-            self.capture_state = CaptureState::Idle;
-            ctx.set_cursor_icon(egui::CursorIcon::Default);
-            return;
+        // 增强的 COM 状态检查和恢复
+        use element_selector::core::uia::windows_impl::{ComManager, UiaExecutor};
+        
+        match ComManager::ensure_sta() {
+            Ok(true) => {
+                log::debug!("COM STA verified");
+            }
+            Ok(false) => {
+                log::warn!("Thread in MTA mode, attempting recovery...");
+                if let Err(e) = ComManager::safe_reinitialize() {
+                    info!("COM recovery failed: {}", e);
+                    self.status_msg = format!("COM 恢复失败: {}", e);
+                    self.capture_state = CaptureState::Idle;
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    return;
+                }
+            }
+            Err(e) => {
+                info!("COM STA check failed: {}", e);
+                self.status_msg = format!("COM 检查失败: {}", e);
+                self.capture_state = CaptureState::Idle;
+                ctx.set_cursor_icon(egui::CursorIcon::Default);
+                return;
+            }
         }
 
-        let result = capture::capture_at(x, y);
-        if let Some(err) = &result.error {
-            self.status_msg = format!("捕获失败: {}", err);
-        } else {
-            let window_idx = Self::find_window_idx(&result);
+        // 使用带重试的执行器
+        let capture_result = UiaExecutor::execute_with_retry(
+            || Ok(capture::capture_at(x, y)),
+            2  // 最多重试 2 次
+        );
 
-            info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
-            for (i, n) in result.hierarchy.iter().enumerate() {
-                info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+        match capture_result {
+            Ok(result) => {
+                if let Some(err) = &result.error {
+                    self.status_msg = format!("捕获失败: {}", err);
+                } else {
+                    let window_idx = Self::find_window_idx(&result);
+
+                    info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
+                    for (i, n) in result.hierarchy.iter().enumerate() {
+                        info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+                    }
+                    if let Some(ref win) = result.window_info {
+                        info!("Window info: class='{}', name='{}', process='{}', pid={}",
+                              win.class_name, win.title, win.process_name, win.process_id);
+                    }
+                    info!("窗口节点定位: window_idx = {}", window_idx);
+
+                    let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
+                        result.hierarchy[window_idx + 1..].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let n = element_hierarchy.len();
+                    self.selected_node = n.checked_sub(1);
+                    self.window_info   = result.window_info.clone();
+
+                    // window_info 变更时同步初始化过滤器
+                    self.init_window_filters();
+
+                    let window_hint = result.window_info
+                        .as_ref()
+                        .map(|w| format!(" [窗口: {}]", w.title))
+                        .unwrap_or_default();
+                    self.status_msg = format!(
+                        "已捕获 {} 层层级 — 坐标 ({}, {}){}",
+                        n, result.cursor_x, result.cursor_y, window_hint
+                    );
+
+                    self.node_expanded = vec![true; n];
+                    self.hierarchy     = element_hierarchy;
+                }
             }
-            if let Some(ref win) = result.window_info {
-                info!("Window info: class='{}', name='{}', process='{}', pid={}",
-                      win.class_name, win.title, win.process_name, win.process_id);
+            Err(e) => {
+                info!("Capture failed after retries: {}", e);
+                self.status_msg = format!("捕获失败: {}", e);
+                self.capture_state = CaptureState::Idle;
             }
-            info!("窗口节点定位: window_idx = {}", window_idx);
-
-            let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
-                result.hierarchy[window_idx + 1..].to_vec()
-            } else {
-                Vec::new()
-            };
-
-            let n = element_hierarchy.len();
-            self.selected_node = n.checked_sub(1);
-            self.window_info   = result.window_info.clone();
-
-            // window_info 变更时同步初始化过滤器
-            self.init_window_filters();
-
-            let window_hint = result.window_info
-                .as_ref()
-                .map(|w| format!(" [窗口: {}]", w.title))
-                .unwrap_or_default();
-            self.status_msg = format!(
-                "已捕获 {} 层层级 — 坐标 ({}, {}){}",
-                n, result.cursor_x, result.cursor_y, window_hint
-            );
-
-            self.node_expanded = vec![true; n];
-            self.hierarchy     = element_hierarchy;
         }
 
         self.capture_state = CaptureState::Idle;

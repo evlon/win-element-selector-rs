@@ -37,22 +37,14 @@ pub async fn get_element(query: web::Query<ElementQuery>) -> impl Responder {
     let xpath = query.xpath.clone();
     let random_range = query.random_range;
     
-    // UI Automation 操作需要在 STA 线程中执行
+    // Use global COM worker thread (single-threaded COM management)
     let result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
-        super::super::capture::find_all_elements_detailed(
-            &window_selector,
-            &xpath,
-            random_range,
-        )
+        crate::core::com_worker::global_find_element(window_selector, xpath, Some(random_range))
     })
     .await;
     
     match result {
-        Ok(elements) => {
+        Ok(Ok(elements)) => {
             if let Some(element_info) = elements.into_iter().next() {
                 info!(
                     "Element found: type='{}' name='{}' center=({},{})",
@@ -73,12 +65,20 @@ pub async fn get_element(query: web::Query<ElementQuery>) -> impl Responder {
                 })
             }
         }
+        Ok(Err(e)) => {
+            warn!("COM worker error: {}", e);
+            HttpResponse::InternalServerError().json(ElementResponse {
+                found: false,
+                element: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
             HttpResponse::InternalServerError().json(ElementResponse {
                 found: false,
                 element: None,
-                error: Some(format!("内部错误: {}", e)),
+                error: Some(format!("线程错误: {}", e)),
             })
         }
     }
@@ -96,21 +96,14 @@ pub async fn get_all_elements(query: web::Query<ElementQuery>) -> impl Responder
     let xpath = query.xpath.clone();
     let random_range = query.random_range;
     
+    // Use global COM worker thread
     let result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
-        super::super::capture::find_all_elements_detailed(
-            &window_selector,
-            &xpath,
-            random_range,
-        )
+        crate::core::com_worker::global_find_element(window_selector, xpath, Some(random_range))
     })
     .await;
     
     match result {
-        Ok(elements) => {
+        Ok(Ok(elements)) => {
             let total = elements.len();
             if total > 0 {
                 info!("Found {} elements", total);
@@ -130,13 +123,22 @@ pub async fn get_all_elements(query: web::Query<ElementQuery>) -> impl Responder
                 })
             }
         }
+        Ok(Err(e)) => {
+            warn!("COM worker error: {}", e);
+            HttpResponse::InternalServerError().json(AllElementsResponse {
+                found: false,
+                elements: vec![],
+                total: 0,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
             HttpResponse::InternalServerError().json(AllElementsResponse {
                 found: false,
                 elements: vec![],
                 total: 0,
-                error: Some(format!("内部错误: {}", e)),
+                error: Some(format!("线程错误: {}", e)),
             })
         }
     }

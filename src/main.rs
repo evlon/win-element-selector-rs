@@ -32,6 +32,11 @@ fn main() -> anyhow::Result<()> {
         .expect("Failed to initialize mouse hook system");
     info!("Mouse hook system initialized");
 
+    // Initialize global COM worker thread (single-threaded COM management)
+    element_selector::core::com_worker::init_global_com_worker()
+        .expect("Failed to initialize COM worker");
+    info!("COM worker thread initialized");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Windows 元素选择器 v1.0")
