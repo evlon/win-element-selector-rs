@@ -104,6 +104,25 @@ export { Chain } from './chain';
 // 类型导出
 export type { ElementInfo, ProfileStats } from './chain';
 
+// 日志相关导出
+export { createLogger, Logger, LogConfig } from './logger';
+export type { LogLevel } from './logger';
+
+// 异常相关导出
+export {
+    SDKError,
+    ElementNotFoundError,
+    WindowNotFoundError,
+    NetworkError,
+    TimeoutError,
+    ActionFailedError,
+    InvalidArgumentError,
+    StateError,
+    isSDKError,
+    isElementNotFoundError,
+    isWindowNotFoundError
+} from './errors';
+
 export { DEFAULTS } from './types';
 export type {
     SDKConfig,

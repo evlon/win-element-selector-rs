@@ -2,7 +2,7 @@
 // sdk/nodejs/src/index.ts
 // Element Selector SDK - 流式 XPath 自动化
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.buildWindowSelector = exports.DEFAULTS = exports.Chain = exports.SDK = void 0;
+exports.buildWindowSelector = exports.DEFAULTS = exports.isWindowNotFoundError = exports.isElementNotFoundError = exports.isSDKError = exports.StateError = exports.InvalidArgumentError = exports.ActionFailedError = exports.TimeoutError = exports.NetworkError = exports.WindowNotFoundError = exports.ElementNotFoundError = exports.SDKError = exports.LogConfig = exports.Logger = exports.createLogger = exports.Chain = exports.SDK = void 0;
 const client_1 = require("./client");
 const chain_1 = require("./chain");
 const types_1 = require("./types");
@@ -92,6 +92,24 @@ exports.SDK = SDK;
 // 类导出（值）
 var chain_2 = require("./chain");
 Object.defineProperty(exports, "Chain", { enumerable: true, get: function () { return chain_2.Chain; } });
+// 日志相关导出
+var logger_1 = require("./logger");
+Object.defineProperty(exports, "createLogger", { enumerable: true, get: function () { return logger_1.createLogger; } });
+Object.defineProperty(exports, "Logger", { enumerable: true, get: function () { return logger_1.Logger; } });
+Object.defineProperty(exports, "LogConfig", { enumerable: true, get: function () { return logger_1.LogConfig; } });
+// 异常相关导出
+var errors_1 = require("./errors");
+Object.defineProperty(exports, "SDKError", { enumerable: true, get: function () { return errors_1.SDKError; } });
+Object.defineProperty(exports, "ElementNotFoundError", { enumerable: true, get: function () { return errors_1.ElementNotFoundError; } });
+Object.defineProperty(exports, "WindowNotFoundError", { enumerable: true, get: function () { return errors_1.WindowNotFoundError; } });
+Object.defineProperty(exports, "NetworkError", { enumerable: true, get: function () { return errors_1.NetworkError; } });
+Object.defineProperty(exports, "TimeoutError", { enumerable: true, get: function () { return errors_1.TimeoutError; } });
+Object.defineProperty(exports, "ActionFailedError", { enumerable: true, get: function () { return errors_1.ActionFailedError; } });
+Object.defineProperty(exports, "InvalidArgumentError", { enumerable: true, get: function () { return errors_1.InvalidArgumentError; } });
+Object.defineProperty(exports, "StateError", { enumerable: true, get: function () { return errors_1.StateError; } });
+Object.defineProperty(exports, "isSDKError", { enumerable: true, get: function () { return errors_1.isSDKError; } });
+Object.defineProperty(exports, "isElementNotFoundError", { enumerable: true, get: function () { return errors_1.isElementNotFoundError; } });
+Object.defineProperty(exports, "isWindowNotFoundError", { enumerable: true, get: function () { return errors_1.isWindowNotFoundError; } });
 var types_2 = require("./types");
 Object.defineProperty(exports, "DEFAULTS", { enumerable: true, get: function () { return types_2.DEFAULTS; } });
 // 工具导出

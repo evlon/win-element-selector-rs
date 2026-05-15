@@ -19,9 +19,12 @@ import {
     TypeOptions,
     TypeResult,
 } from './types';
+import { createLogger, Logger } from './logger';
+import { NetworkError, TimeoutError, SDKError } from './errors';
 
 export class HttpClient {
     private client: AxiosInstance;
+    private logger: Logger;
     
     constructor(config: SDKConfig) {
         this.client = axios.create({
@@ -31,6 +34,7 @@ export class HttpClient {
                 'Content-Type': 'application/json',
             },
         });
+        this.logger = createLogger('HttpClient');
     }
     
     async health(): Promise<HealthStatus> {
@@ -44,14 +48,32 @@ export class HttpClient {
     }
     
     async getElement(params: ElementQueryParams): Promise<ElementResponse> {
-        const response = await this.client.get<ElementResponse>('/api/element', {
-            params: {
-                windowSelector: params.windowSelector,
-                xpath: params.xpath,
-                randomRange: params.randomRange ?? DEFAULTS.click.randomRange,
-            },
+        const startTime = Date.now();
+        this.logger.debug('GET /api/element', { 
+            windowSelector: params.windowSelector.substring(0, 50) + '...',
+            xpath: params.xpath.substring(0, 80) + '...' 
         });
-        return response.data;
+        
+        try {
+            const response = await this.client.get<ElementResponse>('/api/element', {
+                params: {
+                    windowSelector: params.windowSelector,
+                    xpath: params.xpath,
+                    randomRange: params.randomRange ?? DEFAULTS.click.randomRange,
+                },
+            });
+            
+            const duration = Date.now() - startTime;
+            this.logger.info('Element query completed', { 
+                duration, 
+                found: response.data.found 
+            });
+            
+            return response.data;
+        } catch (error) {
+            this.logger.error('Element query failed', { params, error: (error as Error).message });
+            throw this.handleError(error, '/api/element');
+        }
     }
     
     async moveMouse(target: Point, options?: MoveOptions): Promise<MoveResult> {
@@ -67,17 +89,36 @@ export class HttpClient {
     }
     
     async clickMouse(params: ClickParams): Promise<ClickResult> {
-        const response = await this.client.post<ClickResult>('/api/mouse/click', {
+        const startTime = Date.now();
+        this.logger.debug('POST /api/mouse/click', { 
             window: params.window,
-            xpath: params.xpath,
-            options: params.options ? {
-                humanize: params.options.humanize ?? DEFAULTS.click.humanize,
-                randomRange: params.options.randomRange ?? DEFAULTS.click.randomRange,
-                pauseBefore: params.options.pauseBefore ?? DEFAULTS.click.pauseBefore,
-                pauseAfter: params.options.pauseAfter ?? DEFAULTS.click.pauseAfter,
-            } : undefined,
+            xpath: params.xpath.substring(0, 80) + '...' 
         });
-        return response.data;
+        
+        try {
+            const response = await this.client.post<ClickResult>('/api/mouse/click', {
+                window: params.window,
+                xpath: params.xpath,
+                options: params.options ? {
+                    humanize: params.options.humanize ?? DEFAULTS.click.humanize,
+                    randomRange: params.options.randomRange ?? DEFAULTS.click.randomRange,
+                    pauseBefore: params.options.pauseBefore ?? DEFAULTS.click.pauseBefore,
+                    pauseAfter: params.options.pauseAfter ?? DEFAULTS.click.pauseAfter,
+                } : undefined,
+            });
+            
+            const duration = Date.now() - startTime;
+            this.logger.info('Click completed', { 
+                duration, 
+                success: response.data.success,
+                clickPoint: response.data.success ? response.data.clickPoint : undefined
+            });
+            
+            return response.data;
+        } catch (error) {
+            this.logger.error('Click failed', { params, error: (error as Error).message });
+            throw this.handleError(error, '/api/mouse/click');
+        }
     }
     
     async startIdleMotion(params: IdleMotionParams): Promise<void> {
@@ -178,14 +219,48 @@ export class HttpClient {
         return response.data;
     }
     
-    handleError(error: unknown): Error {
+    handleError(error: unknown, endpoint?: string): never {
         if (axios.isAxiosError(error)) {
             const axiosError = error as AxiosError<{ error?: string }>;
-            const message = axiosError.response?.data?.error 
-                ?? axiosError.message 
-                ?? 'Unknown HTTP error';
-            return new Error(`SDK Error: ${message}`);
+            
+            // 超时错误
+            if (axiosError.code === 'ECONNABORTED') {
+                throw new TimeoutError(
+                    endpoint || 'unknown', 
+                    this.client.defaults.timeout || 30000
+                );
+            }
+            
+            // 网络错误（无响应）
+            if (!axiosError.response) {
+                throw new NetworkError(
+                    axiosError, 
+                    endpoint || 'unknown'
+                );
+            }
+            
+            // HTTP 错误
+            const message = axiosError.response?.data?.error ?? axiosError.message;
+            throw new SDKError(
+                `HTTP ${axiosError.response.status}: ${message}`,
+                `HTTP_${axiosError.response.status}`,
+                { 
+                    endpoint, 
+                    status: axiosError.response.status,
+                    responseData: axiosError.response.data
+                }
+            );
         }
-        return error instanceof Error ? error : new Error(String(error));
+        
+        // 其他错误
+        if (error instanceof Error) {
+            throw new SDKError(
+                error.message, 
+                'UNKNOWN_ERROR', 
+                { stack: error.stack }
+            );
+        }
+        
+        throw new SDKError(String(error), 'UNKNOWN_ERROR');
     }
 }

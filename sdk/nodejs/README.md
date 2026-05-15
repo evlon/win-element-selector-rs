@@ -25,6 +25,44 @@ await sdk.flow()
     .run();                         // 执行
 ```
 
+## 日志和错误处理
+
+SDK 提供企业级日志系统和结构化异常处理。
+
+### 日志配置
+
+```typescript
+import { SDK, LogConfig } from 'element-selector-sdk';
+
+// 设置日志级别：'trace' | 'debug' | 'info' | 'warn' | 'error' | 'silent'
+LogConfig.setLevel('debug');
+
+// 环境变量方式
+// LOG_LEVEL=debug npm run example:yuanbao
+```
+
+### 错误处理
+
+```typescript
+import { SDK, ElementNotFoundError } from 'element-selector-sdk';
+
+try {
+    await sdk.flow()
+        .window('MyApp')
+        .find('//Button[@Name="Submit"]')
+        .click()
+        .run();
+} catch (error) {
+    if (error instanceof ElementNotFoundError) {
+        console.error('元素未找到');
+        console.error('XPath:', error.context?.xpath);
+        console.error('截图:', error.context?.screenshotPath);
+    }
+}
+```
+
+详见 [LOGGING_GUIDE.md](./LOGGING_GUIDE.md)
+
 ## API 文档
 
 ### SDK 类

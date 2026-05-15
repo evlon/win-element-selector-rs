@@ -66,6 +66,9 @@ export declare class SDK {
 }
 export { Chain } from './chain';
 export type { ElementInfo, ProfileStats } from './chain';
+export { createLogger, Logger, LogConfig } from './logger';
+export type { LogLevel } from './logger';
+export { SDKError, ElementNotFoundError, WindowNotFoundError, NetworkError, TimeoutError, ActionFailedError, InvalidArgumentError, StateError, isSDKError, isElementNotFoundError, isWindowNotFoundError } from './errors';
 export { DEFAULTS } from './types';
 export type { SDKConfig, WindowSelector, WindowInfo, Point, Rect, } from './types';
 export { buildWindowSelector } from './utils';

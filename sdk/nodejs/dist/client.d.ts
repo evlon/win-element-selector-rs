@@ -1,6 +1,7 @@
 import { SDKConfig, HealthStatus, WindowInfo, ElementQueryParams, ElementResponse, ElementInfo, MoveResult, ClickParams, ClickResult, IdleMotionParams, IdleMotionStatus, StopResult, Point, MoveOptions, TypeOptions, TypeResult } from './types';
 export declare class HttpClient {
     private client;
+    private logger;
     constructor(config: SDKConfig);
     health(): Promise<HealthStatus>;
     listWindows(): Promise<WindowInfo[]>;
@@ -57,6 +58,6 @@ export declare class HttpClient {
         success: boolean;
         error?: string;
     }>;
-    handleError(error: unknown): Error;
+    handleError(error: unknown, endpoint?: string): never;
 }
 //# sourceMappingURL=client.d.ts.map

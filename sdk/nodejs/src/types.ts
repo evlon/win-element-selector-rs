@@ -207,8 +207,8 @@ export const DEFAULTS = {
     click: {
         humanize: true,
         randomRange: 0.55,
-        pauseBefore: 0,
-        pauseAfter: 0,
+        pauseBefore: 150,  // 点击前等待 150ms，让鼠标稳定
+        pauseAfter: 200,   // 点击后等待 200ms，给应用响应时间
     },
     
     idleMotion: {

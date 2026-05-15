@@ -5,6 +5,13 @@ import { HttpClient } from './client';
 import { WindowSelector, DEFAULTS, Point, Rect, ElementInfo } from './types';
 import { buildWindowSelector } from './utils';
 import { ScreenshotManager } from './screenshot';
+import { createLogger, Logger } from './logger';
+import { 
+    ElementNotFoundError, 
+    WindowNotFoundError, 
+    ActionFailedError,
+    StateError
+} from './errors';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -38,6 +45,7 @@ export class Chain {
     private client: HttpClient;
     private actions: ChainAction[] = [];
     private screenshotManager: ScreenshotManager;
+    private logger: Logger;
     
     // 当前状态
     private currentWindowSelector: string | null = null;  // XPath 格式的窗口选择器
@@ -54,6 +62,7 @@ export class Chain {
     constructor(client: HttpClient) {
         this.client = client;
         this.screenshotManager = new ScreenshotManager();
+        this.logger = createLogger('Chain');
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -732,6 +741,12 @@ export class Chain {
         this.profileStartTime = Date.now();
         this.profileSteps = [];
         
+        this.logger.info('Starting chain execution', { 
+            actionsCount: this.actions.length,
+            humanizeEnabled: this.humanizeEnabled,
+            debugMode: this.debugMode
+        });
+        
         const executeChain = async () => {
             await this.executePrefixActions();
             
@@ -741,17 +756,22 @@ export class Chain {
                 }
                 
                 const stepStart = Date.now();
+                this.logger.debug('Executing action', { type: action.type });
+                
                 await this.executeAction(action);
+                
+                const duration = Date.now() - stepStart;
+                this.logger.debug('Action completed', { type: action.type, duration });
                 
                 if (this.profileEnabled) {
                     this.profileSteps.push({
                         step: action.type,
-                        time: Date.now() - stepStart,
+                        time: duration,
                         xpath: action.xpath,
                     });
                 }
             }
-        };        
+        };
         
         if (this.retryCount > 0) {
             await this.executeWithRetry(executeChain);
@@ -759,11 +779,17 @@ export class Chain {
             await executeChain();
         }
         
+        const totalTime = Date.now() - this.profileStartTime;
+        this.logger.info('Chain execution completed', {
+            totalTime,
+            stepsCompleted: this.profileSteps.length
+        });
+        
         if (this.profileEnabled) {
             return {
-                totalTime: Date.now() - this.profileStartTime,
+                totalTime,
                 steps: this.profileSteps,
-            };        
+            };
         }
     }
     
@@ -780,19 +806,30 @@ export class Chain {
     }
     
     private async executeWindow(windowSelector: string): Promise<void> {
-        this.log(`window("${windowSelector}")`);
+        this.logger.debug('Activating window', { windowSelector });
         const result = await this.client.activateWindow(windowSelector);
+        
         if (!result.success) {
+            this.logger.error(`Window activation failed: ${result.error || 'Unknown error'}`, { 
+                windowSelector
+            });
             await this.failWithScreenshot(`Window not found: ${windowSelector}`, 'window');
         }
-        this.log(`  → window activated`);
+        
+        this.logger.info('Window activated', { windowSelector });
     }
     
     private async executeFind(xpath: string): Promise<void> {
         if (!this.currentWindowSelector) {
-            throw new Error('必须先调用 window() 激活窗口');
+            throw new StateError(
+                'Must call window() before find()',
+                'no_window_activated'
+            );
         }
-        this.log(`find("${xpath}")`);
+        
+        this.logger.debug('Finding element', { 
+            xpath: xpath.substring(0, 100) + (xpath.length > 100 ? '...' : '')
+        });
         
         const result = await this.client.getElement({
             windowSelector: this.currentWindowSelector,
@@ -801,6 +838,10 @@ export class Chain {
         });
         
         if (!result.found || !result.element) {
+            this.logger.error(`Element not found`, { 
+                xpath,
+                windowSelector: this.currentWindowSelector 
+            });
             await this.failWithScreenshot(
                 `Element not found: ${xpath}`,
                 'find',
@@ -813,7 +854,12 @@ export class Chain {
         const element = result.element!;
         this.currentElement = element;
         this.currentXpath = xpath;  // 保存 xpath 供后续 click 使用
-        this.log(`  → found: rect(${element.rect.x}, ${element.rect.y}, ${element.rect.width}x${element.rect.height})`);
+        
+        this.logger.info('Element found', { 
+            controlType: element.controlType,
+            name: element.name || '(unnamed)',
+            rect: `(${element.rect.x}, ${element.rect.y}, ${element.rect.width}x${element.rect.height})`
+        });
     }
     
     private async executeAction(action: ChainAction): Promise<void> {
@@ -893,9 +939,17 @@ export class Chain {
         this.log(`  → key executed`);
     }
     
-    private async failWithScreenshot(message: string, step: string, context?: { windowSelector?: string; xpath?: string }): Promise<void> {
+    private async failWithScreenshot(message: string, step: string, context?: { windowSelector?: string; xpath?: string }): Promise<never> {
         const screenshotPath = await this.screenshotManager.captureFailure(step);
         
+        // 记录详细错误日志
+        this.logger.error(`Action failed: ${message}`, {
+            step,
+            screenshotPath,
+            ...context
+        });
+        
+        // 输出到控制台（保持向后兼容）
         console.log('\n' + '='.repeat(60));
         console.log(`[FAILED] ${message}`);
         console.log('='.repeat(60));
@@ -904,12 +958,29 @@ export class Chain {
         if (context?.xpath) console.log(`XPath: ${context.xpath}`);
         
         console.log('\nAvailable windows:');
-        const windows = await this.client.listWindows();
-        windows.slice(0, 5).forEach(w => console.log(`  - ${w.title} (${w.className}, ${w.processName})`));
+        try {
+            const windows = await this.client.listWindows();
+            windows.slice(0, 5).forEach(w => console.log(`  - ${w.title} (${w.className}, ${w.processName})`));
+        } catch (e) {
+            console.log('  (Failed to retrieve window list)');
+        }
         
         console.log(`\nScreenshot saved: ${screenshotPath}`);
         console.log('Process exiting for manual intervention...\n');
-        process.exit(1);
+        
+        // 抛出结构化异常
+        if (step === 'window') {
+            throw new WindowNotFoundError(context?.windowSelector || 'unknown');
+        } else if (step === 'find') {
+            throw new ElementNotFoundError(
+                context?.xpath || 'unknown',
+                context?.windowSelector || 'unknown',
+                screenshotPath
+            );
+        }
+        
+        // 通用错误
+        throw new ActionFailedError(step, message, screenshotPath);
     }
     
     private getHumanizedDuration(): number {
