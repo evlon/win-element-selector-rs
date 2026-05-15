@@ -1814,8 +1814,18 @@ pub mod windows_impl {
                     // Calculate random center
                     let half_range_w = api_rect.width as f32 * random_range / 2.0;
                     let half_range_h = api_rect.height as f32 * random_range / 2.0;
-                    let offset_x = rng.gen_range(-half_range_w..half_range_w) as i32;
-                    let offset_y = rng.gen_range(-half_range_h..half_range_h) as i32;
+                    
+                    // 防止空范围导致 panic
+                    let offset_x = if half_range_w > 0.0 {
+                        rng.gen_range(-half_range_w..half_range_w) as i32
+                    } else {
+                        0
+                    };
+                    let offset_y = if half_range_h > 0.0 {
+                        rng.gen_range(-half_range_h..half_range_h) as i32
+                    } else {
+                        0
+                    };
                     let center_random = Point::new(center.x + offset_x, center.y + offset_y);
                     
                     Some(ElementInfo {

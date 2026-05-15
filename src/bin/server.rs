@@ -92,9 +92,11 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/window/list", web::post().to(window::list_windows))
             .route("/api/window/activate", web::post().to(window::activate_window))
             .route("/api/window/focus-element", web::post().to(window::focus_element))
-            // 元素查找
+            // 元素查找（支持 GET 和 POST）
             .route("/api/element", web::get().to(element::get_element))
+            .route("/api/element", web::post().to(element::get_element))
             .route("/api/element/all", web::get().to(element::get_all_elements))
+            .route("/api/element/all", web::post().to(element::get_all_elements))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击
