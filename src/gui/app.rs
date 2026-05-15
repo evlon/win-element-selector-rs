@@ -516,7 +516,7 @@ impl SelectorApp {
         let element_xpath = &self.element_xpath;
         
         format!(
-            "sdk.flow()\n  .window({})\n  .find(`{}`)",
+            "const sdk = new SDK();\nconst flow = sdk.flow();\n\n// 激活窗口\nawait flow.window({});\n\n// 查找元素\nconst element = await flow.find(`{}`);",
             window_obj,
             escape_backtick(element_xpath)
         )
@@ -529,9 +529,9 @@ impl SelectorApp {
         let element_xpath = &self.element_xpath;
         
         format!(
-          "{{\n  window: {},\n  xpath: `{}`,\n}}",
-          window_obj,
-          escape_backtick(element_xpath)
+            "// 窗口选择器\nconst windowSelector = {};\n\n// XPath\nconst xpath = `{}`;",
+            window_obj,
+            escape_backtick(element_xpath)
         )
     }
 
@@ -1874,14 +1874,14 @@ impl SelectorApp {
                     ui.label(RichText::new("代码格式:").color(t.muted).size(11.0));
                     ui.add_space(8.0);
                     
-                    if ui.selectable_label(current_format == CodeFormat::FullChain, "完整链式调用")
-                        .on_hover_text("适合从头开始编写新脚本\nsdk.flow().window(...).find('...')")
+                    if ui.selectable_label(current_format == CodeFormat::FullChain, "完整示例")
+                        .on_hover_text("适合从头开始编写新脚本\n包含 SDK 初始化和完整流程")
                         .clicked() {
                         new_format = Some(CodeFormat::FullChain);
                     }
                     
                     if ui.selectable_label(current_format == CodeFormat::ParamsObject, "参数对象")
-                        .on_hover_text("适合在已有代码中插入新步骤\n{ window: {...}, xpath: '...' }")
+                        .on_hover_text("适合在已有代码中插入新步骤\n生成 windowSelector 和 xpath 变量")
                         .clicked() {
                         new_format = Some(CodeFormat::ParamsObject);
                     }
