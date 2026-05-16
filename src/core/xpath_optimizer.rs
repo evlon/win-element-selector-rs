@@ -39,6 +39,12 @@ pub struct OptimizationResult {
 /// XPath智能优化器 - 直接调用 uiauto-xpath 库
 pub struct XPathOptimizer;
 
+/// 解析后的 XPath 节点（用于极简优化）
+struct ParsedXPathNode {
+    tag: String,
+    predicates: Vec<String>,
+}
+
 impl Default for XPathOptimizer {
     fn default() -> Self {
         Self::new()
@@ -472,27 +478,162 @@ impl XPathOptimizer {
     fn apply_minimal_optimization_to_hierarchy(
         &self,
         hierarchy: &[HierarchyNode],
-        _minimal_xpath: &str,
+        minimal_xpath: &str,
         target_index: usize,
     ) -> Vec<HierarchyNode> {
-        // 简化实现：只包含目标节点，其他节点全部排除
-        hierarchy.iter().enumerate().map(|(i, node)| {
-            let mut optimized_node = node.clone();
-            optimized_node.included = i == target_index;
-            
-            if i == target_index {
-                // 目标节点：根据 minimal_xpath 中的谓词设置 filters
-                // 这里简化处理，保留原有 filters 但禁用大部分
-                optimized_node.filters = optimized_node.filters.iter().map(|f| {
-                    let mut new_f = f.clone();
-                    // 只保留 ClassName 和 AutomationId
-                    new_f.enabled = matches!(f.name.as_str(), "ClassName" | "AutomationId");
-                    new_f
-                }).collect();
+        // 1. 解析 XPath，提取每个节点的标签和谓词
+        let xpath_nodes = self.parse_xpath_to_nodes(minimal_xpath);
+        
+        log::info!("[极简优化-同步] XPath 解析结果：{} 个节点", xpath_nodes.len());
+        for (i, node) in xpath_nodes.iter().enumerate() {
+            log::info!("  [{}] {} - {} 个谓词: {:?}", i, node.tag, node.predicates.len(), node.predicates);
+        }
+        
+        // 2. 构建原始 hierarchy 中 included 节点的索引映射
+        let included_indices: Vec<usize> = hierarchy.iter()
+            .enumerate()
+            .filter(|(i, n)| n.included && *i <= target_index)
+            .map(|(i, _)| i)
+            .collect();
+        
+        log::info!("[极简优化-同步] Included 节点索引：{:?}", included_indices);
+        
+        // 3. 创建优化后的 hierarchy
+        let mut optimized_hierarchy = hierarchy.to_vec();
+        
+        // 【关键修复】首先将所有 included 节点的 included 设置为 false
+        // 然后只将被 XPath 匹配的节点重新设置为 true
+        for idx in &included_indices {
+            optimized_hierarchy[*idx].included = false;
+        }
+        
+        // 4. 对每个 included 节点，根据 XPath 中的谓词更新 filters
+        for (xpath_idx, orig_idx) in included_indices.iter().enumerate() {
+            if xpath_idx >= xpath_nodes.len() {
+                log::warn!("[极简优化-同步] XPath 节点数({}) < included 节点数({}), 停止同步", 
+                    xpath_nodes.len(), included_indices.len());
+                break;
             }
             
-            optimized_node
-        }).collect()
+            let xpath_node = &xpath_nodes[xpath_idx];
+            let node = &mut optimized_hierarchy[*orig_idx];
+            
+            log::info!("[极简优化-同步] 处理节点 [{}]: XPath标签={}, Hierarchy标签={}", 
+                orig_idx, xpath_node.tag, node.control_type);
+            
+            // 如果这是 XPath 中的一个有效节点（有标签），将其 included 设置为 true
+            if !xpath_node.tag.is_empty() {
+                node.included = true;
+                
+                // 更新该节点的 filters：只保留在 XPath 谓词中出现的属性
+                let mut new_filters = Vec::new();
+                
+                for filter in &node.filters {
+                    // 检查这个属性是否在 XPath 谓词中出现
+                    let is_in_xpath = xpath_node.predicates.iter().any(|pred| {
+                        // 谓词格式可能是：
+                        // 1. @ClassName='xxx' (精确匹配)
+                        // 2. starts-with(@ClassName, 'xxx')
+                        // 3. ends-with(@ClassName, 'xxx')
+                        // 4. contains(@ClassName, 'xxx')
+                        
+                        // 提取谓词中的属性名（@ 后面的部分）
+                        if let Some(attr_pos) = pred.find('@') {
+                            let after_at = &pred[attr_pos + 1..];
+                            // 找到属性名的结束位置（遇到 ', ), 空格等）
+                            let attr_end = after_at.chars()
+                                .position(|c| !c.is_alphanumeric() && c != '_')
+                                .unwrap_or(after_at.len());
+                            let xpath_attr_name = &after_at[..attr_end];
+                            
+                            // 比较属性名（不区分大小写）
+                            let matches = xpath_attr_name.eq_ignore_ascii_case(&filter.name);
+                            if matches {
+                                log::debug!("  ✓ 属性 {} 在 XPath 中找到", filter.name);
+                            }
+                            matches
+                        } else {
+                            false
+                        }
+                    });
+                    
+                    if is_in_xpath {
+                        // 保留这个属性
+                        log::debug!("  → 保留属性: {}", filter.name);
+                        new_filters.push(filter.clone());
+                    } else {
+                        // 移除这个属性（设置 enabled=false）
+                        log::debug!("  → 禁用属性: {}", filter.name);
+                        let mut disabled_filter = filter.clone();
+                        disabled_filter.enabled = false;
+                        new_filters.push(disabled_filter);
+                    }
+                }
+                
+                node.filters = new_filters;
+            }
+        }
+        
+        optimized_hierarchy
+    }
+    
+    fn parse_xpath_to_nodes(&self, xpath: &str) -> Vec<ParsedXPathNode> {
+        let mut nodes = Vec::new();
+        
+        // 移除开头的 // 或 /
+        let xpath = xpath.trim_start_matches('/');
+        
+        // 按 / 分割（注意：// 应该被视为一个分隔符）
+        let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+        
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            
+            // 提取标签名（在第一个 [ 之前）
+            let (tag, predicates_str) = if let Some(bracket_pos) = part.find('[') {
+                (&part[..bracket_pos], &part[bracket_pos..])
+            } else {
+                (part, "")
+            };
+            
+            // 提取谓词列表
+            let predicates = self.extract_predicates(predicates_str);
+            
+            nodes.push(ParsedXPathNode {
+                tag: tag.to_string(),
+                predicates,
+            });
+        }
+        
+        nodes
+    }
+    
+    /// 从谓词字符串中提取单个谓词
+    fn extract_predicates(&self, predicates_str: &str) -> Vec<String> {
+        let mut predicates = Vec::new();
+        
+        if predicates_str.is_empty() {
+            return predicates;
+        }
+        
+        // 移除最外层的 []
+        let inner = predicates_str.trim_start_matches('[').trim_end_matches(']');
+        
+        // 简单处理：按 and 分割（不考虑嵌套括号的情况）
+        // 更完善的实现需要括号匹配，但这里简化处理
+        let parts: Vec<&str> = inner.split(" and ").collect();
+        
+        for part in parts {
+            let part = part.trim();
+            if !part.is_empty() {
+                predicates.push(part.to_string());
+            }
+        }
+        
+        predicates
     }
     
     /// 计算极简优化移除的属性数量

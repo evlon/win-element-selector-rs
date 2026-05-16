@@ -282,6 +282,7 @@ pub struct SelectorApp {
     optimization_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     optimization_rx: Option<std::sync::mpsc::Receiver<Option<OptimizationResult>>>,
     optimization_start_time: Option<std::time::Instant>,
+    log_panel_auto_close_time: Option<std::time::Instant>,  // 【新增】日志窗口自动关闭时间
 }
 
 impl SelectorApp {
@@ -436,6 +437,7 @@ impl SelectorApp {
             optimization_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             optimization_rx: None,
             optimization_start_time: None,
+            log_panel_auto_close_time: None,  // 【新增】初始化
         }
     }
 
@@ -917,24 +919,38 @@ impl SelectorApp {
         let optimization_in_progress = self.optimization_in_progress.clone();
         
         std::thread::spawn(move || {
-            // 执行极简优化
-            let optimizer = XPathOptimizer::new();
-            let result = optimizer.optimize_minimal(
-                &hierarchy,
-                &window_selector,
-            );
+            // 【关键修复】捕获后台线程的 panic，避免程序崩溃
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // 执行极简优化
+                let optimizer = XPathOptimizer::new();
+                optimizer.optimize_minimal(
+                    &hierarchy,
+                    &window_selector,
+                )
+            }));
             
             // 清除优化进行中标志
             optimization_in_progress.store(false, Ordering::SeqCst);
             
-            let elapsed = start_time.elapsed();
-            
-            log::info!("========================================");
-            log::info!("[极简优化] 优化流程结束，总耗时: {:.1}s", elapsed.as_secs_f64());
-            log::info!("========================================");
-            
-            // 发送结果到主线程
-            let _ = tx.send(result);
+            match result {
+                Ok(opt_result) => {
+                    let elapsed = start_time.elapsed();
+                    
+                    log::info!("========================================");
+                    log::info!("[极简优化] 优化流程结束，总耗时: {:.1}s", elapsed.as_secs_f64());
+                    log::info!("========================================");
+                    
+                    // 发送结果到主线程
+                    let _ = tx.send(opt_result);
+                }
+                Err(panic_info) => {
+                    log::error!("[极简优化] 后台线程 panic: {:?}", panic_info);
+                    log::error!("[极简优化] 优化失败，请查看控制台输出");
+                    
+                    // 发送 None 表示失败
+                    let _ = tx.send(None);
+                }
+            }
         });
         
         // 将 receiver 存储到 App 状态，在 update 中检查
@@ -1039,6 +1055,18 @@ impl SelectorApp {
                     );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // 【新增】日志窗口开关按钮
+                        let log_icon = if self.show_log_panel { "📋 隐藏日志" } else { "📋 显示日志" };
+                        if ui.add(
+                            egui::Button::new(RichText::new(log_icon).size(12.0))
+                                .stroke(Stroke::new(1.0, t.border))
+                                .min_size(Vec2::new(100.0, 28.0)),
+                        ).on_hover_text("打开/关闭极简优化日志窗口").clicked() {
+                            self.show_log_panel = !self.show_log_panel;
+                        }
+                        
+                        ui.add_space(8.0);
+                        
                         // 校验按钮
                         let val_label = self.validation.label();
                         let val_color = match &self.validation {
@@ -2051,6 +2079,17 @@ impl eframe::App for SelectorApp {
         let dark = ui.ctx().global_style().visuals.dark_mode;
         self.theme = Theme::new(dark);
 
+        // 【新增】检查是否需要自动关闭日志窗口
+        if let Some(close_time) = self.log_panel_auto_close_time {
+            if std::time::Instant::now() >= close_time {
+                self.show_log_panel = false;
+                self.log_panel_auto_close_time = None;
+            } else {
+                // 【关键修复】在等待关闭期间，持续请求重绘
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+
         // 【关键修复】检查后台优化是否完成
         if let Some(rx) = self.optimization_rx.take() {
             if let Ok(result) = rx.try_recv() {
@@ -2083,6 +2122,12 @@ impl eframe::App for SelectorApp {
                             info!("[极简优化] 优化后 XPath: {}", self.element_xpath);
                             self.do_validate();
                             self.save_to_file();
+                            
+                            // 【新增】优化成功后自动关闭日志窗口（延迟 2 秒，让用户有时间查看）
+                            self.log_panel_auto_close_time = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                            
+                            // 【关键修复】强制请求 UI 重绘，确保自动关闭能立即生效
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                         }
                         None => {
                             self.status_msg = "极简优化已取消或失败".to_string();
@@ -2356,12 +2401,13 @@ impl eframe::App for SelectorApp {
                                     let entries = self.gui_logger.get_logs();
                                     
                                     for entry in entries {
+                                        // 【关键修复】使用更柔和、更易读的颜色方案
                                         let (color, prefix) = match entry.level {
-                                            Level::Error => (egui::Color32::RED, "❌ ERROR"),
-                                            Level::Warn => (egui::Color32::YELLOW, "⚠️ WARN"),
-                                            Level::Info => (egui::Color32::GREEN, "ℹ️ INFO"),
-                                            Level::Debug => (egui::Color32::BLUE, "🔧 DEBUG"),
-                                            Level::Trace => (egui::Color32::GRAY, "📝 TRACE"),
+                                            Level::Error => (egui::Color32::from_rgb(255, 100, 100), "❌ ERROR"),  // 柔和红色
+                                            Level::Warn => (egui::Color32::from_rgb(255, 200, 100), "⚠️ WARN"),   // 柔和橙色
+                                            Level::Info => (egui::Color32::from_rgb(200, 200, 200), "ℹ️ INFO"),   // 浅灰色（主要日志）
+                                            Level::Debug => (egui::Color32::from_rgb(150, 150, 200), "🔧 DEBUG"),  // 柔和蓝色
+                                            Level::Trace => (egui::Color32::from_rgb(180, 180, 180), "📝 TRACE"),  // 中灰色
                                         };
                                         
                                         let time_str = entry.timestamp
