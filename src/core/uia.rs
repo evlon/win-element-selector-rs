@@ -187,10 +187,23 @@ pub mod windows_impl {
         
         /// 验证 IUIAutomation 实例是否有效
         fn validate_instance(auto: &IUIAutomation) -> bool {
-            // 尝试获取根元素作为健康检查
-            unsafe {
-                auto.GetRootElement().is_ok()
+            use std::time::Instant;
+            
+            // 尝试获取根元素作为健康检查，并设置超时
+            let start = Instant::now();
+            let result = unsafe {
+                auto.GetRootElement()
+            };
+            let elapsed = start.elapsed();
+            
+            // 如果操作超过 100ms，认为 COM 对象已经失效
+            if elapsed.as_millis() > 100 {
+                log::warn!("IUIAutomation health check took {}ms (too slow, likely stale)", 
+                          elapsed.as_millis());
+                return false;
             }
+            
+            result.is_ok()
         }
         
         /// 强制重置 IUIAutomation 实例
@@ -255,7 +268,7 @@ pub mod windows_impl {
         }
         
         /// 重置 IUIAutomation 实例（内部辅助函数）
-        fn force_reset_automation() {
+        pub fn force_reset_automation() {
             AUTOMATION.with(|cell| {
                 let mut opt = cell.borrow_mut();
                 *opt = None;
@@ -454,9 +467,27 @@ pub mod windows_impl {
                 let child = &chain[i + 1];
                 // 检查 parent 的直接子节点是否包含 child
                 let child_found = unsafe {
+                    use std::time::Instant;
+                    let start = Instant::now();
                     let mut found = false;
+                    let mut iteration_count = 0;
+                    const MAX_ITERATIONS: usize = 500; // 防止无限循环
+                    const TIMEOUT_MS: u128 = 2000; // 2秒超时
+                    
                     let mut c = walker.GetFirstChildElement(parent).ok();
                     while let Some(ref current_child) = c {
+                        iteration_count += 1;
+                        
+                        // 超时检查
+                        if iteration_count > MAX_ITERATIONS {
+                            log::warn!("Child search exceeded max iterations ({}), aborting", MAX_ITERATIONS);
+                            break;
+                        }
+                        if start.elapsed().as_millis() > TIMEOUT_MS {
+                            log::warn!("Child search timed out after {}ms, aborting", start.elapsed().as_millis());
+                            break;
+                        }
+                        
                         if auto.CompareElements(current_child, child)
                             .map(|b| b.as_bool())
                             .unwrap_or(false) {
@@ -465,6 +496,11 @@ pub mod windows_impl {
                         }
                         c = walker.GetNextSiblingElement(current_child).ok();
                     }
+                    
+                    if iteration_count > 100 {
+                        log::debug!("Checked {} siblings to find child", iteration_count);
+                    }
+                    
                     found
                 };
                 
