@@ -306,6 +306,211 @@ impl XPathOptimizer {
             }
         }
     }
+    
+    /// 执行极简优化：通过实时尝试验证移除所有非必要属性
+    pub fn optimize_minimal(
+        &self,
+        hierarchy: &[HierarchyNode],
+        window_selector: &str,
+    ) -> Option<OptimizationResult> {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use crate::core::model::ValidationResult;
+        
+        if hierarchy.is_empty() {
+            log::warn!("[极简优化] hierarchy 为空");
+            return None;
+        }
+        
+        log::info!("[极简优化] 开始优化，hierarchy 节点数: {}", hierarchy.len());
+        
+        // 1. 找到目标节点
+        let original_target_index = hierarchy.iter()
+            .position(|n| n.is_target)
+            .unwrap_or(hierarchy.len() - 1);
+        
+        // 2. 构建 XPath 节点列表
+        let xpath_nodes_with_indices: Vec<(usize, &HierarchyNode)> = hierarchy.iter()
+            .enumerate()
+            .filter(|(i, n)| n.included && *i <= original_target_index)
+            .collect();
+        
+        let target_xpath_pos = xpath_nodes_with_indices.iter()
+            .position(|(orig_idx, _)| *orig_idx == original_target_index);
+        
+        if target_xpath_pos.is_none() {
+            log::warn!("[极简优化] 目标节点不在 XPath 列表中");
+            return None;
+        }
+        
+        log::info!("[极简优化] XPath 节点数: {}", xpath_nodes_with_indices.len());
+        
+        // 3. 生成完整 XPath
+        let first_is_root = xpath_nodes_with_indices.first()
+            .map(|(orig_idx, _)| *orig_idx == 0)
+            .unwrap_or(false);
+        
+        let full_xpath = if first_is_root {
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            xpath_nodes_with_indices.iter()
+                .map(|(_, n)| {
+                    let segment = n.xpath_segment();
+                    if segment.starts_with('/') { segment } else { format!("/{}", segment) }
+                })
+                .collect::<Vec<_>>()
+                .join("")
+                .replacen("/", "//", 1)
+        };
+        
+        log::info!("[极简优化] 原始 XPath 长度: {} 字符", full_xpath.len());
+        
+        // 4. 创建取消标志
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_clone = cancel_flag.clone();
+        
+        // 5. 调用 uiauto-xpath 的极简优化（带验证回调和进度回调）
+        let window_sel = window_selector.to_string();
+        let hierarchy_clone = hierarchy.to_vec();
+        
+        let result = XPath::optimize_minimal(
+            &full_xpath,
+            // 验证回调
+            move |test_xpath: &str| -> uiauto_xpath::error::Result<bool> {
+                // 检查取消标志
+                if cancel_flag_clone.load(Ordering::SeqCst) {
+                    log::info!("[极简优化-验证] 检测到取消信号");
+                    return Err(uiauto_xpath::error::XPathError::ParseError("用户取消".into()));
+                }
+                
+                // 使用 COM worker 进行验证
+                match crate::core::com_worker::global_validate_xpath(
+                    window_sel.clone(),
+                    test_xpath.to_string(),
+                    hierarchy_clone.clone(),
+                ) {
+                    Ok(validation_result) => {
+                        // 【关键修复】极简优化要求 XPath 必须找到**恰好1个**元素
+                        let is_unique = matches!(validation_result.overall, ValidationResult::Found { count: 1, .. });
+                        if !is_unique {
+                            match &validation_result.overall {
+                                ValidationResult::Found { count, .. } => {
+                                    log::debug!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, test_xpath);
+                                }
+                                ValidationResult::NotFound => {
+                                    log::debug!("[极简优化-验证] XPath 未找到元素: {}", test_xpath);
+                                }
+                                _ => {}
+                            }
+                        }
+                        Ok(is_unique)
+                    }
+                    Err(e) => {
+                        log::warn!("[极简优化-验证] 验证失败: {}", e);
+                        Err(uiauto_xpath::error::XPathError::ParseError(format!("验证失败: {}", e)))
+                    }
+                }
+            },
+            // 进度回调 - 输出到日志
+            |msg: &str| {
+                log::info!("{}", msg);
+            }
+        );
+        
+        match result {
+            Ok(Some(minimal_xpath)) => {
+                log::info!("[极简优化] 优化成功，最终 XPath 长度: {} 字符", minimal_xpath.len());
+                
+                // 6. 解析极简 XPath 并应用到 hierarchy
+                let optimized_hierarchy = self.apply_minimal_optimization_to_hierarchy(
+                    hierarchy,
+                    &minimal_xpath,
+                    original_target_index,
+                );
+                
+                // 7. 统计信息
+                let removed_count = self.count_removed_attrs_for_minimal(hierarchy, &optimized_hierarchy);
+                let simplified_count = minimal_xpath.matches("starts-with").count()
+                    + minimal_xpath.matches("ends-with").count()
+                    + minimal_xpath.matches("contains").count();
+                
+                let summary = OptimizationSummary {
+                    removed_dynamic_attrs: removed_count,
+                    simplified_attrs: simplified_count,
+                    used_anchor: minimal_xpath.contains("//"),
+                    anchor_description: Some("极简优化".to_string()),
+                    compression_ratio: 1.0 - (minimal_xpath.len() as f64 / full_xpath.len() as f64),
+                };
+                
+                Some(OptimizationResult {
+                    anchor_index: None, // 极简优化不强调锚点
+                    target_index: original_target_index,
+                    summary,
+                    optimized_xpath: minimal_xpath.clone(),
+                    minimal_xpath,
+                    optimized_hierarchy,
+                })
+            }
+            Ok(None) => {
+                // 被取消
+                log::info!("[极简优化] 优化已被用户取消");
+                None
+            }
+            Err(e) => {
+                log::error!("[极简优化] 优化失败: {}", e);
+                None
+            }
+        }
+    }
+    
+    /// 将极简优化结果应用到 hierarchy
+    fn apply_minimal_optimization_to_hierarchy(
+        &self,
+        hierarchy: &[HierarchyNode],
+        _minimal_xpath: &str,
+        target_index: usize,
+    ) -> Vec<HierarchyNode> {
+        // 简化实现：只包含目标节点，其他节点全部排除
+        hierarchy.iter().enumerate().map(|(i, node)| {
+            let mut optimized_node = node.clone();
+            optimized_node.included = i == target_index;
+            
+            if i == target_index {
+                // 目标节点：根据 minimal_xpath 中的谓词设置 filters
+                // 这里简化处理，保留原有 filters 但禁用大部分
+                optimized_node.filters = optimized_node.filters.iter().map(|f| {
+                    let mut new_f = f.clone();
+                    // 只保留 ClassName 和 AutomationId
+                    new_f.enabled = matches!(f.name.as_str(), "ClassName" | "AutomationId");
+                    new_f
+                }).collect();
+            }
+            
+            optimized_node
+        }).collect()
+    }
+    
+    /// 计算极简优化移除的属性数量
+    fn count_removed_attrs_for_minimal(
+        &self,
+        original: &[HierarchyNode],
+        optimized: &[HierarchyNode],
+    ) -> usize {
+        let original_attr_count: usize = original.iter()
+            .map(|n| n.filters.iter().filter(|f| f.enabled).count())
+            .sum();
+        
+        let optimized_attr_count: usize = optimized.iter()
+            .map(|n| n.filters.iter().filter(|f| f.enabled).count())
+            .sum();
+        
+        original_attr_count.saturating_sub(optimized_attr_count)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

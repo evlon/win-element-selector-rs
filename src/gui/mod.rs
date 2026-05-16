@@ -6,6 +6,7 @@
 pub mod app;
 pub mod capture_overlay;
 pub mod highlight;
+pub mod logger;
 pub mod mouse_hook;
 pub mod state_model;
 

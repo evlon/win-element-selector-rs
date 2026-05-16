@@ -13,11 +13,12 @@ use element_selector::core::model::{
     ValidationResult, WindowInfo,
 };
 use element_selector::core::xpath;
-use element_selector::core::XPathOptimizer;
+use element_selector::core::{XPathOptimizer, OptimizationResult};
 use element_selector::capture;
 
 use super::capture_overlay::CaptureOverlay;
 use super::highlight;
+use super::logger::{GuiLogger, init_gui_logger};
 use super::mouse_hook::{self, CaptureMode};
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
@@ -274,6 +275,13 @@ pub struct SelectorApp {
     show_code_dialog: bool,
     generated_ts_code: String,
     code_format: CodeFormat,
+    
+    // 极简优化相关
+    gui_logger: GuiLogger,
+    show_log_panel: bool,
+    optimization_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    optimization_rx: Option<std::sync::mpsc::Receiver<Option<OptimizationResult>>>,
+    optimization_start_time: Option<std::time::Instant>,
 }
 
 impl SelectorApp {
@@ -421,6 +429,13 @@ impl SelectorApp {
             show_code_dialog: false,
             generated_ts_code: String::new(),
             code_format: CodeFormat::FullChain,
+            
+            // 极简优化相关
+            gui_logger: init_gui_logger(1000),
+            show_log_panel: false,
+            optimization_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            optimization_rx: None,
+            optimization_start_time: None,
         }
     }
 
@@ -868,6 +883,72 @@ impl SelectorApp {
         self.do_validate();
         self.save_to_file();
     }
+    
+    /// 执行极简优化
+    fn do_minimal_optimize(&mut self) {
+        if self.hierarchy.is_empty() {
+            self.status_msg = "没有可优化的元素层级".to_string();
+            return;
+        }
+        
+        // 设置优化进行中标志
+        use std::sync::atomic::Ordering;
+        self.optimization_in_progress.store(true, Ordering::SeqCst);
+        self.status_msg = "正在执行极简优化...".to_string();
+        
+        // 自动打开日志面板
+        self.show_log_panel = true;
+        
+        // 清空旧日志，只显示本次优化的日志
+        self.gui_logger.clear();
+        
+        // 记录开始时间
+        let start_time = std::time::Instant::now();
+        
+        log::info!("========================================");
+        log::info!("[极简优化] 用户触发极简优化");
+        log::info!("========================================");
+        
+        // 【关键修复】使用 channel 在后台线程执行优化，实时传递日志和结果
+        let (tx, rx) = std::sync::mpsc::channel();
+        
+        let hierarchy = self.hierarchy.clone();
+        let window_selector = self.window_selector.clone();
+        let optimization_in_progress = self.optimization_in_progress.clone();
+        
+        std::thread::spawn(move || {
+            // 执行极简优化
+            let optimizer = XPathOptimizer::new();
+            let result = optimizer.optimize_minimal(
+                &hierarchy,
+                &window_selector,
+            );
+            
+            // 清除优化进行中标志
+            optimization_in_progress.store(false, Ordering::SeqCst);
+            
+            let elapsed = start_time.elapsed();
+            
+            log::info!("========================================");
+            log::info!("[极简优化] 优化流程结束，总耗时: {:.1}s", elapsed.as_secs_f64());
+            log::info!("========================================");
+            
+            // 发送结果到主线程
+            let _ = tx.send(result);
+        });
+        
+        // 将 receiver 存储到 App 状态，在 update 中检查
+        self.optimization_rx = Some(rx);
+        self.optimization_start_time = Some(start_time);
+    }
+    
+    /// 取消极简优化
+    fn cancel_minimal_optimize(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.optimization_in_progress.store(true, Ordering::SeqCst);
+        self.status_msg = "正在取消极简优化...".to_string();
+        log::info!("[极简优化] 用户请求取消");
+    }
 
     fn do_confirm_and_close(&mut self, ctx: &egui::Context) {
         // 1. 语法检查
@@ -1160,6 +1241,23 @@ impl SelectorApp {
 
             if ui.small_button("智能优化").on_hover_text("自动优化 XPath，移除动态属性，使用锚点定位").clicked() {
                 self.do_optimize();
+            }
+            
+            // 极简优化按钮（根据状态显示不同文本）
+            use std::sync::atomic::Ordering;
+            let is_optimizing = self.optimization_in_progress.load(Ordering::SeqCst);
+            let (btn_text, btn_tooltip) = if is_optimizing {
+                ("❌ 取消", "取消正在进行的极简优化")
+            } else {
+                ("🎯 极简优化", "通过尝试验证逐个移除属性，得到最简 XPath")
+            };
+            
+            if ui.small_button(btn_text).on_hover_text(btn_tooltip).clicked() {
+                if is_optimizing {
+                    self.cancel_minimal_optimize();
+                } else {
+                    self.do_minimal_optimize();
+                }
             }
 
             if ui.small_button("生成 TS 代码").on_hover_text("生成 TypeScript SDK 选择器代码").clicked() {
@@ -1953,6 +2051,53 @@ impl eframe::App for SelectorApp {
         let dark = ui.ctx().global_style().visuals.dark_mode;
         self.theme = Theme::new(dark);
 
+        // 【关键修复】检查后台优化是否完成
+        if let Some(rx) = self.optimization_rx.take() {
+            if let Ok(result) = rx.try_recv() {
+                // 优化完成，处理结果
+                if let Some(start_time) = self.optimization_start_time.take() {
+                    let elapsed = start_time.elapsed();
+                    
+                    match result {
+                        Some(opt_result) => {
+                            // 更新 hierarchy
+                            self.hierarchy = opt_result.optimized_hierarchy.clone();
+                            
+                            // 直接使用优化器返回的 XPath
+                            self.element_xpath = opt_result.optimized_xpath.clone();
+                            self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+                            self.xpath_error = xpath::lint(&self.xpath_text);
+                            self.validation = ValidationResult::Idle;
+                            
+                            // 标记为已优化状态
+                            self.xpath_source = XPathSource::Optimized(opt_result.summary.clone());
+                            
+                            let summary = &opt_result.summary;
+                            self.status_msg = format!(
+                                "极简优化完成（耗时 {:.1}s）：移除 {} 个属性，简化 {} 个属性",
+                                elapsed.as_secs_f64(),
+                                summary.removed_dynamic_attrs,
+                                summary.simplified_attrs
+                            );
+                            
+                            info!("[极简优化] 优化后 XPath: {}", self.element_xpath);
+                            self.do_validate();
+                            self.save_to_file();
+                        }
+                        None => {
+                            self.status_msg = "极简优化已取消或失败".to_string();
+                            log::info!("[极简优化] 用户取消了优化或优化失败");
+                        }
+                    }
+                }
+            } else {
+                // 还没有收到结果，放回去继续等待
+                self.optimization_rx = Some(rx);
+                // 强制刷新 UI，让用户看到日志实时更新
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+            }
+        }
+
         // 捕获状态下持续刷新
         if self.capture_state != CaptureState::Idle {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
@@ -2154,6 +2299,114 @@ impl eframe::App for SelectorApp {
         
         // 绘制代码生成对话框
         self.draw_code_dialog(ui.ctx());
+        
+        // 绘制极简优化日志面板
+        {
+            use std::sync::atomic::Ordering;
+            use log::Level;
+            
+            let is_optimizing = self.optimization_in_progress.load(Ordering::SeqCst);
+            
+            if is_optimizing || self.show_log_panel {
+                if self.show_log_panel {
+                    egui::Window::new("📋 极简优化日志")
+                        .open(&mut self.show_log_panel)
+                        .resizable(true)
+                        .default_size([700.0, 400.0])
+                        .min_size([400.0, 200.0])
+                        .show(ui.ctx(), |window_ui| {
+                            let log_count = self.gui_logger.len();
+                            
+                            window_ui.horizontal(|window_ui| {
+                                window_ui.label(format!("共 {} 条日志", log_count));
+                                
+                                window_ui.add_space(10.0);
+                                
+                                if window_ui.small_button("🗑️ 清空").clicked() {
+                                    self.gui_logger.clear();
+                                }
+                                
+                                if window_ui.small_button("📋 复制全部").clicked() {
+                                    let logs: Vec<String> = self.gui_logger.get_logs()
+                                        .iter()
+                                        .map(|entry| {
+                                            format!("[{}] {}", 
+                                                match entry.level {
+                                                    Level::Error => "ERROR",
+                                                    Level::Warn => "WARN",
+                                                    Level::Info => "INFO",
+                                                    Level::Debug => "DEBUG",
+                                                    Level::Trace => "TRACE",
+                                                },
+                                                entry.message
+                                            )
+                                        })
+                                        .collect();
+                                    let text = logs.join("\n");
+                                    window_ui.ctx().copy_text(text);
+                                }
+                            });
+                            
+                            window_ui.separator();
+                            
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(true)
+                                .show(window_ui, |scroll_ui| {
+                                    let entries = self.gui_logger.get_logs();
+                                    
+                                    for entry in entries {
+                                        let (color, prefix) = match entry.level {
+                                            Level::Error => (egui::Color32::RED, "❌ ERROR"),
+                                            Level::Warn => (egui::Color32::YELLOW, "⚠️ WARN"),
+                                            Level::Info => (egui::Color32::GREEN, "ℹ️ INFO"),
+                                            Level::Debug => (egui::Color32::BLUE, "🔧 DEBUG"),
+                                            Level::Trace => (egui::Color32::GRAY, "📝 TRACE"),
+                                        };
+                                        
+                                        let time_str = entry.timestamp
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .ok()
+                                            .map(|d| {
+                                                let secs = d.as_secs();
+                                                let millis = d.subsec_millis();
+                                                format!("{:02}:{:02}:{:02}.{:03}",
+                                                    (secs / 3600) % 24,
+                                                    (secs / 60) % 60,
+                                                    secs % 60,
+                                                    millis
+                                                )
+                                            })
+                                            .unwrap_or_default();
+                                        
+                                        scroll_ui.horizontal(|row_ui| {
+                                            row_ui.label(
+                                                egui::RichText::new(format!("[{}]", time_str))
+                                                    .color(egui::Color32::GRAY)
+                                                    .monospace()
+                                                    .size(9.0)
+                                            );
+                                            
+                                            row_ui.label(
+                                                egui::RichText::new(prefix)
+                                                    .color(color)
+                                                    .monospace()
+                                                    .size(10.0)
+                                            );
+                                            
+                                            row_ui.label(
+                                                egui::RichText::new(entry.message)
+                                                    .color(color)
+                                                    .monospace()
+                                                    .size(10.0)
+                                            );
+                                        });
+                                    }
+                                });
+                        });
+                }
+            }
+        }
     }
 }
 

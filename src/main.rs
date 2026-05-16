@@ -35,27 +35,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     
-    // Determine log level based on -v flags
-    let log_level = if args.contains(&"-vvv".to_string()) || args.contains(&"--verbose".to_string()) {
-        "debug"
-    } else if args.contains(&"-vv".to_string()) {
-        "info"
-    } else if args.contains(&"-v".to_string()) {
-        "warn"
-    } else {
-        "info"  // default
-    };
-    
-    // Initialize logger with specified level
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(log_level),
-    )
-    .init();
-    
-    info!("element-selector starting (log level: {})", log_level);
-    if args.contains(&"-vvv".to_string()) || args.contains(&"--verbose".to_string()) {
-        info!("Verbose mode enabled - detailed logs will be shown");
-    }
+    // 【关键修复】不再使用 env_logger，改用 GuiLogger
+    // GuiLogger 会在 App::new() 中初始化，同时输出到控制台和 GUI
 
     // COM must be initialized on the main thread (STA) for UI Automation.
     {
