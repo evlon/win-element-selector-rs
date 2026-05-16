@@ -212,8 +212,9 @@ impl HierarchyNode {
             PropertyFilter::new("ClassName", &cn)
         };
         
+        // Note: ControlType is NOT added as a filter because it's already expressed by the XPath tag name.
+        // The tag() method returns control_type, so //Button[@Name='...'] implicitly means ControlType='Button'.
         let mut filters = vec![
-            PropertyFilter::new("ControlType",    &ct),
             PropertyFilter::new("AutomationId",   &aid),
             class_filter,
             PropertyFilter::new("Name",           &nm),

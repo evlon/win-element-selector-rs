@@ -245,8 +245,8 @@ impl XPathOptimizer {
                     optimized_filter.enabled = f.value.len() <= limit && !f.value.is_empty();
                 }
                 "ControlType" => {
-                    // ControlType 对定位很重要，保留
-                    optimized_filter.enabled = true;
+                    // ControlType 已通过 XPath 标签名表达，不需要额外谓词
+                    optimized_filter.enabled = false;
                 }
                 "Index" => {
                     // Index 保留
