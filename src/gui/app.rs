@@ -89,7 +89,6 @@ pub struct SelectorApp {
     pub optimization_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub optimization_rx: Option<std::sync::mpsc::Receiver<Option<OptimizationResult>>>,
     pub optimization_start_time: Option<std::time::Instant>,
-    pub log_panel_auto_close_time: Option<std::time::Instant>,  // 【新增】日志窗口自动关闭时间
 }
 
 impl SelectorApp {
@@ -244,7 +243,6 @@ impl SelectorApp {
             optimization_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             optimization_rx: None,
             optimization_start_time: None,
-            log_panel_auto_close_time: None,  // 【新增】初始化
         }
     }
 
@@ -842,16 +840,8 @@ impl eframe::App for SelectorApp {
         let dark = ui.ctx().global_style().visuals.dark_mode;
         self.theme = Theme::new(dark);
 
-        // 【新增】检查是否需要自动关闭日志窗口
-        if let Some(close_time) = self.log_panel_auto_close_time {
-            if std::time::Instant::now() >= close_time {
-                self.show_log_panel = false;
-                self.log_panel_auto_close_time = None;
-            } else {
-                // 【关键修复】在等待关闭期间，持续请求重绘
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-            }
-        }
+        // 【新增】检查是否需要自动关闭日志窗口（已移除自动关闭，改为手动）
+        // if let Some(close_time) = self.log_panel_auto_close_time { ... }
 
         // 【关键修复】检查后台优化是否完成
         if let Some(rx) = self.optimization_rx.take() {
@@ -886,8 +876,8 @@ impl eframe::App for SelectorApp {
                             self.do_validate();
                             self.save_to_file();
                             
-                            // 【新增】优化成功后自动关闭日志窗口（延迟 2 秒，让用户有时间查看）
-                            self.log_panel_auto_close_time = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                            // 【修改】优化成功后不再自动关闭日志窗口，方便用户复查
+                            // self.log_panel_auto_close_time = Some(...);
                             
                             // 【关键修复】强制请求 UI 重绘，确保自动关闭能立即生效
                             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -1108,21 +1098,20 @@ impl eframe::App for SelectorApp {
         // 绘制代码生成对话框
         self.draw_code_dialog(ui.ctx());
         
-        // 绘制极简优化日志面板
+        // 绘制独立日志窗口
         {
-            use std::sync::atomic::Ordering;
             use log::Level;
             
-            let is_optimizing = self.optimization_in_progress.load(Ordering::SeqCst);
-            
-            if is_optimizing || self.show_log_panel {
-                if self.show_log_panel {
-                    egui::Window::new("📋 极简优化日志")
-                        .open(&mut self.show_log_panel)
-                        .resizable(true)
-                        .default_size([700.0, 400.0])
-                        .min_size([400.0, 200.0])
-                        .show(ui.ctx(), |window_ui| {
+            if self.show_log_panel {
+                egui::Window::new("📋 极简优化日志")
+                    .open(&mut self.show_log_panel)
+                    .resizable(true)
+                    .collapsible(true)
+                    .default_size([700.0, 400.0])
+                    .min_size([400.0, 200.0])
+                    .default_pos([100.0, 100.0])
+                    .constrain(true) // 【关键修改】允许窗口移动到主视口区域外
+                    .show(ui.ctx(), |window_ui| {
                             let log_count = self.gui_logger.len();
                             
                             window_ui.horizontal(|window_ui| {
@@ -1213,7 +1202,6 @@ impl eframe::App for SelectorApp {
                                     }
                                 });
                         });
-                }
             }
         }
     }
