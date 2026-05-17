@@ -250,6 +250,7 @@ pub fn spawn_background_tasks(cancel_token: CancellationToken) {
 /// 检测人工鼠标移动
 async fn human_mouse_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token: CancellationToken) {
     let mut last_mouse_pos = mouse_control::get_cursor_position();
+    let mut was_paused_by_human = false; // 跟踪是否已经因为人工移动而暂停
     
     loop {
         tokio::select! {
@@ -292,9 +293,17 @@ async fn human_mouse_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token: 
                 let current_pos = mouse_control::get_cursor_position();
                 if current_pos.x != last_mouse_pos.x || current_pos.y != last_mouse_pos.y {
                     // 检测到人工鼠标移动
-                    pause_idle_motion(PauseReason::HumanMouse).await;
                     update_last_human_activity().await;
-                    info!("Human mouse movement detected, idle motion paused");
+                    
+                    // ✅ 只在首次检测到时暂停和记录日志，避免刷屏
+                    if !was_paused_by_human {
+                        pause_idle_motion(PauseReason::HumanMouse).await;
+                        info!("🖱️  Human mouse movement detected, idle motion paused");
+                        was_paused_by_human = true;
+                    }
+                } else {
+                    // 鼠标静止，重置标志
+                    was_paused_by_human = false;
                 }
                 
                 last_mouse_pos = current_pos;
@@ -402,7 +411,7 @@ async fn idle_timeout_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token:
     }
 }
 
-/// 空闲移动执行任务
+/// 空闲移动执行任务 - 连续流畅模式
 async fn idle_motion_task(state: Arc<RwLock<IdleMotionState>>, cancel_token: CancellationToken) {
     loop {
         tokio::select! {
@@ -410,7 +419,7 @@ async fn idle_motion_task(state: Arc<RwLock<IdleMotionState>>, cancel_token: Can
                 info!("Idle motion task stopped");
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {  // 高频轮询
                 let state_guard = state.read().await;
                 
                 // 检查是否活跃且未暂停
@@ -418,39 +427,42 @@ async fn idle_motion_task(state: Arc<RwLock<IdleMotionState>>, cancel_token: Can
                     continue;
                 }
                 
-                let move_interval = state_guard.params.as_ref()
-                    .map(|p| p.move_interval)
-                    .unwrap_or(800);
+                // 如果服务端正在执行其他鼠标任务，跳过本次
+                if state_guard.server_moving_mouse {
+                    continue;
+                }
+                
+                let move_speed = state_guard.params.as_ref()
+                    .map(|p| p.speed.clone())
+                    .unwrap_or_else(|| "normal".to_string());
                 
                 let current_rect = state_guard.current_rect.clone();
                 
                 drop(state_guard);
                 
-                // 等待移动间隔
-                tokio::time::sleep(Duration::from_millis(move_interval)).await;
-                
-                // 再次检查状态（可能在等待期间发生变化）
-                let state_guard = state.read().await;
-                if !state_guard.active || state_guard.paused || state_guard.server_moving_mouse {
-                    continue;
-                }
-                
                 if let Some(rect) = &current_rect {
-                    // 计算随机目标点
+                    // 生成新的随机目标点
                     let target = calculate_random_point_in_rect(rect);
                     
+                    // 根据速度设置移动持续时间（更短的时间实现流畅感）
+                    let duration = match move_speed.as_str() {
+                        "slow" => 600,
+                        "fast" => 150,
+                        _ => 300,  // normal - 缩短到300ms
+                    };
+                    
                     // 标记服务端正在移动
-                    drop(state_guard);
                     set_server_moving_mouse(true).await;
                     
                     // 执行拟人化移动
                     let current_pos = mouse_control::get_cursor_position();
-                    let _ = mouse_control::humanized_move(current_pos, target, 400, "bezier");
+                    let _ = mouse_control::humanized_move(current_pos, target, duration, "bezier");
                     
                     // 取消标记
                     set_server_moving_mouse(false).await;
                     
-                    info!("Idle motion moved to ({}, {})", target.x, target.y);
+                    // ✅ 关键改进：移除等待间隔，立即生成下一个目标
+                    // 这样会形成连续的移动效果
                 }
             }
         }
