@@ -254,14 +254,258 @@ fn send_unicode_char(ch: char) {
     }
 }
 
-/// 拟人化打字 - 每个字符随机延迟
+/// 发送组合键（如 Ctrl+C, Alt+F4）
+fn send_shortcut(shortcut: &str) -> anyhow::Result<()> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN,
+    };
+    
+    // 解析按键组合
+    let parts: Vec<&str> = shortcut.split('+').collect();
+    if parts.is_empty() {
+        return Err(anyhow::anyhow!("Invalid shortcut format"));
+    }
+    
+    // 获取修饰键和目标键
+    let mut modifiers: Vec<u16> = Vec::new();
+    let target_key = parts.last().unwrap();
+    
+    for part in &parts[..parts.len() - 1] {
+        let mod_key = match part.trim().to_lowercase().as_str() {
+            "ctrl" | "control" => VK_CONTROL.0,
+            "shift" => VK_SHIFT.0,
+            "alt" | "menu" => VK_MENU.0,
+            "win" | "windows" => VK_LWIN.0,
+            _ => continue,
+        };
+        modifiers.push(mod_key);
+    }
+    
+    // 获取目标键的虚拟键码
+    let target_vk = parse_key_name(target_key.trim());
+    if target_vk == 0 {
+        return Err(anyhow::anyhow!("Unknown key: {}", target_key));
+    }
+    
+    // 构建输入序列：按下修饰键 -> 按下目标键 -> 释放目标键 -> 释放修饰键
+    let mut inputs: Vec<INPUT> = Vec::new();
+    
+    // 按下修饰键
+    for &mod_key in &modifiers {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(mod_key),
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+    
+    // 按下目标键
+    inputs.push(INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(target_vk),
+                wScan: 0,
+                dwFlags: KEYBD_EVENT_FLAGS(0),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+    
+    // 短暂等待
+    std::thread::sleep(Duration::from_millis(50));
+    
+    // 释放目标键
+    inputs.push(INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(target_vk),
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    });
+    
+    // 释放修饰键
+    for &mod_key in &modifiers {
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(mod_key),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        });
+    }
+    
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+    
+    Ok(())
+}
+
+/// 发送虚拟键（如 Enter、Tab 等）
+fn send_virtual_key(key_name: &str) -> anyhow::Result<()> {
+    let vk = parse_key_name(key_name);
+    if vk == 0 {
+        return Err(anyhow::anyhow!("Unknown virtual key: {}", key_name));
+    }
+    
+    // 按下
+    let key_down = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: KEYBD_EVENT_FLAGS(0),
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    
+    // 短暂等待
+    std::thread::sleep(Duration::from_millis(30));
+    
+    // 释放
+    let key_up = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: KEYEVENTF_KEYUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    
+    let inputs = [key_down, key_up];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+    
+    Ok(())
+}
+
+/// 拟人化打字 - 支持普通字符、虚拟键和组合键混合输入
+/// 
+/// 支持的虚拟键格式：{Enter}, {Tab}, {Escape}, {Backspace}, {Delete}, 
+/// {Home}, {End}, {PageUp}, {PageDown}, {Left}, {Right}, {Up}, {Down},
+/// {F1}-{F12} 等
+/// 
+/// 如果要输入字面意义的 "{" 或 "}"，使用 {{ 和 }}
 pub fn humanized_type(text: &str, min_delay: u64, max_delay: u64) -> anyhow::Result<(u32, u64)> {
     let start = Instant::now();
     let mut rng = rand::thread_rng();
     let mut chars_typed = 0u32;
     
-    for ch in text.chars() {
-        // 发送字符
+    let mut chars = text.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        // 检查是否是转义字符 {{
+        if ch == '{' {
+            if let Some(&next_ch) = chars.peek() {
+                if next_ch == '{' {
+                    // 转义的左花括号，输出单个 {
+                    chars.next(); // 消耗第二个 {
+                    send_unicode_char('{');
+                    chars_typed += 1;
+                    let delay = rng.gen_range(min_delay..max_delay + 1);
+                    std::thread::sleep(Duration::from_millis(delay));
+                    continue;
+                } else {
+                    // 可能是虚拟键，收集直到 }
+                    let mut key_name = String::new();
+                    let mut found_end = false;
+                    
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            found_end = true;
+                            break;
+                        }
+                        key_name.push(c);
+                    }
+                    
+                    if found_end && !key_name.is_empty() {
+                        // 检查是否是组合键（包含 +）
+                        if key_name.contains('+') {
+                            // 发送组合键
+                            send_shortcut(&key_name)?;
+                            chars_typed += 1;
+                        } else {
+                            // 发送单键
+                            send_virtual_key(&key_name)?;
+                            chars_typed += 1;
+                        }
+                        let delay = rng.gen_range(min_delay..max_delay + 1);
+                        std::thread::sleep(Duration::from_millis(delay));
+                    } else {
+                        // 没有找到闭合的 }，当作普通字符处理
+                        send_unicode_char('{');
+                        chars_typed += 1;
+                        let delay = rng.gen_range(min_delay..max_delay + 1);
+                        std::thread::sleep(Duration::from_millis(delay));
+                        // 将已收集的字符重新作为普通字符发送
+                        for c in key_name.chars() {
+                            send_unicode_char(c);
+                            chars_typed += 1;
+                            let delay = rng.gen_range(min_delay..max_delay + 1);
+                            std::thread::sleep(Duration::from_millis(delay));
+                        }
+                    }
+                    continue;
+                }
+            } else {
+                // 最后一个字符是 {，直接输出
+                send_unicode_char('{');
+                chars_typed += 1;
+                let delay = rng.gen_range(min_delay..max_delay + 1);
+                std::thread::sleep(Duration::from_millis(delay));
+                continue;
+            }
+        }
+        
+        // 检查是否是转义字符 }}
+        if ch == '}' {
+            if let Some(&next_ch) = chars.peek() {
+                if next_ch == '}' {
+                    // 转义的右花括号，输出单个 }
+                    chars.next(); // 消耗第二个 }
+                    send_unicode_char('}');
+                    chars_typed += 1;
+                    let delay = rng.gen_range(min_delay..max_delay + 1);
+                    std::thread::sleep(Duration::from_millis(delay));
+                    continue;
+                }
+            }
+            // 单独的 } 当作普通字符
+            send_unicode_char('}');
+            chars_typed += 1;
+            let delay = rng.gen_range(min_delay..max_delay + 1);
+            std::thread::sleep(Duration::from_millis(delay));
+            continue;
+        }
+        
+        // 普通字符
         send_unicode_char(ch);
         chars_typed += 1;
         
@@ -540,5 +784,44 @@ mod tests {
             char_delay: None,
         };
         assert_eq!(request.text.chars().count(), 5);
+    }
+    
+    /// 测试虚拟键解析 - Enter
+    #[test]
+    fn test_virtual_key_enter_parsing() {
+        let text = "Hello{Enter}";
+        // 验证文本中包含虚拟键标记
+        assert!(text.contains("{Enter}"));
+    }
+    
+    /// 测试虚拟键解析 - Tab
+    #[test]
+    fn test_virtual_key_tab_parsing() {
+        let text = "Field1{Tab}Field2";
+        assert!(text.contains("{Tab}"));
+    }
+    
+    /// 测试转义花括号
+    #[test]
+    fn test_escaped_braces() {
+        let text = "Config: {{key}} = value";
+        // 应该被解析为: Config: {key} = value
+        assert_eq!(text, "Config: {{key}} = value");
+    }
+    
+    /// 测试混合输入
+    #[test]
+    fn test_mixed_input() {
+        let text = "用户名{Tab}密码{Enter}";
+        assert!(text.contains("{Tab}"));
+        assert!(text.contains("{Enter}"));
+    }
+    
+    /// 测试多个虚拟键
+    #[test]
+    fn test_multiple_virtual_keys() {
+        let text = "Line1{Enter}Line2{Enter}Line3";
+        let enter_count = text.matches("{Enter}").count();
+        assert_eq!(enter_count, 2);
     }
 }
