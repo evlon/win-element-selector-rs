@@ -417,7 +417,13 @@ impl XPathOptimizer {
                         Ok(is_unique)
                     }
                     Err(e) => {
-                        log::warn!("[极简优化-验证] 验证失败: {}", e);
+                        // 【改进】更友好的错误处理
+                        log::debug!("[极简优化-验证] 验证失败: {}", e);
+                        // 如果是窗口未找到的错误，可以提前终止优化
+                        if e.to_string().contains("窗口未找到") {
+                            log::warn!("[极简优化-验证] 窗口未找到，终止优化");
+                            return Err(uiauto_xpath::error::XPathError::ParseError("窗口未找到".into()));
+                        }
                         Err(uiauto_xpath::error::XPathError::ParseError(format!("验证失败: {}", e)))
                     }
                 }

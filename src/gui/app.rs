@@ -652,6 +652,13 @@ impl SelectorApp {
             return;
         }
 
+        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
+        if !capture::quick_check_window_exists(&self.window_selector) {
+            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
+            log::warn!("[智能优化] 窗口存在性检查失败，窗口可能已关闭");
+            return;
+        }
+
         info!("[智能优化] 开始优化，节点数: {}", self.hierarchy.len());
         info!("[智能优化] 优化前 XPath: {}", self.element_xpath);
 
@@ -701,6 +708,13 @@ impl SelectorApp {
     pub fn do_minimal_optimize(&mut self) {
         if self.hierarchy.is_empty() {
             self.status_msg = "没有可优化的元素层级".to_string();
+            return;
+        }
+        
+        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
+        if !capture::quick_check_window_exists(&self.window_selector) {
+            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
+            log::warn!("[极简优化] 窗口存在性检查失败，窗口可能已关闭");
             return;
         }
         
