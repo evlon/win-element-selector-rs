@@ -17,7 +17,7 @@ use super::highlight;
 pub trait LayoutComponents {
     fn draw_titlebar(&self, ui: &mut Ui);
     fn draw_top_bar(&mut self, ui: &mut Ui);
-    fn draw_capture_banner(&self, ui: &mut Ui);
+    fn draw_capture_banner(&self, ui: &mut Ui) -> bool;
     fn draw_bottom_panel(&mut self, ui: &mut Ui);
     fn draw_xpath_preview_content(&mut self, ui: &mut Ui);
     fn draw_element_xpath_content(&mut self, ui: &mut Ui);
@@ -145,6 +145,14 @@ impl LayoutComponents for crate::gui::app::SelectorApp {
                                 ).on_hover_text("F4 — 点击屏幕控件进行捕获").clicked() {
                                     self.start_capture();
                                 }
+                                
+                                // 相似模式提示
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new("Shift+单击: 相似元素")
+                                        .color(t.muted)
+                                        .size(10.5)
+                                );
                             }
                         }
                     });
@@ -153,11 +161,15 @@ impl LayoutComponents for crate::gui::app::SelectorApp {
     }
 
     /// 捕获状态横幅（仅在 WaitingClick 时显示）
-    fn draw_capture_banner(&self, ui: &mut Ui) {
+    /// 返回是否点击了完成按钮
+    fn draw_capture_banner(&self, ui: &mut Ui) -> bool {
         if !matches!(self.capture_state, CaptureState::WaitingClick { .. }) {
-            return;
+            return false;
         }
+        
+        let mut complete_clicked = false;
         let t = self.theme;
+        
         egui::Panel::top("capture_banner")
             .exact_size(26.0)
             .frame(
@@ -168,13 +180,51 @@ impl LayoutComponents for crate::gui::app::SelectorApp {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("⏳  请点击目标控件 — 按 Esc 或顶栏按钮取消")
-                            .color(t.capture_fg)
-                            .size(11.5),
-                    );
+                    
+                    // 根据是否处于相似模式显示不同提示
+                    if self.similar_mode_active {
+                        ui.label(
+                            RichText::new(format!("🔍 相似模式 — 已收集 {} 个样本", 
+                                    self.similar_samples.len()))
+                                .color(t.capture_fg)
+                                .size(11.5),
+                        );
+                        
+                        ui.add_space(16.0);
+                        
+                        // 完成按钮（更加醒目）
+                        let button = egui::Button::new(
+                            RichText::new("✔ 完成查找 (Enter)")
+                                .color(egui::Color32::WHITE)
+                                .size(11.5)
+                                .strong(),
+                        )
+                        .fill(t.ok)
+                        .min_size(egui::Vec2::new(110.0, 22.0))
+                        .stroke(Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 150)));
+                        
+                        if ui.add(button).on_hover_text("点击或按 Enter 键结束样本收集并开始查找相似元素").clicked() {
+                            complete_clicked = true;
+                        }
+                        
+                        ui.add_space(12.0);
+                        
+                        ui.label(
+                            RichText::new("按 Esc 取消")
+                                .color(t.muted)
+                                .size(10.5),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("⏳  请点击目标控件 — 按 Esc 或顶栏按钮取消")
+                                .color(t.capture_fg)
+                                .size(11.5),
+                        );
+                    }
                 });
             });
+        
+        complete_clicked
     }
 
     /// 底部面板：XPath 预览 + 状态 + 确定/取消（合并为单一 Panel）
@@ -203,6 +253,27 @@ impl LayoutComponents for crate::gui::app::SelectorApp {
                         _ => t.muted,
                     };
                     ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
+                    
+                    // 相似模式状态指示器
+                    if self.similar_mode_active {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("🔍 相似模式: {} 个样本", self.similar_samples.len()))
+                                .color(t.warn)
+                                .size(11.0)
+                        );
+                    }
+                    
+                    // 后台查找进度指示器
+                    if self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                        ui.add_space(8.0);
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("查找中...")
+                                .color(t.warn)
+                                .size(11.0)
+                        );
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // 确定按钮（校验通过后变绿）

@@ -42,12 +42,14 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_System_SystemServices",
     "Win32_System_LibraryLoader",
+    "Win32_System_Console",
+    "Win32_Globalization",
 ] }
 
 [profile.release]
 opt-level   = 3
-lto         = true
-codegen-units = 1
+lto         = false       # 禁用 LTO 以避免 OOM
+codegen-units = 16        # 更多并行单元
 strip       = true
 
 [profile.dev]

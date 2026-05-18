@@ -708,3 +708,79 @@ mod tests {
         assert!(result.window_info.is_none());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 相似元素相关数据结构
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 子元素特征（用于相似度比较）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildFeature {
+    pub control_type: String,
+    pub relative_bounds: RelativeRect,  // 相对于父元素的归一化坐标
+}
+
+/// 归一化的矩形坐标（相对于父元素）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelativeRect {
+    pub x_ratio: f32,      // x / parent_width
+    pub y_ratio: f32,      // y / parent_height
+    pub width_ratio: f32,  // width / parent_width
+    pub height_ratio: f32, // height / parent_height
+}
+
+impl RelativeRect {
+    /// 从绝对坐标创建归一化坐标
+    pub fn from_absolute(child_rect: &ElementRect, parent_rect: &ElementRect) -> Self {
+        let parent_width = parent_rect.width.max(1) as f32;
+        let parent_height = parent_rect.height.max(1) as f32;
+        
+        Self {
+            x_ratio: child_rect.x as f32 / parent_width,
+            y_ratio: child_rect.y as f32 / parent_height,
+            width_ratio: child_rect.width as f32 / parent_width,
+            height_ratio: child_rect.height as f32 / parent_height,
+        }
+    }
+}
+
+/// 相似元素样本
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimilarElementSample {
+    pub hierarchy_node: HierarchyNode,
+    pub ancestor_chain: Vec<HierarchyNode>,  // 从根到父节点的链
+    pub children_structure: Vec<ChildFeature>, // 子元素特征
+}
+
+#[cfg(test)]
+mod similarity_tests {
+    use super::*;
+    
+    #[test]
+    fn test_relative_rect_normalization() {
+        let parent = ElementRect { x: 0, y: 0, width: 200, height: 100 };
+        let child = ElementRect { x: 50, y: 25, width: 100, height: 50 };
+        
+        let rel = RelativeRect::from_absolute(&child, &parent);
+        
+        assert!((rel.x_ratio - 0.25).abs() < 0.01);   // 50/200 = 0.25
+        assert!((rel.y_ratio - 0.25).abs() < 0.01);   // 25/100 = 0.25
+        assert!((rel.width_ratio - 0.5).abs() < 0.01); // 100/200 = 0.5
+        assert!((rel.height_ratio - 0.5).abs() < 0.01);// 50/100 = 0.5
+    }
+    
+    #[test]
+    fn test_relative_rect_zero_parent() {
+        // 测试父元素尺寸为 0 的情况（应避免除零错误）
+        let parent = ElementRect { x: 0, y: 0, width: 0, height: 0 };
+        let child = ElementRect { x: 10, y: 10, width: 50, height: 50 };
+        
+        let rel = RelativeRect::from_absolute(&child, &parent);
+        
+        // 应该使用 max(1) 避免除零
+        assert!(rel.x_ratio.is_finite());
+        assert!(rel.y_ratio.is_finite());
+        assert!(rel.width_ratio.is_finite());
+        assert!(rel.height_ratio.is_finite());
+    }
+}

@@ -20,7 +20,7 @@ pub mod windows_impl {
     use windows::{
         core::BSTR,
         Win32::{
-            Foundation::{POINT, HWND, LPARAM},
+            Foundation::{POINT, HWND, LPARAM, RECT},
             System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
             UI::{
                 Accessibility::{
@@ -319,14 +319,19 @@ pub mod windows_impl {
 
     /// Capture the element at a specific screen coordinate.
     pub fn capture_at_point(x: i32, y: i32) -> CaptureResult {
-        match do_capture(x, y) {
+        // 【关键修复】使用重试机制处理 COM 会话超时问题
+        // 当程序闲置一段时间后，COM 对象可能失效，需要自动恢复
+        match UiaExecutor::execute_with_retry(
+            || do_capture(x, y),
+            2, // 最多重试 2 次
+        ) {
             Ok(result) => result,
             Err(e) => {
-                error!("capture_at_point({x},{y}) failed: {e}");
+                error!("capture_at_point({x},{y}) failed after retries: {e}");
                 CaptureResult {
                     hierarchy: vec![],
                     cursor_x: x, cursor_y: y,
-                    error: Some(e.to_string()),
+                    error: Some(format!("捕获失败: {}", e)),
                     window_info: None,
                 }
             }
@@ -1900,6 +1905,91 @@ pub mod windows_impl {
         }
         
         vec![]
+    }
+
+    /// 从 UIA 元素提取子元素特征
+    /// 
+    /// # Arguments
+    /// * `automation` - IUIAutomation 实例
+    /// * `element` - 目标 UIA 元素
+    /// * `parent_rect` - 父元素的矩形（用于计算相对位置）
+    /// 
+    /// # Returns
+    /// 子元素特征列表
+    pub fn extract_children_features(
+        automation: &IUIAutomation,
+        element: &IUIAutomationElement,
+        parent_rect: &RECT,
+    ) -> Vec<crate::core::model::ChildFeature> {
+        use windows::Win32::UI::Accessibility::TreeScope_Children;
+        use crate::core::model::{ChildFeature, RelativeRect};
+        
+        let mut features = vec![];
+        
+        unsafe {
+            // 创建条件：获取所有子元素
+            let condition = match automation.CreateTrueCondition() {
+                Ok(c) => c,
+                Err(_) => return vec![],
+            };
+            
+            // 查找所有直接子元素
+            let children_array = match element.FindAll(TreeScope_Children, &condition) {
+                Ok(arr) => arr,
+                Err(_) => return vec![],
+            };
+            
+            let count = match children_array.Length() {
+                Ok(c) => c,
+                Err(_) => return vec![],
+            };
+            
+            let parent_width = (parent_rect.right - parent_rect.left) as f32;
+            let parent_height = (parent_rect.bottom - parent_rect.top) as f32;
+            
+            if parent_width <= 0.0 || parent_height <= 0.0 {
+                return vec![];
+            }
+            
+            for i in 0..count {
+                if let Ok(child) = children_array.GetElement(i) {
+                    // 获取子元素的 ControlType ID
+                    if let Ok(control_type_id) = child.CurrentControlType() {
+                        let control_type = control_type_name(control_type_id);
+                        
+                        // 获取子元素的边界
+                        if let Ok(child_rect) = child.CurrentBoundingRectangle() {
+                            let child_width = (child_rect.right - child_rect.left) as f32;
+                            let child_height = (child_rect.bottom - child_rect.top) as f32;
+                            
+                            // 计算相对于父元素的归一化坐标
+                            let x_ratio = (child_rect.left - parent_rect.left) as f32 / parent_width;
+                            let y_ratio = (child_rect.top - parent_rect.top) as f32 / parent_height;
+                            let width_ratio = child_width / parent_width;
+                            let height_ratio = child_height / parent_height;
+                            
+                            // 限制在 [0, 1] 范围内
+                            let x_ratio = x_ratio.clamp(0.0, 1.0);
+                            let y_ratio = y_ratio.clamp(0.0, 1.0);
+                            let width_ratio = width_ratio.clamp(0.0, 1.0);
+                            let height_ratio = height_ratio.clamp(0.0, 1.0);
+                            
+                            features.push(ChildFeature {
+                                control_type,
+                                relative_bounds: RelativeRect {
+                                    x_ratio,
+                                    y_ratio,
+                                    width_ratio,
+                                    height_ratio,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        features
     }
 }
 

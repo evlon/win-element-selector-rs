@@ -41,9 +41,11 @@ pub enum UiaRequest {
         response: Sender<anyhow::Result<DetailedValidationResult>>,
     },
     
-    /// 获取窗口列表
-    EnumerateWindows {
-        response: Sender<anyhow::Result<Vec<WindowInfo>>>,
+    /// 查找相似元素（基于样本集）
+    FindSimilarElements {
+        samples: Vec<crate::core::model::SimilarElementSample>,
+        threshold: f32,
+        response: Sender<anyhow::Result<Vec<crate::core::model::CaptureResult>>>,
     },
     
     /// 关闭工作线程
@@ -156,8 +158,8 @@ impl ComWorker {
                 let result = Self::do_validate(automation, &window_selector, &element_xpath, &hierarchy);
                 let _ = response.send(result);
             }
-            UiaRequest::EnumerateWindows { response } => {
-                let result = Self::do_enumerate_windows(automation);
+            UiaRequest::FindSimilarElements { samples, threshold, response } => {
+                let result = Self::do_find_similar_elements(automation, samples, threshold);
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -215,6 +217,99 @@ impl ComWorker {
         Ok(crate::core::enum_windows::enumerate_windows_fast())
     }
     
+    /// 查找相似元素
+    fn do_find_similar_elements(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        samples: Vec<crate::core::model::SimilarElementSample>,
+        threshold: f32,
+    ) -> anyhow::Result<Vec<crate::core::model::CaptureResult>> {
+        use crate::core::similarity;
+        
+        log::info!("[ComWorker] 开始查找相似元素，样本数: {}, 阈值: {}", samples.len(), threshold);
+        
+        if samples.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        // 计算所有样本对的相似度
+        let mut similar_pairs = vec![];
+        for i in 0..samples.len() {
+            for j in (i+1)..samples.len() {
+                let sim = similarity::calculate_overall_similarity(&samples[i], &samples[j]);
+                log::debug!("[ComWorker] 样本 {} vs {}: 相似度 = {:.3}", i+1, j+1, sim);
+                
+                if sim >= threshold {
+                    similar_pairs.push((i, j, sim));
+                    log::info!("[ComWorker] ✓ 发现相似对: 样本 {} 和 {} (相似度: {:.3})", i+1, j+1, sim);
+                }
+            }
+        }
+        
+        log::info!("[ComWorker] 共找到 {} 个相似对", similar_pairs.len());
+        
+        // 将相似对转换为 CaptureResult
+        // 策略：对于每个相似对，将两个样本都作为结果返回
+        let mut results = vec![];
+        let mut added_indices = std::collections::HashSet::new();
+        
+        for (i, j, _sim) in &similar_pairs {
+            // 添加第一个样本（如果还没添加）
+            if added_indices.insert(*i) {
+                let sample = &samples[*i];
+                let node = &sample.hierarchy_node;
+                
+                // 提取窗口信息（从祖先链的第一个节点）
+                let window_info = sample.ancestor_chain.first().map(|ancestor| {
+                    crate::core::model::WindowInfo {
+                        title: ancestor.name.clone(),
+                        class_name: ancestor.class_name.clone(),
+                        process_id: ancestor.process_id,
+                        process_name: String::new(), // TODO: 获取进程名
+                    }
+                });
+                
+                results.push(crate::core::model::CaptureResult {
+                    hierarchy: sample.ancestor_chain.clone(),
+                    cursor_x: node.rect.x,
+                    cursor_y: node.rect.y,
+                    error: None,
+                    window_info,
+                });
+                
+                log::debug!("[ComWorker] 添加样本 {} 到结果集", i + 1);
+            }
+            
+            // 添加第二个样本（如果还没添加）
+            if added_indices.insert(*j) {
+                let sample = &samples[*j];
+                let node = &sample.hierarchy_node;
+                
+                // 提取窗口信息（从祖先链的第一个节点）
+                let window_info = sample.ancestor_chain.first().map(|ancestor| {
+                    crate::core::model::WindowInfo {
+                        title: ancestor.name.clone(),
+                        class_name: ancestor.class_name.clone(),
+                        process_id: ancestor.process_id,
+                        process_name: String::new(), // TODO: 获取进程名
+                    }
+                });
+                
+                results.push(crate::core::model::CaptureResult {
+                    hierarchy: sample.ancestor_chain.clone(),
+                    cursor_x: node.rect.x,
+                    cursor_y: node.rect.y,
+                    error: None,
+                    window_info,
+                });
+                
+                log::debug!("[ComWorker] 添加样本 {} 到结果集", j + 1);
+            }
+        }
+        
+        log::info!("[ComWorker] 转换完成，返回 {} 个相似元素结果", results.len());
+        Ok(results)
+    }
+    
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -269,6 +364,27 @@ impl ComWorker {
                 window_selector,
                 element_xpath,
                 hierarchy,
+                response: response_sender,
+            })?;
+            
+            response_receiver.recv()?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+    
+    /// 发送相似元素查找请求
+    pub fn find_similar_elements(
+        &self,
+        samples: Vec<crate::core::model::SimilarElementSample>,
+        threshold: f32,
+    ) -> anyhow::Result<Vec<crate::core::model::CaptureResult>> {
+        let (response_sender, response_receiver) = mpsc::channel();
+        
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::FindSimilarElements {
+                samples,
+                threshold,
                 response: response_sender,
             })?;
             
@@ -351,6 +467,19 @@ pub fn global_validate_xpath(
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.validate_xpath(window_selector, element_xpath, hierarchy)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程查找相似元素
+pub fn global_find_similar_elements(
+    samples: Vec<crate::core::model::SimilarElementSample>,
+    threshold: f32,
+) -> anyhow::Result<Vec<crate::core::model::CaptureResult>> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.find_similar_elements(samples, threshold)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }

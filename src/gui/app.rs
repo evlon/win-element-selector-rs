@@ -10,6 +10,7 @@ use element_selector::core::model::{
     AppConfig, DetailedValidationResult, ElementTab, HighlightInfo,
     HierarchyNode, PropertyFilter,
     ValidationResult, WindowInfo,
+    SimilarElementSample,
 };
 use element_selector::core::xpath;
 use element_selector::core::{XPathOptimizer, OptimizationResult};
@@ -89,6 +90,16 @@ pub struct SelectorApp {
     pub optimization_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub optimization_rx: Option<std::sync::mpsc::Receiver<Option<OptimizationResult>>>,
     pub optimization_start_time: Option<std::time::Instant>,
+    
+    // 相似元素捕获相关
+    pub similar_samples: Vec<SimilarElementSample>,
+    pub similar_mode_active: bool,
+    pub found_similar_elements: Vec<capture::CaptureResult>,
+    
+    // 相似元素查找后台任务
+    pub similar_search_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<capture::CaptureResult>>>,
+    pub similar_search_start_time: Option<std::time::Instant>,
 }
 
 impl SelectorApp {
@@ -243,6 +254,16 @@ impl SelectorApp {
             optimization_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             optimization_rx: None,
             optimization_start_time: None,
+            
+            // 相似元素捕获相关
+            similar_samples: Vec::new(),
+            similar_mode_active: false,
+            found_similar_elements: Vec::new(),
+            
+            // 相似元素查找后台任务
+            similar_search_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            similar_search_rx: None,
+            similar_search_start_time: None,
         }
     }
 
@@ -491,6 +512,120 @@ impl SelectorApp {
         ctx.set_cursor_icon(egui::CursorIcon::Default);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // 相似元素捕获相关方法
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// 从捕获结果中提取相似元素样本
+    fn extract_similar_sample(&self, result: &capture::CaptureResult) -> Option<SimilarElementSample> {
+        
+        if result.hierarchy.is_empty() {
+            return None;
+        }
+        
+        // 获取目标元素（最后一个节点）
+        let target_node = result.hierarchy.last()?;
+        
+        // 提取祖先链（除了目标元素本身）
+        let ancestor_chain = result.hierarchy[..result.hierarchy.len() - 1].to_vec();
+        
+        // TODO: 提取子元素特征（需要 UIA API 支持）
+        // 当前简化实现，暂时返回空子元素列表
+        let children_structure = vec![];
+        
+        Some(SimilarElementSample {
+            hierarchy_node: target_node.clone(),
+            ancestor_chain,
+            children_structure,
+        })
+    }
+
+    /// 添加相似元素样本并查找相似元素
+    pub fn add_similar_sample(&mut self, result: capture::CaptureResult) {
+        
+        // 提取样本
+        if let Some(sample) = self.extract_similar_sample(&result) {
+            log::info!("添加相似元素样本: {} at ({}, {})", 
+                sample.hierarchy_node.control_type,
+                result.cursor_x,
+                result.cursor_y
+            );
+            
+            self.similar_samples.push(sample);
+            self.similar_mode_active = true;
+            
+            // 如果已有多个样本，启动后台查找
+            if self.similar_samples.len() >= 2 {
+                log::info!("已收集 {} 个样本，启动后台查找...", self.similar_samples.len());
+                
+                // 启动后台查找任务
+                self.start_similar_search();
+            } else {
+                self.status_msg = format!(
+                    "相似模式：请继续点击相似元素（已收集 {} 个样本）",
+                    self.similar_samples.len()
+                );
+            }
+        }
+    }
+
+    /// 重置相似元素捕获状态
+    pub fn reset_similar_capture(&mut self) {
+        self.similar_samples.clear();
+        self.similar_mode_active = false;
+        self.found_similar_elements.clear();
+        log::info!("相似元素捕获状态已重置");
+    }
+
+    /// 启动后台相似元素查找任务
+    pub fn start_similar_search(&mut self) {
+        if self.similar_samples.len() < 2 {
+            log::warn!("需要至少 2 个样本才能查找相似元素");
+            return;
+        }
+        
+        let samples = self.similar_samples.clone();
+        let in_progress = self.similar_search_in_progress.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        
+        // 标记为进行中
+        in_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.similar_search_rx = Some(rx);
+        self.similar_search_start_time = Some(std::time::Instant::now());
+        
+        self.status_msg = format!("正在后台查找相似元素（{} 个样本）...", samples.len());
+        
+        // 启动后台线程
+        std::thread::spawn(move || {
+            log::info!("[相似元素查找] 开始后台查找，样本数: {}", samples.len());
+            
+            if samples.is_empty() {
+                log::warn!("[相似元素查找] 样本为空");
+                let _ = tx.send(vec![]);
+                in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            
+            // 使用 ComWorker 在 STA 线程中执行相似度查找
+            let threshold = 0.7; // 相似度阈值
+            
+            log::info!("[相似元素查找] 通过 ComWorker 执行查找...");
+            
+            match element_selector::core::com_worker::global_find_similar_elements(samples.clone(), threshold) {
+                Ok(results) => {
+                    log::info!("[相似元素查找] 查找完成，找到 {} 个相似元素", results.len());
+                    let _ = tx.send(results);
+                }
+                Err(e) => {
+                    log::error!("[相似元素查找] 查找失败: {}", e);
+                    let _ = tx.send(vec![]);
+                }
+            }
+            
+            in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
     fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode, ctx: &egui::Context) {
         highlight::hide();
         mouse_hook::deactivate_capture();
@@ -501,94 +636,71 @@ impl SelectorApp {
             self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
         }
 
-        // 【关键修复】频繁移动窗口后，COM 对象可能进入半失效状态
-        // 策略：每次捕获前强制重置 IUIAutomation 实例，避免使用 stale 对象
-        use element_selector::core::uia::windows_impl::{ComManager, UiaExecutor};
-        
-        // 1. 确保 COM STA 初始化
-        match ComManager::ensure_sta() {
-            Ok(true) => {
-                log::debug!("COM STA verified");
-            }
-            Ok(false) => {
-                log::warn!("Thread in MTA mode, attempting recovery...");
-                if let Err(e) = ComManager::safe_reinitialize() {
-                    info!("COM recovery failed: {}", e);
-                    self.status_msg = format!("COM 恢复失败: {}", e);
-                    self.capture_state = CaptureState::Idle;
-                    ctx.set_cursor_icon(egui::CursorIcon::Default);
-                    return;
-                }
-            }
-            Err(e) => {
-                info!("COM STA check failed: {}", e);
-                self.status_msg = format!("COM 检查失败: {}", e);
-                self.capture_state = CaptureState::Idle;
-                ctx.set_cursor_icon(egui::CursorIcon::Default);
-                return;
-            }
-        }
-        
-        // 2. 强制重置 IUIAutomation 实例（避免使用 stale 对象）
-        UiaExecutor::force_reset_automation();
-        log::debug!("IUIAutomation instance reset before capture");
+        // 【简化】直接通过 ComWorker 执行捕获（ComWorker 内部已有 COM 管理）
+        let result = capture::capture_at(x, y);
 
-        // 3. 执行捕获操作（带重试机制）
-        let capture_result = UiaExecutor::execute_with_retry(
-            || Ok(capture::capture_at(x, y)),
-            2  // 最多重试 2 次
-        );
+        if let Some(err) = &result.error {
+            self.status_msg = format!("捕获失败: {}", err);
+            self.capture_state = CaptureState::Idle;
+        } else {
+            // 根据捕获模式处理
+            match mode {
+                        CaptureMode::Batch => {
+                            // Batch 模式：添加相似元素样本
+                            self.add_similar_sample(result);
+                            // Batch 模式下不退出捕获状态，允许继续点击
+                            self.capture_state = CaptureState::WaitingClick {
+                                deadline: Instant::now() + Duration::from_secs(30),
+                            };
+                            mouse_hook::activate_capture(true);
+                            self.overlay.show();
+                            return; // 提前返回，不执行后续的 Single 模式逻辑
+                        }
+                        CaptureMode::Single | CaptureMode::None => {
+                            // Single 模式：正常捕获流程
+                            let window_idx = Self::find_window_idx(&result);
 
-        match capture_result {
-            Ok(result) => {
-                if let Some(err) = &result.error {
-                    self.status_msg = format!("捕获失败: {}", err);
-                } else {
-                    let window_idx = Self::find_window_idx(&result);
+                            info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
+                            for (i, n) in result.hierarchy.iter().enumerate() {
+                                info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+                            }
+                            if let Some(ref win) = result.window_info {
+                                info!("Window info: class='{}', name='{}', process='{}', pid={}",
+                                      win.class_name, win.title, win.process_name, win.process_id);
+                            }
+                            info!("窗口节点定位: window_idx = {}", window_idx);
 
-                    info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
-                    for (i, n) in result.hierarchy.iter().enumerate() {
-                        info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+                            let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
+                                result.hierarchy[window_idx + 1..].to_vec()
+                            } else {
+                                Vec::new()
+                            };
+
+                            let n = element_hierarchy.len();
+                            self.selected_node = n.checked_sub(1);
+                            self.window_info   = result.window_info.clone();
+
+                            // window_info 变更时同步初始化过滤器
+                            self.init_window_filters();
+
+                            let window_hint = result.window_info
+                                .as_ref()
+                                .map(|w| format!(" [窗口: {}]", w.title))
+                                .unwrap_or_default();
+                            self.status_msg = format!(
+                                "已捕获 {} 层层级 — 坐标 ({}, {}){}",
+                                n, result.cursor_x, result.cursor_y, window_hint
+                            );
+
+                            self.node_expanded = vec![true; n];
+                            self.hierarchy     = element_hierarchy;
+                        }
                     }
-                    if let Some(ref win) = result.window_info {
-                        info!("Window info: class='{}', name='{}', process='{}', pid={}",
-                              win.class_name, win.title, win.process_name, win.process_id);
-                    }
-                    info!("窗口节点定位: window_idx = {}", window_idx);
-
-                    let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
-                        result.hierarchy[window_idx + 1..].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-
-                    let n = element_hierarchy.len();
-                    self.selected_node = n.checked_sub(1);
-                    self.window_info   = result.window_info.clone();
-
-                    // window_info 变更时同步初始化过滤器
-                    self.init_window_filters();
-
-                    let window_hint = result.window_info
-                        .as_ref()
-                        .map(|w| format!(" [窗口: {}]", w.title))
-                        .unwrap_or_default();
-                    self.status_msg = format!(
-                        "已捕获 {} 层层级 — 坐标 ({}, {}){}",
-                        n, result.cursor_x, result.cursor_y, window_hint
-                    );
-
-                    self.node_expanded = vec![true; n];
-                    self.hierarchy     = element_hierarchy;
                 }
-            }
-            Err(e) => {
-                info!("Capture failed after retries: {}", e);
-                self.status_msg = format!("捕获失败: {}", e);
-                self.capture_state = CaptureState::Idle;
             }
         }
 
+        // Single 模式：保存和重建 XPath
         self.capture_state = CaptureState::Idle;
         self.xpath_source  = XPathSource::AutoGenerated;
         self.validation    = ValidationResult::Idle;
@@ -910,17 +1022,60 @@ impl eframe::App for SelectorApp {
             }
         }
 
+        // 【新增】检查后台相似元素查找是否完成
+        if let Some(rx) = self.similar_search_rx.take() {
+            if let Ok(results) = rx.try_recv() {
+                // 查找完成，处理结果
+                if let Some(start_time) = self.similar_search_start_time.take() {
+                    let elapsed = start_time.elapsed();
+                    
+                    self.found_similar_elements = results;
+                    self.status_msg = format!(
+                        "相似元素查找完成（耗时 {:.1}s）：找到 {} 个相似元素",
+                        elapsed.as_secs_f64(),
+                        self.found_similar_elements.len()
+                    );
+                    
+                    log::info!("[相似元素查找] 处理完成，找到 {} 个结果", self.found_similar_elements.len());
+                    
+                    // 退出相似模式
+                    self.similar_mode_active = false;
+                    
+                    // 强制刷新 UI
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+            } else {
+                // 还没有收到结果，放回去继续等待
+                self.similar_search_rx = Some(rx);
+                // 强制刷新 UI，显示进度
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
+            }
+        }
+
         // 捕获状态下持续刷新
         if self.capture_state != CaptureState::Idle {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
 
         // ── 全局键盘 ─────────────────────────────────────────────────────────
-        let (f4, f7, escape) = ui.ctx().input(|i| {
-            (i.key_pressed(Key::F4), i.key_pressed(Key::F7), i.key_pressed(Key::Escape))
+        let (f4, f7, escape, enter) = ui.ctx().input(|i| {
+            (i.key_pressed(Key::F4), i.key_pressed(Key::F7), i.key_pressed(Key::Escape), i.key_pressed(Key::Enter))
         });
         if f4 && self.capture_state == CaptureState::Idle { self.start_capture(); }
         if f7 { self.do_validate(); }
+        
+        // Batch 模式下按 Esc 退出并重置
+        if escape && self.similar_mode_active {
+            self.reset_similar_capture();
+            self.status_msg = "相似模式已退出".to_string();
+        }
+        
+        // Batch 模式下按 Enter 完成查找
+        if enter && self.similar_mode_active {
+            if !self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                self.start_similar_search();
+            }
+        }
 
         // ── 捕获等待逻辑 ──────────────────────────────────────────────────────
         if let CaptureState::WaitingClick { deadline } = &self.capture_state {
@@ -999,7 +1154,15 @@ impl eframe::App for SelectorApp {
         // ── Panel 布局 ────────────────────────────────────────────────────────
         self.draw_titlebar(ui);
         self.draw_top_bar(ui);
-        self.draw_capture_banner(ui);   // 仅捕获状态下可见
+        
+        // 检查是否点击了完成按钮
+        if self.draw_capture_banner(ui) {
+            // 手动触发查找（如果还没启动）
+            if !self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                self.start_similar_search();
+            }
+        }
+        
         self.draw_bottom_panel(ui);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
 
         egui::CentralPanel::default()

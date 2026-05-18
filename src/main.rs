@@ -11,6 +11,16 @@ use eframe::egui;
 use log::info;
 
 fn main() -> anyhow::Result<()> {
+    // 【Windows 控制台编码修复】设置控制台为 UTF-8
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::SetConsoleOutputCP;
+        unsafe {
+            // CP_UTF8 = 65001
+            let _ = SetConsoleOutputCP(65001);
+        }
+    }
+    
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
     
