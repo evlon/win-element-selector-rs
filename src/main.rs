@@ -11,6 +11,9 @@ use eframe::egui;
 use log::info;
 
 fn main() -> anyhow::Result<()> {
+    // 【禁用 egui 警告】防止 Widget rect changed id 警告干扰调试
+    std::env::set_var("EGUI_WARN_ID_CHANGES", "0");
+    
     // 【Windows 控制台编码修复】设置控制台为 UTF-8
     #[cfg(windows)]
     {
