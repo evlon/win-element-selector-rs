@@ -321,7 +321,9 @@ unsafe extern "system" fn border_wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE | WM_DESTROY => {
-            let _ = DestroyWindow(hwnd);
+            // 【关键修复】不要再次调用 DestroyWindow，否则会导致重复销毁和堆损坏
+            // WM_DESTROY 消息本身就是由 DestroyWindow 触发的
+            // 这里只需要清理资源即可
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -378,14 +380,18 @@ unsafe extern "system" fn label_wnd_proc(
             LRESULT(0)
         }
         WM_CLOSE | WM_DESTROY => {
-            // 【关键】清理窗口用户数据中的字符串
+            // 【关键修复】清理窗口用户数据中的字符串
             let label_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut String;
             if !label_ptr.is_null() {
+                // 【安全】只在 WM_DESTROY 时释放，且只释放一次
+                // 将指针置为 0，防止重复释放
                 unsafe {
-                    let _ = Box::from_raw(label_ptr);  // 释放内存
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    let _ = Box::from_raw(label_ptr);
                 }
             }
-            let _ = DestroyWindow(hwnd);
+            // 【关键修复】不要再次调用 DestroyWindow
+            // WM_DESTROY 消息本身就是由 DestroyWindow 触发的
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

@@ -607,7 +607,7 @@ impl SelectorApp {
                 self.start_similar_search();
             } else {
                 self.status_msg = format!(
-                    "相似模式：请继续点击相似元素（已收集 {} 个样本）",
+                    "相似模式：请继续点击相似元素（已收集 {} 个样本），按 Enter 完成查找",
                     self.similar_samples.len()
                 );
             }
@@ -689,7 +689,7 @@ impl SelectorApp {
         self.capture_state = CaptureState::Capturing;
 
         if let CaptureMode::Batch = mode {
-            self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
+            self.status_msg = "批量捕获模式：点击更多相似元素，按 Enter 完成查找（Esc 取消）".to_string();
         }
 
         // 【关键修复】优先使用悬停时缓存的捕获结果，避免重新查询导致元素不一致
