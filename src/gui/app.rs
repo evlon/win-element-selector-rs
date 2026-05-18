@@ -113,6 +113,9 @@ pub struct SelectorApp {
     // 【新增】悬停高亮异步请求（防止卡顿）
     pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<(i32, i32, capture::CaptureResult)>>,
     
+    // 【关键修复】缓存最后一次悬停的捕获结果，Ctrl+点击时直接使用
+    pub cached_hover_result: Option<capture::CaptureResult>,
+    
     // 【新增】多元素高亮自动清理
     pub multi_highlight_create_time: Option<std::time::Instant>,
 }
@@ -290,6 +293,9 @@ impl SelectorApp {
             
             // 【新增】悬停高亮异步请求
             pending_highlight_rx: None,
+            
+            // 【关键修复】缓存最后一次悬停的捕获结果
+            cached_hover_result: None,
             
             // 【新增】多元素高亮自动清理
             multi_highlight_create_time: None,
@@ -544,6 +550,10 @@ impl SelectorApp {
         self.overlay.hide();
         self.capture_state = CaptureState::Idle;
         self.status_msg    = "捕获已取消".to_string();
+        
+        // 【关键修复】清除缓存
+        self.cached_hover_result = None;
+        
         ctx.set_cursor_icon(egui::CursorIcon::Default);
     }
 
@@ -682,8 +692,14 @@ impl SelectorApp {
             self.status_msg = "批量捕获模式：正在分析相似元素…".to_string();
         }
 
-        // 【简化】直接通过 ComWorker 执行捕获（ComWorker 内部已有 COM 管理）
-        let result = capture::capture_at(x, y);
+        // 【关键修复】优先使用悬停时缓存的捕获结果，避免重新查询导致元素不一致
+        let result = if let Some(cached) = self.cached_hover_result.take() {
+            log::info!("[捕获] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
+            cached
+        } else {
+            log::info!("[捕获] 无缓存，重新查询（坐标: {}, {}）", x, y);
+            capture::capture_at(x, y)
+        };
 
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
@@ -755,6 +771,9 @@ impl SelectorApp {
             ctx.set_cursor_icon(egui::CursorIcon::Default);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         } // 关闭 if let
+        
+        // 【关键修复】清除缓存，防止下次误用
+        self.cached_hover_result = None;
     }
 
     /// 从 capture 结果中定位窗口节点索引
@@ -1189,6 +1208,9 @@ impl eframe::App for SelectorApp {
                     if let Some(last) = result.hierarchy.last() {
                         let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
                         highlight::update_highlight(&highlight_info);
+                        
+                        // 【关键修复】缓存捕获结果，供 Ctrl+点击时使用
+                        self.cached_hover_result = Some(result.clone());
                     }
                 }
                 // 完成后清除 receiver
