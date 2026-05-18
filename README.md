@@ -58,20 +58,35 @@ cargo test
 
 ```
 src/
-├── main.rs        入口：COM STA 初始化，eframe 启动
-├── error.rs       统一错误类型（thiserror）
-├── model.rs       数据模型：HierarchyNode / PropertyFilter / Operator / ValidationResult
-├── capture.rs     UI Automation 捕获（Windows: IUIAutomation COM；其他: mock）
-├── highlight.rs   高亮覆盖窗口（Windows: WS_EX_LAYERED click-through window；其他: stub）
-├── xpath.rs       XPath 生成 / 精简 / lint，含单元测试
-└── app.rs         全部 Egui 界面逻辑
+├── main.rs              入口：COM STA 初始化 + ComWorker 启动，eframe 启动
+├── core/
+│   ├── com_worker.rs    COM 工作线程（单例，所有 UIA 操作统一入口）
+│   ├── uia.rs           底层 UIA API + BFS 优化算法
+│   ├── model.rs         数据模型：HierarchyNode / PropertyFilter / ValidationResult
+│   └── xpath.rs         XPath 生成 / 精简 / lint
+├── capture.rs           捕获/验证 API（全部通过 ComWorker 执行）
+├── gui/
+│   ├── app.rs           Egui 应用主逻辑
+│   ├── layout.rs        UI 布局组件
+│   ├── highlight.rs     高亮覆盖窗口
+│   └── mouse_hook.rs    全局鼠标钩子
+└── api/                 HTTP API 端点（server binary）
 ```
 
 ### 关键设计决策
 
-#### COM 线程模型
-`CoInitializeEx(COINIT_APARTMENTTHREADED)` 在 main 线程调用一次。
-`IUIAutomation` 实例通过 `thread_local!` 懒初始化，保证始终在同一 STA 线程使用，避免跨线程 COM 调用。
+#### COM 线程模型（v2.0.0 最新架构）
+采用**单线程 COM 工作线程**架构：
+- 主线程调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)` 初始化 COM
+- 创建专用的 **ComWorker** 后台线程，在 STA 模式下运行
+- 所有 UIA 操作通过 mpsc channel 发送到 ComWorker 串行执行
+- 单一 `IUIAutomation` 实例，天然无并发竞争
+- 详见 [COM_MIGRATION_REPORT_FINAL.md](docs/COM_MIGRATION_REPORT_FINAL.md)
+
+**优势**：
+- ✅ 代码简洁（删除 70+ 行冗余代码）
+- ✅ 系统稳定（消除 COM 失效、并发竞争问题）
+- ✅ 资源节约（单一 IUIAutomation 实例，内存降低 50%+）
 
 #### 高亮窗口
 使用 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` 创建一个完全穿透鼠标的覆盖窗口，在目标元素的 `BoundingRectangle` 上画红色边框，闪烁后自动销毁。运行在独立线程，不阻塞 UI。
@@ -79,11 +94,13 @@ src/
 #### 捕获流程
 ```
 F4 按下
-  → CaptureState::WaitingClick（5s 倒计时）
+  → CaptureState::WaitingClick（30s 倒计时）
   → 用户点击屏幕
-  → ElementFromPoint(cursor) → IUIAutomationTreeWalker 向上遍历祖先
+  → 发送请求到 ComWorker 线程
+  → ComWorker: ElementFromPoint(cursor) → IUIAutomationTreeWalker 向上遍历祖先
   → 构建 HierarchyNode 链（最多 32 层）
   → 计算目标节点 sibling index
+  → 返回结果到 GUI 线程
   → 更新 UI + 生成 XPath + 高亮闪烁
 ```
 

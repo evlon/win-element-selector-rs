@@ -216,66 +216,6 @@ pub mod windows_impl {
         }
     }
 
-    /// 带有自动重试的 UIA 操作执行器
-    pub struct UiaExecutor;
-
-    impl UiaExecutor {
-        /// 执行 UIA 操作，带自动重试和 COM 状态恢复
-        pub fn execute_with_retry<T, F>(
-            operation: F,
-            max_retries: usize,
-        ) -> anyhow::Result<T>
-        where
-            F: Fn() -> anyhow::Result<T>,
-        {
-            let mut last_error = None;
-            
-            for attempt in 0..=max_retries {
-                if attempt > 0 {
-                    log::warn!("Retrying UIA operation (attempt {}/{})", 
-                              attempt + 1, max_retries + 1);
-                    
-                    // 尝试重新初始化 COM
-                    if let Err(e) = ComManager::safe_reinitialize() {
-                        log::error!("COM reinitialization failed: {}", e);
-                    }
-                    
-                    // 重置 IUIAutomation 实例
-                    Self::force_reset_automation();
-                    
-                    // 短暂等待
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                
-                match operation() {
-                    Ok(result) => {
-                        if attempt > 0 {
-                            log::info!("UIA operation succeeded after {} retries", attempt);
-                        }
-                        return Ok(result);
-                    }
-                    Err(e) => {
-                        log::warn!("UIA operation failed (attempt {}): {}", 
-                                  attempt + 1, e);
-                        last_error = Some(e);
-                    }
-                }
-            }
-            
-            Err(last_error.unwrap_or_else(|| 
-                anyhow::anyhow!("UIA operation failed after {} retries", max_retries + 1)
-            ))
-        }
-        
-        /// 重置 IUIAutomation 实例（内部辅助函数）
-        pub fn force_reset_automation() {
-            AUTOMATION.with(|cell| {
-                let mut opt = cell.borrow_mut();
-                *opt = None;
-            });
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════
     // Legacy API - Backward compatibility
     // ═══════════════════════════════════════════════════════════════════════════
@@ -319,15 +259,10 @@ pub mod windows_impl {
 
     /// Capture the element at a specific screen coordinate.
     pub fn capture_at_point(x: i32, y: i32) -> CaptureResult {
-        // 【关键修复】使用重试机制处理 COM 会话超时问题
-        // 当程序闲置一段时间后，COM 对象可能失效，需要自动恢复
-        match UiaExecutor::execute_with_retry(
-            || do_capture(x, y),
-            2, // 最多重试 2 次
-        ) {
+        match do_capture(x, y) {
             Ok(result) => result,
             Err(e) => {
-                error!("capture_at_point({x},{y}) failed after retries: {e}");
+                error!("capture_at_point({x},{y}) failed: {e}");
                 CaptureResult {
                     hierarchy: vec![],
                     cursor_x: x, cursor_y: y,
