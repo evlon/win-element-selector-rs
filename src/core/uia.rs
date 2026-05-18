@@ -594,6 +594,24 @@ pub mod windows_impl {
         parent: &IUIAutomationElement,
         target: &IUIAutomationElement,
     ) -> Option<Vec<IUIAutomationElement>> {
+        // 【关键修复】添加最大深度限制，防止栈溢出
+        const MAX_DEPTH: usize = 20;
+        find_path_to_element_with_depth(auto, walker, parent, target, MAX_DEPTH)
+    }
+    
+    /// 带深度限制的递归搜索
+    fn find_path_to_element_with_depth(
+        auto: &IUIAutomation,
+        walker: &IUIAutomationTreeWalker,
+        parent: &IUIAutomationElement,
+        target: &IUIAutomationElement,
+        max_depth: usize,
+    ) -> Option<Vec<IUIAutomationElement>> {
+        if max_depth == 0 {
+            log::warn!("find_path_to_element exceeded max depth (20), aborting search");
+            return None;
+        }
+        
         // 直接检查 parent 的子节点是否包含 target
         let mut child = unsafe { walker.GetFirstChildElement(parent).ok() };
         
@@ -609,8 +627,8 @@ pub mod windows_impl {
                 return Some(Vec::new());
             }
             
-            // 递归搜索子节点
-            if let Some(path) = find_path_to_element(auto, walker, c, target) {
+            // 递归搜索子节点（深度 -1）
+            if let Some(path) = find_path_to_element_with_depth(auto, walker, c, target, max_depth - 1) {
                 // 找到了！c 是路径上的第一个中间节点
                 let mut result = vec![c.clone()];
                 result.extend(path);

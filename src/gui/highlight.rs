@@ -225,15 +225,9 @@ mod windows_impl {
             unsafe { let _ = PostMessageW(Some(HWND(label_val as _)), WM_CLOSE, WPARAM(0), LPARAM(0)); }
         }
         
-        // 【关键修复】等待窗口真正销毁，避免累积
-        // 最多等待 100ms，防止无限等待
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(100);
-        while (BORDER_HWND.load(Ordering::SeqCst) != 0 || LABEL_HWND.load(Ordering::SeqCst) != 0)
-            && start.elapsed() < timeout
-        {
-            thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // 【优化】移除忙等待，让窗口异步销毁
+        // 窗口关闭消息已发送，不需要立即确认销毁
+        // 这样可以避免高频调用时的累积延迟
     }
 
     #[allow(dead_code)]

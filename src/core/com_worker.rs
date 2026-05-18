@@ -66,7 +66,14 @@ impl ComWorker {
         let handle = thread::Builder::new()
             .name("com-worker".to_string())
             .spawn(move || {
-                Self::worker_loop(receiver);
+                // 【关键修复】捕获 panic，防止后台线程崩溃导致整个程序退出
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::worker_loop(receiver);
+                }));
+                
+                if let Err(panic_info) = result {
+                    log::error!("COM worker thread panicked: {:?}", panic_info);
+                }
             })?;
         
         Ok(Self {
@@ -147,19 +154,32 @@ impl ComWorker {
     ) {
         match request {
             UiaRequest::CaptureAt { x, y, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] capture_at started for ({}, {})", x, y);
                 let result = Self::do_capture(automation, x, y);
+                log::debug!("[PERF] capture_at completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::FindElement { window_selector, xpath, random_range, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] find_element started");
                 let result = Self::do_find_element(automation, &window_selector, &xpath, random_range);
+                log::debug!("[PERF] find_element completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::ValidateXPath { window_selector, element_xpath, hierarchy, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] validate_xpath started");
                 let result = Self::do_validate(automation, &window_selector, &element_xpath, &hierarchy);
+                log::info!("[PERF] validate_xpath completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::FindSimilarElements { samples, threshold, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] find_similar_elements started ({} samples)", samples.len());
                 let result = Self::do_find_similar_elements(automation, samples, threshold);
+                log::info!("[PERF] find_similar_elements completed in {}ms, found {} elements", 
+                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -322,7 +342,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            response_receiver.recv()?
+            // 【关键修复】添加超时机制，防止永久阻塞
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker timeout after 10s: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -345,7 +368,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            response_receiver.recv()?
+            // 【关键修复】添加超时机制
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker timeout after 10s: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -368,7 +394,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            response_receiver.recv()?
+            // 【关键修复】添加超时机制（校验可能更耗时，给 15 秒）
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .map_err(|e| anyhow::anyhow!("COM worker validation timeout after 15s: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -389,7 +418,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            response_receiver.recv()?
+            // 【关键修复】添加超时机制（批量查找可能很耗时，给 30 秒）
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .map_err(|e| anyhow::anyhow!("COM worker similar elements search timeout after 30s: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }

@@ -104,6 +104,17 @@ pub struct SelectorApp {
     pub multi_highlight_manager: Option<MultiHighlightManager>,
     pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<capture::CaptureResult>>>,
     pub similar_search_start_time: Option<std::time::Instant>,
+    
+    // 【新增】XPath 校验后台任务
+    pub validation_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub validation_rx: Option<std::sync::mpsc::Receiver<Option<DetailedValidationResult>>>,
+    pub validation_start_time: Option<std::time::Instant>,
+    
+    // 【新增】悬停高亮异步请求（防止卡顿）
+    pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<(i32, i32, capture::CaptureResult)>>,
+    
+    // 【新增】多元素高亮自动清理
+    pub multi_highlight_create_time: Option<std::time::Instant>,
 }
 
 impl SelectorApp {
@@ -271,6 +282,17 @@ impl SelectorApp {
             
             // 多元素高亮管理器
             multi_highlight_manager: None,
+            
+            // 【新增】XPath 校验后台任务
+            validation_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            validation_rx: None,
+            validation_start_time: None,
+            
+            // 【新增】悬停高亮异步请求
+            pending_highlight_rx: None,
+            
+            // 【新增】多元素高亮自动清理
+            multi_highlight_create_time: None,
         }
     }
 
@@ -756,28 +778,32 @@ impl SelectorApp {
             self.status_msg = format!("XPath 语法错误: {}", err);
             return;
         }
+        
+        // 【关键修复】改为异步执行，防止 UI 卡死
         self.validation = ValidationResult::Running;
-
-        let detailed_result = capture::validate_selector_and_xpath_detailed(
-            &self.window_selector,
-            &self.element_xpath,
-            &self.hierarchy,
-        );
-        self.detailed_validation = Some(detailed_result.clone());
-        self.validation = detailed_result.overall.clone();
-
-        if let ValidationResult::Found { ref first_rect, .. } = detailed_result.overall {
-            if let Some(r) = first_rect { highlight::flash(r, 1200); }
-        }
-        self.status_msg = match &detailed_result.overall {
-            ValidationResult::Found { count, .. } =>
-                format!("校验通过 ✔ — 找到 {} 个匹配元素 (总用时: {}ms)", count, detailed_result.total_duration_ms),
-            ValidationResult::NotFound =>
-                format!("校验失败 — 未找到匹配元素 (总用时: {}ms)", detailed_result.total_duration_ms),
-            ValidationResult::Error(e) => format!("校验错误: {}", e),
-            _ => String::new(),
-        };
-        self.push_history();
+        self.status_msg = "正在校验...".to_string();
+        
+        let window_selector = self.window_selector.clone();
+        let element_xpath = self.element_xpath.clone();
+        let hierarchy = self.hierarchy.clone();
+        let in_progress = self.validation_in_progress.clone();
+        
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.validation_rx = Some(rx);
+        self.validation_start_time = Some(std::time::Instant::now());
+        in_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+        
+        std::thread::spawn(move || {
+            log::info!("[校验] 开始后台校验...");
+            let result = capture::validate_selector_and_xpath_detailed(
+                &window_selector,
+                &element_xpath,
+                &hierarchy,
+            );
+            let _ = tx.send(Some(result));
+            in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+            log::info!("[校验] 后台校验完成");
+        });
     }
 
     pub fn do_optimize(&mut self) {
@@ -953,13 +979,16 @@ impl SelectorApp {
     }
 
     fn highlight_element_at(&mut self, x: i32, y: i32) {
-        let result = capture::capture_at(x, y);
-        if result.error.is_none() {
-            if let Some(last) = result.hierarchy.last() {
-                let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
-                highlight::update_highlight(&highlight_info);
-            }
-        }
+        // 【关键修复】改为异步执行，防止悬停时卡顿
+        let (tx, rx) = std::sync::mpsc::channel();
+        
+        std::thread::spawn(move || {
+            let result = capture::capture_at(x, y);
+            let _ = tx.send((x, y, result));
+        });
+        
+        // 存储 receiver，在下一帧检查是否完成
+        self.pending_highlight_rx = Some(rx);
     }
 
     /// 【新增】同时高亮多个元素（用于批量捕获相似元素）
@@ -985,9 +1014,8 @@ impl SelectorApp {
         
         log::info!("[多元素高亮] 同时高亮 {} 个相似元素", self.found_similar_elements.len());
         
-        // 【注意】不在后台线程中清理，因为 HWND 不是 Send 的
-        // 改为在下次捕获时自动清理，或者用户手动关闭
-        // TODO: 可以添加一个定时器，在主线程中定期清理
+        // 【新增】记录创建时间，用于自动清理
+        self.multi_highlight_create_time = Some(std::time::Instant::now());
     }
 
     // ── Panels ────────────────────────────────────────────────────────────────
@@ -1104,6 +1132,82 @@ impl eframe::App for SelectorApp {
                 self.similar_search_rx = Some(rx);
                 // 强制刷新 UI，显示进度
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
+            }
+        }
+        
+        // 【新增】检查后台 XPath 校验是否完成
+        if let Some(rx) = self.validation_rx.take() {
+            if let Ok(result_opt) = rx.try_recv() {
+                // 校验完成，处理结果
+                if let Some(start_time) = self.validation_start_time.take() {
+                    let elapsed = start_time.elapsed();
+                    
+                    match result_opt {
+                        Some(detailed_result) => {
+                            self.detailed_validation = Some(detailed_result.clone());
+                            self.validation = detailed_result.overall.clone();
+
+                            if let ValidationResult::Found { ref first_rect, .. } = detailed_result.overall {
+                                if let Some(r) = first_rect { highlight::flash(r, 1200); }
+                            }
+                            
+                            self.status_msg = match &detailed_result.overall {
+                                ValidationResult::Found { count, .. } =>
+                                    format!("校验通过 ✔ — 找到 {} 个匹配元素 (总用时: {}ms)", count, detailed_result.total_duration_ms),
+                                ValidationResult::NotFound =>
+                                    format!("校验失败 — 未找到匹配元素 (总用时: {}ms)", detailed_result.total_duration_ms),
+                                ValidationResult::Error(e) => format!("校验错误: {}", e),
+                                _ => String::new(),
+                            };
+                            self.push_history();
+                            
+                            log::info!("[校验] 校验完成，耗时 {}ms", elapsed.as_millis());
+                        }
+                        None => {
+                            self.status_msg = "校验失败或超时".to_string();
+                            self.validation = ValidationResult::Error("校验超时或失败".to_string());
+                            log::warn!("[校验] 校验超时或失败");
+                        }
+                    }
+                    
+                    // 强制刷新 UI
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+            } else {
+                // 还没有收到结果，放回去继续等待
+                self.validation_rx = Some(rx);
+                // 强制刷新 UI，让用户看到“正在校验...”
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
+            }
+        }
+
+        // 【新增】检查悬停高亮异步结果
+        if let Some(rx) = self.pending_highlight_rx.take() {
+            if let Ok((_x, _y, result)) = rx.try_recv() {
+                // 高亮查询完成，显示结果
+                if result.error.is_none() {
+                    if let Some(last) = result.hierarchy.last() {
+                        let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
+                        highlight::update_highlight(&highlight_info);
+                    }
+                }
+                // 完成后清除 receiver
+            } else {
+                // 还没有收到结果，放回去继续等待
+                self.pending_highlight_rx = Some(rx);
+            }
+        }
+        
+        // 【新增】多元素高亮自动清理（30 秒后）
+        if let Some(ref mut manager) = self.multi_highlight_manager {
+            if manager.count() > 0 {
+                if let Some(create_time) = self.multi_highlight_create_time {
+                    if create_time.elapsed() > std::time::Duration::from_secs(30) {
+                        manager.clear();
+                        self.multi_highlight_create_time = None;
+                        log::info!("[多元素高亮] 已自动清理（超过 30 秒）");
+                    }
+                }
             }
         }
 
