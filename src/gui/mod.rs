@@ -6,6 +6,7 @@
 pub mod app;
 pub mod capture_overlay;
 pub mod highlight;
+pub mod multi_highlight;  // 新增：多元素高亮管理器
 pub mod logger;
 pub mod mouse_hook;
 pub mod state_model;

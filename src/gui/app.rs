@@ -18,6 +18,7 @@ use element_selector::capture;
 
 use super::capture_overlay::CaptureOverlay;
 use super::highlight;
+use super::multi_highlight::MultiHighlightManager;  // 【新增】多元素高亮管理器
 use super::logger::{GuiLogger, init_gui_logger};
 use super::mouse_hook::{self, CaptureMode};
 
@@ -98,6 +99,9 @@ pub struct SelectorApp {
     
     // 相似元素查找后台任务
     pub similar_search_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    
+    // 多元素高亮管理器
+    pub multi_highlight_manager: Option<MultiHighlightManager>,
     pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<capture::CaptureResult>>>,
     pub similar_search_start_time: Option<std::time::Instant>,
 }
@@ -264,6 +268,9 @@ impl SelectorApp {
             similar_search_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             similar_search_rx: None,
             similar_search_start_time: None,
+            
+            // 多元素高亮管理器
+            multi_highlight_manager: None,
         }
     }
 
@@ -505,6 +512,12 @@ impl SelectorApp {
 
     pub fn cancel_capture(&mut self, ctx: &egui::Context) {
         highlight::hide();
+        
+        // 【新增】清理多元素高亮
+        if let Some(ref mut manager) = self.multi_highlight_manager {
+            manager.clear();
+        }
+        
         mouse_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Idle;
@@ -627,7 +640,18 @@ impl SelectorApp {
     }
 
     fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode, ctx: &egui::Context) {
+        // 【关键修复】先隐藏所有高亮窗口，避免累积
         highlight::hide();
+        
+        // 【新增】清理多元素高亮，防止旧的高亮框残留
+        if let Some(ref mut manager) = self.multi_highlight_manager {
+            manager.clear();
+        }
+        
+        // 清除悬停高亮状态，防止在捕获过程中再次触发
+        self.last_highlight_pos = None;
+        self.last_highlight_time = None;
+        
         mouse_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
@@ -938,6 +962,34 @@ impl SelectorApp {
         }
     }
 
+    /// 【新增】同时高亮多个元素（用于批量捕获相似元素）
+    fn highlight_multiple_elements(&mut self) {
+        // 创建或复用管理器
+        if self.multi_highlight_manager.is_none() {
+            self.multi_highlight_manager = Some(MultiHighlightManager::new());
+        }
+        
+        let manager = self.multi_highlight_manager.as_mut().unwrap();
+        
+        // 清除旧的高亮
+        manager.clear();
+        
+        // 添加所有找到的相似元素的高亮框
+        for (i, result) in self.found_similar_elements.iter().enumerate() {
+            if let Some(last_node) = result.hierarchy.last() {
+                let id = format!("similar_{}", i);
+                let label = format!("相似元素 {}", i + 1);
+                manager.add(&id, &last_node.rect, &label);
+            }
+        }
+        
+        log::info!("[多元素高亮] 同时高亮 {} 个相似元素", self.found_similar_elements.len());
+        
+        // 【注意】不在后台线程中清理，因为 HWND 不是 Send 的
+        // 改为在下次捕获时自动清理，或者用户手动关闭
+        // TODO: 可以添加一个定时器，在主线程中定期清理
+    }
+
     // ── Panels ────────────────────────────────────────────────────────────────
 
     // UI 布局组件方法已移至 layout.rs 模块
@@ -1035,6 +1087,11 @@ impl eframe::App for SelectorApp {
                     );
                     
                     log::info!("[相似元素查找] 处理完成，找到 {} 个结果", self.found_similar_elements.len());
+                    
+                    // 【新增】同时高亮所有找到的相似元素
+                    if !self.found_similar_elements.is_empty() {
+                        self.highlight_multiple_elements();
+                    }
                     
                     // 退出相似模式
                     self.similar_mode_active = false;

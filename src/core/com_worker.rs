@@ -174,8 +174,9 @@ impl ComWorker {
         x: i32,
         y: i32,
     ) -> anyhow::Result<CaptureResult> {
-        // 直接调用现有的捕获逻辑
-        Ok(crate::capture::capture_at(x, y))
+        // 【关键修复】直接调用 uia.rs 的底层函数，避免递归
+        // uia.rs 内部会使用 thread_local 的 automation 实例
+        Ok(crate::core::uia::capture_at_point(x, y))
     }
     
     /// 执行查找操作
@@ -185,13 +186,13 @@ impl ComWorker {
         xpath: &str,
         random_range: Option<f32>,
     ) -> anyhow::Result<Vec<ElementInfo>> {
-        // 直接调用现有的查找逻辑
-        let result = crate::capture::find_all_elements_detailed(
+        // 【关键修复】直接调用 uia.rs 的底层函数，避免递归
+        let results = crate::core::uia::find_all_elements_detailed(
             window_selector,
             xpath,
             random_range.unwrap_or(5.0),
         );
-        Ok(result)
+        Ok(results)
     }
     
     /// 执行验证操作
@@ -201,8 +202,8 @@ impl ComWorker {
         element_xpath: &str,
         hierarchy: &[crate::core::model::HierarchyNode],
     ) -> anyhow::Result<DetailedValidationResult> {
-        // 直接调用现有的验证逻辑
-        Ok(crate::capture::validate_selector_and_xpath_detailed(
+        // 【关键修复】直接调用 uia.rs 的底层函数，避免递归
+        Ok(crate::core::uia::validate_selector_and_xpath_detailed(
             window_selector,
             element_xpath,
             hierarchy,
