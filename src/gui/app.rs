@@ -652,12 +652,8 @@ impl SelectorApp {
             return;
         }
 
-        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
-        if !capture::quick_check_window_exists(&self.window_selector) {
-            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
-            log::warn!("[智能优化] 窗口存在性检查失败，窗口可能已关闭");
-            return;
-        }
+        // 注意：不需要预检查窗口是否存在，因为 XPath 验证时已经会调用 find_window_by_selector
+        // 如果窗口不存在，XPath 验证自然会失败并给出明确提示
 
         info!("[智能优化] 开始优化，节点数: {}", self.hierarchy.len());
         info!("[智能优化] 优化前 XPath: {}", self.element_xpath);
@@ -711,12 +707,8 @@ impl SelectorApp {
             return;
         }
         
-        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
-        if !capture::quick_check_window_exists(&self.window_selector) {
-            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
-            log::warn!("[极简优化] 窗口存在性检查失败，窗口可能已关闭");
-            return;
-        }
+        // 注意：不需要预检查窗口是否存在，因为极简优化中的验证回调会调用 global_validate_xpath
+        // 如果窗口不存在，验证自然会失败
         
         // 设置优化进行中标志
         use std::sync::atomic::Ordering;
