@@ -20,7 +20,7 @@ use super::capture_overlay::CaptureOverlay;
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;  // 【新增】多元素高亮管理器
 use super::logger::{GuiLogger, init_gui_logger};
-use super::mouse_hook::{self, CaptureMode};
+use super::input_hook::{self, CaptureMode};
 
 // 引用重构后的独立模块
 use super::theme::Theme;
@@ -252,7 +252,7 @@ impl SelectorApp {
             detailed_validation: None,
             capture_state: CaptureState::Idle,
             overlay: CaptureOverlay::new(),
-            status_msg: "就绪 — 按 F4 开始捕获元素".to_string(),
+            status_msg: "就绪 — 按 Ctrl+Shift+F4 开始捕获元素".to_string(),
             history: config.last_xpaths.clone(),
             pending_save: false,
             config,
@@ -542,7 +542,7 @@ impl SelectorApp {
             deadline: Instant::now() + Duration::from_secs(30),
         };
         self.status_msg = "请点击目标控件（Esc 取消）…".to_string();
-        mouse_hook::activate_capture(true);
+        input_hook::activate_capture(true);
         self.overlay.show();
     }
 
@@ -554,7 +554,7 @@ impl SelectorApp {
             manager.clear();
         }
         
-        mouse_hook::deactivate_capture();
+        input_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Idle;
         self.status_msg    = "捕获已取消".to_string();
@@ -701,7 +701,7 @@ impl SelectorApp {
             self.last_highlight_time = None;
         }
         
-        mouse_hook::deactivate_capture();
+        input_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
 
@@ -768,7 +768,7 @@ impl SelectorApp {
                     self.capture_state = CaptureState::WaitingClick {
                         deadline: Instant::now() + Duration::from_secs(30),
                     };
-                    mouse_hook::activate_capture(true);
+                    input_hook::activate_capture(true);
                     self.overlay.show();
                     return; // 提前返回，不执行后续的 Single 模式逻辑
                 }
@@ -790,7 +790,7 @@ impl SelectorApp {
                     
                     // 退出捕获状态
                     self.capture_state = CaptureState::Idle;
-                    mouse_hook::deactivate_capture();
+                    input_hook::deactivate_capture();
                     self.overlay.hide();
                     ctx.set_cursor_icon(egui::CursorIcon::Default);
                     return; // 提前返回
@@ -1427,11 +1427,10 @@ impl eframe::App for SelectorApp {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
 
-        // ── 全局键盘 ─────────────────────────────────────────────────────────
-        let (f4, f7, escape, enter) = ui.ctx().input(|i| {
-            (i.key_pressed(Key::F4), i.key_pressed(Key::F7), i.key_pressed(Key::Escape), i.key_pressed(Key::Enter))
+        // ── 全局键盘（窗口焦点时的快捷键）───────────────────────────────────────
+        let (f7, escape, enter) = ui.ctx().input(|i| {
+            (i.key_pressed(Key::F7), i.key_pressed(Key::Escape), i.key_pressed(Key::Enter))
         });
-        if f4 && self.capture_state == CaptureState::Idle { self.start_capture(); }
         if f7 { self.do_validate(); }
         
         // Batch 模式下按 Esc 退出并重置
@@ -1446,6 +1445,15 @@ impl eframe::App for SelectorApp {
                 self.start_similar_search();
             }
         }
+        
+        // 【新增】检查全局热键是否激活了捕获模式（Ctrl+Shift+F4 由 rdev 处理）
+        if input_hook::is_active() && self.capture_state == CaptureState::Idle {
+            self.capture_state = CaptureState::WaitingClick {
+                deadline: Instant::now() + Duration::from_secs(30),
+            };
+            self.status_msg = "请点击目标控件（Ctrl+点击捕获，Shift+左键批量，Esc 取消）…".to_string();
+            self.overlay.show();
+        }
 
         // ── 捕获等待逻辑 ──────────────────────────────────────────────────────
         if let CaptureState::WaitingClick { deadline } = self.capture_state {
@@ -1458,14 +1466,14 @@ impl eframe::App for SelectorApp {
                     manager.clear();
                 }
                 
-                mouse_hook::deactivate_capture();
+                input_hook::deactivate_capture();
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg    = "捕获超时，已取消".to_string();
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             } else if escape {
                 self.cancel_capture(ui.ctx());
-            } else if let Some(event) = mouse_hook::poll_click() {
+            } else if let Some(event) = input_hook::poll_click() {
                 if event.is_down {
                     let mode = event.capture_mode();
                     if mode != CaptureMode::None {
@@ -1475,7 +1483,7 @@ impl eframe::App for SelectorApp {
             }
 
             // 【优化】悬停高亮防抖逻辑（500ms + 坐标稳定性检查）
-            let (mx, my, mt) = mouse_hook::get_mouse_state();
+            let (mx, my, mt) = input_hook::get_mouse_state();
             if mt > 0 {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

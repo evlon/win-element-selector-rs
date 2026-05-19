@@ -137,12 +137,12 @@ impl LayoutComponents for crate::gui::app::SelectorApp {
                             CaptureState::Idle => {
                                 if ui.add(
                                     egui::Button::new(
-                                        RichText::new("重新捕获 F4")
-                                            .color(t.btn_text)
-                                            .size(12.0),
-                                    )
-                                    .min_size(Vec2::new(100.0, 28.0)),
-                                ).on_hover_text("F4 — 点击屏幕控件进行捕获").clicked() {
+RichText::new("重新捕获 Ctrl+Shift+F4")
+                                             .color(t.btn_text)
+                                             .size(12.0),
+                                     )
+                                     .min_size(Vec2::new(100.0, 28.0)),
+                                 ).on_hover_text("Ctrl+Shift+F4 — 全局热键进入捕获模式").clicked() {
                                     self.start_capture();
                                 }
                                 

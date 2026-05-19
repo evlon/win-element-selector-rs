@@ -5,7 +5,7 @@
 mod gui;
 
 use gui::SelectorApp;
-use gui::mouse_hook;
+use gui::input_hook;
 
 use eframe::egui;
 use log::info;
@@ -61,10 +61,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize the global mouse hook system.
-    mouse_hook::init()
-        .expect("Failed to initialize mouse hook system");
-    info!("Mouse hook system initialized");
+    // Initialize the global input hook system (rdev grab).
+    input_hook::init()
+        .expect("Failed to initialize input hook system");
+    info!("Input hook system initialized");
 
     // Initialize global COM worker thread (single-threaded COM management)
     element_selector::core::com_worker::init_global_com_worker()
