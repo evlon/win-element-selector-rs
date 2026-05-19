@@ -20,7 +20,7 @@ use super::capture_overlay::CaptureOverlay;
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;  // 【新增】多元素高亮管理器
 use super::logger::{GuiLogger, init_gui_logger};
-use super::input_hook::{self, CaptureMode};
+use super::input_hook::{self, KeyEvent};
 
 // 引用重构后的独立模块
 use super::theme::Theme;
@@ -568,6 +568,8 @@ impl SelectorApp {
     // ═══════════════════════════════════════════════════════════════════════════════
     // 相似元素捕获相关方法
     // ═══════════════════════════════════════════════════════════════════════════════
+    
+    const MAX_SAMPLES: usize = 5;
 
     /// 从捕获结果中提取相似元素样本
     fn extract_similar_sample(&self, result: &capture::CaptureResult) -> Option<SimilarElementSample> {
@@ -593,41 +595,81 @@ impl SelectorApp {
         })
     }
 
-    /// 添加相似元素样本并查找相似元素
-    pub fn add_similar_sample(&mut self, result: capture::CaptureResult) {
-        
-        // 提取样本
-        if let Some(sample) = self.extract_similar_sample(&result) {
-            // 【优化】打印更详细的样本信息
-            let node = &sample.hierarchy_node;
-            log::info!("添加相似元素样本 #{}: {} [name='{}', automation_id='{}', class='{}'] at ({}, {})", 
-                self.similar_samples.len() + 1,
-                node.control_type,
-                node.name,
-                node.automation_id,
-                node.class_name,
-                result.cursor_x,
-                result.cursor_y
-            );
-            
-            self.similar_samples.push(sample);
-            self.similar_mode_active = true;
-            
-            // 如果已有多个样本，启动后台查找
-            if self.similar_samples.len() >= 2 {
-                log::info!("已收集 {} 个样本，启动后台查找...", self.similar_samples.len());
+    /// Toggle 样本：添加或移除当前悬停元素作为样本
+    fn toggle_sample(&mut self, ctx: &egui::Context) {
+        if let Some(result) = self.cached_hover_result.clone() {
+            if let Some(new_sample) = self.extract_similar_sample(&result) {
+                let node = new_sample.hierarchy_node.clone();
                 
-                // 启动后台查找任务
-                self.start_similar_search();
-            } else {
-                self.status_msg = format!(
-                    "相似模式：请继续点击相似元素（已收集 {} 个样本），按 Enter 完成查找",
-                    self.similar_samples.len()
-                );
+                // 检查是否已存在（通过 rect + control_type 匹配）
+                let existing_idx = self.similar_samples.iter().position(|existing| {
+                    existing.hierarchy_node.control_type == node.control_type
+                    && existing.hierarchy_node.rect.x == node.rect.x
+                    && existing.hierarchy_node.rect.y == node.rect.y
+                });
+                
+                if let Some(idx) = existing_idx {
+                    // 移除样本
+                    self.similar_samples.remove(idx);
+                    self.status_msg = format!("移除样本，剩余 {} 个", self.similar_samples.len());
+                    log::info!("[Toggle] 移除样本: {} at ({}, {})", 
+                        node.control_type, node.rect.x, node.rect.y);
+                    
+                    // 清除高亮
+                    if let Some(ref mut manager) = self.multi_highlight_manager {
+                        manager.clear();
+                    }
+                    self.found_similar_elements.clear();
+                } else {
+                    // 添加样本（检查上限）
+                    if self.similar_samples.len() >= Self::MAX_SAMPLES {
+                        self.status_msg = format!("样本已达上限（最多 {} 个）", Self::MAX_SAMPLES);
+                        log::warn!("[Toggle] 样本已达上限 {}", Self::MAX_SAMPLES);
+                        return;
+                    }
+                    
+                    self.similar_samples.push(new_sample);
+                    self.similar_mode_active = true;
+                    self.status_msg = format!("添加样本，共 {} 个", self.similar_samples.len());
+                    log::info!("[Toggle] 添加样本 #{}: {} at ({}, {})", 
+                        self.similar_samples.len(), node.control_type, node.rect.x, node.rect.y);
+                }
+                
+                // 样本变化后，立即启动查找并高亮
+                if self.similar_samples.len() >= 2 {
+                    self.start_similar_search();
+                }
+                
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
+        } else {
+            self.status_msg = "请先悬停到目标元素".to_string();
+            log::warn!("[Toggle] 无缓存结果，请先悬停到目标元素");
         }
     }
 
+    /// 强制刷新高亮（Alt 切换元素）
+    fn force_refresh_highlight(&mut self, ctx: &egui::Context) {
+        let (mx, my, _) = input_hook::get_mouse_state();
+        self.last_highlight_pos = None;
+        self.last_highlighted_element_id = None;
+        self.highlight_element_at(mx, my);
+        ctx.request_repaint_after(Duration::from_millis(100));
+        log::info!("[Alt] 强制刷新高亮 at ({}, {})", mx, my);
+    }
+
+    /// 重置并退出捕获模式
+    fn reset_and_exit(&mut self, ctx: &egui::Context) {
+        self.reset_similar_capture();
+        if let Some(ref mut manager) = self.multi_highlight_manager {
+            manager.clear();
+        }
+        self.cancel_capture(ctx);
+        self.status_msg = "已退出捕获模式".to_string();
+        log::info!("[Esc] 重置并退出捕获模式");
+    }
+
+    /// 添加相似元素样本并查找相似元素
     /// 重置相似元素捕获状态
     pub fn reset_similar_capture(&mut self) {
         self.similar_samples.clear();
@@ -685,158 +727,68 @@ impl SelectorApp {
         });
     }
 
-    fn finish_capture_at(&mut self, x: i32, y: i32, mode: CaptureMode, ctx: &egui::Context) {
-        // 【关键修复】先隐藏所有高亮窗口，避免累积
+    fn finish_capture_at(&mut self, x: i32, y: i32, ctx: &egui::Context) {
         highlight::hide();
         
-        // 【新增】清理多元素高亮，防止旧的高亮框残留
         if let Some(ref mut manager) = self.multi_highlight_manager {
             manager.clear();
         }
         
-        // 【关键修复】Batch 模式下不清空悬停高亮状态，避免重复查询
-        if !matches!(mode, CaptureMode::Batch) {
-            // 清除悬停高亮状态，防止在捕获过程中再次触发
-            self.last_highlight_pos = None;
-            self.last_highlight_time = None;
-        }
+        self.last_highlight_pos = None;
+        self.last_highlight_time = None;
         
         input_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
 
-        if let CaptureMode::Batch = mode {
-            self.status_msg = "批量捕获模式：点击更多相似元素，按 Enter 完成查找（Esc 取消）".to_string();
-        }
-
-        // 【关键修复】优先使用悬停时缓存的捕获结果，避免重新查询导致元素不一致
-        let result = if let CaptureMode::Batch = mode {
-            // 【优化】Batch 模式下，如果鼠标位置未变，直接使用缓存结果
-            let use_cache = if let Some(cached) = &self.cached_hover_result {
-                // 检查鼠标位置是否与缓存位置相同（允许 ±5 像素误差）
-                let dx = (cached.cursor_x - x).abs();
-                let dy = (cached.cursor_y - y).abs();
-                dx <= 5 && dy <= 5
-            } else {
-                false
-            };
-            
-            if use_cache {
-                log::info!("[Batch模式] 鼠标位置未变，使用缓存结果（坐标: {}, {}）", x, y);
-                // 【关键】克隆缓存，不清空，避免后续悬停高亮重复查询
-                self.cached_hover_result.clone().unwrap()
-            } else if let Some(cached) = self.cached_hover_result.take() {
-                log::info!("[Batch模式] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
-                cached
-            } else {
-                log::info!("[Batch模式] 无缓存，重新查询（坐标: {}, {}）", x, y);
-                capture::capture_at(x, y)
-            }
-        } else if let CaptureMode::BatchFinish = mode {
-            // 【新增】BatchFinish 模式：右键结束批量模式，不需要捕获新元素
-            // 直接返回一个虚拟结果，触发后续的 BatchFinish 处理逻辑
-            log::info!("[Batch模式] Shift+右键结束批量模式");
-            // 创建一个空结果，稍后在 match 中处理
-            capture::CaptureResult {
-                cursor_x: x,
-                cursor_y: y,
-                hierarchy: vec![],
-                window_info: None,
-                error: None,
-            }
+        let result = if let Some(cached) = self.cached_hover_result.take() {
+            log::info!("[捕获] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
+            cached
         } else {
-            // Single 模式：正常流程
-            if let Some(cached) = self.cached_hover_result.take() {
-                log::info!("[捕获] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
-                cached
-            } else {
-                log::info!("[捕获] 无缓存，重新查询（坐标: {}, {}）", x, y);
-                capture::capture_at(x, y)
-            }
+            log::info!("[捕获] 无缓存，重新查询（坐标: {}, {}）", x, y);
+            capture::capture_at(x, y)
         };
 
         if let Some(err) = &result.error {
             self.status_msg = format!("捕获失败: {}", err);
             self.capture_state = CaptureState::Idle;
         } else {
-            // 根据捕获模式处理
-            match mode {
-                CaptureMode::Batch => {
-                    // Batch 模式：添加相似元素样本
-                    self.add_similar_sample(result);
-                    // Batch 模式下不退出捕获状态，允许继续点击
-                    self.capture_state = CaptureState::WaitingClick {
-                        deadline: Instant::now() + Duration::from_secs(30),
-                    };
-                    input_hook::activate_capture(true);
-                    self.overlay.show();
-                    return; // 提前返回，不执行后续的 Single 模式逻辑
-                }
-                CaptureMode::BatchFinish => {
-                    // 【新增】BatchFinish 模式：Shift+右键结束批量模式并启动查找
-                    log::info!("[Batch模式] 结束批量模式，当前样本数: {}", self.similar_samples.len());
-                    
-                    if self.similar_samples.len() >= 2 {
-                        // 已有足够样本，启动查找
-                        log::info!("[Batch模式] 启动后台查找...");
-                        self.start_similar_search();
-                    } else {
-                        // 样本不足，提示用户
-                        self.status_msg = format!(
-                            "样本不足（{} 个），请至少添加 2 个相似元素",
-                            self.similar_samples.len()
-                        );
-                    }
-                    
-                    // 退出捕获状态
-                    self.capture_state = CaptureState::Idle;
-                    input_hook::deactivate_capture();
-                    self.overlay.hide();
-                    ctx.set_cursor_icon(egui::CursorIcon::Default);
-                    return; // 提前返回
-                }
-                CaptureMode::Single | CaptureMode::None => {
-                    // Single 模式：正常捕获流程
-                    let window_idx = Self::find_window_idx(&result);
+            let window_idx = Self::find_window_idx(&result);
 
-                    info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
-                    for (i, n) in result.hierarchy.iter().enumerate() {
-                        info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
-                    }
-                    if let Some(ref win) = result.window_info {
-                        info!("Window info: class='{}', name='{}', process='{}', pid={}",
-                              win.class_name, win.title, win.process_name, win.process_id);
-                    }
-                    info!("窗口节点定位: window_idx = {}", window_idx);
+            info!("捕获 hierarchy 共 {} 个节点:", result.hierarchy.len());
+            for (i, n) in result.hierarchy.iter().enumerate() {
+                info!("  [{}] {} class='{}' name='{}' pid={}", i, n.control_type, n.class_name, n.name, n.process_id);
+            }
+            if let Some(ref win) = result.window_info {
+                info!("Window info: class='{}', name='{}', process='{}', pid={}",
+                      win.class_name, win.title, win.process_name, win.process_id);
+            }
+            info!("窗口节点定位: window_idx = {}", window_idx);
 
-                    let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
-                        result.hierarchy[window_idx + 1..].to_vec()
-                    } else {
-                        Vec::new()
-                    };
+            let element_hierarchy: Vec<HierarchyNode> = if window_idx < result.hierarchy.len() - 1 {
+                result.hierarchy[window_idx + 1..].to_vec()
+            } else {
+                Vec::new()
+            };
 
-                    let n = element_hierarchy.len();
-                    self.selected_node = n.checked_sub(1);
-                    self.window_info   = result.window_info.clone();
+            let n = element_hierarchy.len();
+            self.selected_node = n.checked_sub(1);
+            self.window_info   = result.window_info.clone();
 
-                    // window_info 变更时同步初始化过滤器
-                    self.init_window_filters();
+            self.init_window_filters();
 
-                    let window_hint = result.window_info
-                        .as_ref()
-                        .map(|w| format!(" [窗口: {}]", w.title))
-                        .unwrap_or_default();
-                    self.status_msg = format!(
-                        "已捕获 {} 层层级 — 坐标 ({}, {}){}",
-                        n, result.cursor_x, result.cursor_y, window_hint
-                    );
+            let window_hint = result.window_info
+                .as_ref()
+                .map(|w| format!(" [窗口: {}]", w.title))
+                .unwrap_or_default();
+            self.status_msg = format!(
+                "已捕获 {} 层层级 — 坐标 ({}, {}){}",
+                n, result.cursor_x, result.cursor_y, window_hint
+            );
 
-                    self.node_expanded = vec![true; n];
-                    self.hierarchy     = element_hierarchy;
-                }
-            } // 关闭 match
+            self.node_expanded = vec![true; n];
+            self.hierarchy     = element_hierarchy;
 
-            // Single 模式：保存和重建 XPath（仅在成功捕获后执行）
             self.capture_state = CaptureState::Idle;
             self.xpath_source  = XPathSource::AutoGenerated;
             self.validation    = ValidationResult::Idle;
@@ -847,9 +799,8 @@ impl SelectorApp {
 
             ctx.set_cursor_icon(egui::CursorIcon::Default);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        } // 关闭 if let
+        }
         
-        // 【关键修复】清除缓存，防止下次误用
         self.cached_hover_result = None;
     }
 
@@ -1360,17 +1311,15 @@ impl eframe::App for SelectorApp {
                             last.rect.x, last.rect.y, last.rect.width, last.rect.height
                         );
                         
-                        // 【调试】打印详细信息
-                        eprintln!("[Highlight] Query result: {} at ({}, {})-{}x{}", 
-                            last.control_type, last.rect.x, last.rect.y, last.rect.width, last.rect.height);
-                        
                         // 【关键修复2】检查是否是相同的元素，避免闪烁
                         let is_same_element = self.last_highlighted_element_id.as_ref() == Some(&current_element_id);
                         
                         if !is_same_element {
-                            // 【优化】检测是否需要显示层级路径
+                            log::debug!("[Highlight] Query result: {} at ({}, {})-{}x{}", 
+                                last.control_type, last.rect.x, last.rect.y, last.rect.width, last.rect.height);
+                            
+                            // 检测是否需要显示层级路径
                             let should_show_path = if result.hierarchy.len() >= 2 {
-                                // 检查父子元素是否视觉重叠
                                 let current = &result.hierarchy[result.hierarchy.len() - 1];
                                 let parent = &result.hierarchy[result.hierarchy.len() - 2];
                                 current.rect.is_visually_overlapping(&parent.rect)
@@ -1378,24 +1327,17 @@ impl eframe::App for SelectorApp {
                                 false
                             };
                             
-                            // 恢复高亮显示
                             if should_show_path {
-                                // 显示层级路径
                                 let path = Self::build_hierarchy_path(&result.hierarchy);
                                 let highlight_info = HighlightInfo::new(last.rect.clone(), &path);
                                 highlight::update_highlight(&highlight_info);
                             } else {
-                                // 显示简单标签
                                 let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
                                 highlight::update_highlight(&highlight_info);
                             }
                             
-                            eprintln!("[Highlight] Updated to element: {:?}", last.control_type);
-                            
-                            // 更新缓存的 ID
+                            log::debug!("[Highlight] Updated to element: {}", last.control_type);
                             self.last_highlighted_element_id = Some(current_element_id);
-                        } else {
-                            eprintln!("[Highlight] Same element, skipping update");
                         }
                         
                         // 【关键修复】缓存捕获结果，供 Ctrl+点击时使用
@@ -1428,116 +1370,90 @@ impl eframe::App for SelectorApp {
         }
 
         // ── 全局键盘（窗口焦点时的快捷键）───────────────────────────────────────
-        let (f7, escape, enter) = ui.ctx().input(|i| {
-            (i.key_pressed(Key::F7), i.key_pressed(Key::Escape), i.key_pressed(Key::Enter))
-        });
+        let f7 = ui.ctx().input(|i| i.key_pressed(Key::F7));
         if f7 { self.do_validate(); }
-        
-        // Batch 模式下按 Esc 退出并重置
-        if escape && self.similar_mode_active {
-            self.reset_similar_capture();
-            self.status_msg = "相似模式已退出".to_string();
-        }
-        
-        // Batch 模式下按 Enter 完成查找
-        if enter && self.similar_mode_active {
-            if !self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
-                self.start_similar_search();
-            }
-        }
         
         // 【新增】检查全局热键是否激活了捕获模式（Ctrl+Shift+F4 由 rdev 处理）
         if input_hook::is_active() && self.capture_state == CaptureState::Idle {
             self.capture_state = CaptureState::WaitingClick {
-                deadline: Instant::now() + Duration::from_secs(30),
+                deadline: Instant::now() + Duration::from_secs(300),
             };
-            self.status_msg = "请点击目标控件（Ctrl+点击捕获，Shift+左键批量，Esc 取消）…".to_string();
+            self.status_msg = "悬停目标 → Ctrl 确认，Shift 样本，Alt 切换，Esc 取消".to_string();
             self.overlay.show();
         }
 
         // ── 捕获等待逻辑 ──────────────────────────────────────────────────────
         if let CaptureState::WaitingClick { deadline } = self.capture_state {
             if Instant::now() > deadline {
-                // 超时
                 highlight::hide();
-                
-                // 【关键修复】清理多元素高亮，防止残留
                 if let Some(ref mut manager) = self.multi_highlight_manager {
                     manager.clear();
                 }
-                
                 input_hook::deactivate_capture();
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
                 self.status_msg    = "捕获超时，已取消".to_string();
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-            } else if escape {
-                self.cancel_capture(ui.ctx());
-            } else if let Some(event) = input_hook::poll_click() {
-                if event.is_down {
-                    let mode = event.capture_mode();
-                    if mode != CaptureMode::None {
-                        self.finish_capture_at(event.x, event.y, mode, ui.ctx());
-                    }
-                }
-            }
-
-            // 【优化】悬停高亮防抖逻辑（500ms + 坐标稳定性检查）
-            let (mx, my, mt) = input_hook::get_mouse_state();
-            if mt > 0 {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                
-                // 检查鼠标是否已静止足够时间（300ms → 500ms，确保完全停止）
-                let time_since_move = now_ms.saturating_sub(mt);
-                if time_since_move >= 500 {
-                    // 【关键修复】检查是否有正在进行的查询
-                    let has_pending_query = self.pending_highlight_rx.is_some();
-                    
-                    // 节流检查：确保两次捕获之间至少间隔 100ms
-                    let should_throttle = if let Some(last_highlight_time) = self.last_highlight_time {
-                        now_ms - last_highlight_time < 100
-                    } else {
-                        false
-                    };
-                    
-                    // 只有在没有 pending 查询且不在节流期时，才发起新查询
-                    if !has_pending_query && !should_throttle {
-                        // 【关键优化】检查鼠标位置是否真的变化了
-                        let pos_changed = if let Some(last_pos) = self.last_highlight_pos {
-                            last_pos.0 != mx || last_pos.1 != my
-                        } else {
-                            true  // 首次查询
-                        };
-                        
-                        if pos_changed {
-                            // 【关键】递增序列号，用于丢弃过期结果
-                            self.highlight_query_sequence = self.highlight_query_sequence.wrapping_add(1);
-                            let current_sequence = self.highlight_query_sequence;
-                            
-                            // 【调试】打印鼠标状态
-                            eprintln!("[Highlight] Mouse state: pos=({}, {}), time_since_move={}ms", mx, my, time_since_move);
-                            
-                            // 【关键】始终调用 UIA 获取最新元素，确保能检测到子元素
-                            self.highlight_element_at(mx, my);
-                            self.last_highlight_pos = Some((mx, my));
-                            self.last_highlight_time = Some(now_ms);
-                            
-                            // 【调试】打印序列号
-                            eprintln!("[Highlight] Started query #{}", current_sequence);
-                        } else {
-                            // 鼠标位置未变，不重复查询（减少日志和 CPU 占用）
+            } else {
+                // 处理键盘事件（由 rdev 发送）
+                if let Some(key_event) = input_hook::poll_key() {
+                    let (mx, my, _) = input_hook::get_mouse_state();
+                    match key_event {
+                        KeyEvent::CtrlPress => {
+                            log::info!("[Ctrl] 确认捕获 at ({}, {})", mx, my);
+                            self.finish_capture_at(mx, my, ui.ctx());
+                        }
+                        KeyEvent::ShiftPress => {
+                            log::info!("[Shift] Toggle 样本");
+                            self.toggle_sample(ui.ctx());
+                        }
+                        KeyEvent::AltPress => {
+                            log::info!("[Alt] 切换元素");
+                            self.force_refresh_highlight(ui.ctx());
+                        }
+                        KeyEvent::EscapePress => {
+                            log::info!("[Esc] 退出捕获模式");
+                            self.reset_and_exit(ui.ctx());
                         }
                     }
-                    // 如果有 pending 查询或处于节流期，保持当前高亮不变
-                } else {
-                    // 鼠标仍在移动，清除位置记录
-                    self.last_highlight_pos = None;
+                }
+
+                // 悬停高亮防抖逻辑（500ms + 坐标稳定性检查）
+                let (mx, my, mt) = input_hook::get_mouse_state();
+                if mt > 0 {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    
+                    let time_since_move = now_ms.saturating_sub(mt);
+                    if time_since_move >= 500 {
+                        let has_pending_query = self.pending_highlight_rx.is_some();
+                        let should_throttle = if let Some(last_highlight_time) = self.last_highlight_time {
+                            now_ms - last_highlight_time < 100
+                        } else {
+                            false
+                        };
+                        
+                        if !has_pending_query && !should_throttle {
+                            let pos_changed = if let Some(last_pos) = self.last_highlight_pos {
+                                last_pos.0 != mx || last_pos.1 != my
+                            } else {
+                                true
+                            };
+                            
+                            if pos_changed {
+                                self.highlight_query_sequence = self.highlight_query_sequence.wrapping_add(1);
+                                self.highlight_element_at(mx, my);
+                                self.last_highlight_pos = Some((mx, my));
+                                self.last_highlight_time = Some(now_ms);
+                            }
+                        }
+                    } else {
+                        self.last_highlight_pos = None;
+                    }
                 }
             }
-        } else {
             highlight::hide();
             self.last_mouse_move    = None;
             self.last_highlight_pos = None;

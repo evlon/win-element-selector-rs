@@ -230,14 +230,6 @@ impl ComWorker {
         ))
     }
     
-    /// 枚举窗口
-    fn do_enumerate_windows(
-        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
-    ) -> anyhow::Result<Vec<WindowInfo>> {
-        // 调用现有的窗口枚举逻辑
-        Ok(crate::core::enum_windows::enumerate_windows_fast())
-    }
-    
     /// 查找相似元素
     fn do_find_similar_elements(
         _automation: &windows::Win32::UI::Accessibility::IUIAutomation,

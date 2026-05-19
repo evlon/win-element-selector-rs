@@ -44,10 +44,12 @@ const TRANSPARENT_KEY: u32 = 0x00FFFF;   // Cyan - 透明色键
 
 /// 单个高亮窗口的句柄和标签
 #[derive(Debug)]
+#[allow(dead_code)]
 struct HighlightWindows {
     border_hwnd: HWND,
     label_hwnd: HWND,
-    label_text: String,  // 存储标签文本
+    #[allow(dead_code)]
+    label_text: String,
 }
 
 /// 多元素高亮管理器
@@ -175,6 +177,7 @@ impl MultiHighlightManager {
     }
 
     /// 更新某个高亮框的位置
+    #[allow(dead_code)]
     pub fn update(&mut self, id: &str, rect: &ElementRect, label: &str) {
         self.remove(id);
         self.add(id, rect, label);
@@ -186,6 +189,7 @@ impl MultiHighlightManager {
     }
 
     /// 批量添加多个高亮框
+    #[allow(dead_code)]
     pub fn add_multiple(&mut self, items: &[(&str, &ElementRect, &str)]) {
         for (id, rect, label) in items {
             self.add(id, rect, label);
@@ -320,7 +324,7 @@ unsafe extern "system" fn border_wnd_proc(
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
-        WM_CLOSE | WM_DESTROY => {
+        msg if msg == WM_CLOSE || msg == WM_DESTROY => {
             // 【关键修复】不要再次调用 DestroyWindow，否则会导致重复销毁和堆损坏
             // WM_DESTROY 消息本身就是由 DestroyWindow 触发的
             // 这里只需要清理资源即可
@@ -379,7 +383,7 @@ unsafe extern "system" fn label_wnd_proc(
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
-        WM_CLOSE | WM_DESTROY => {
+        msg if msg == WM_CLOSE || msg == WM_DESTROY => {
             // 【关键修复】清理窗口用户数据中的字符串
             let label_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut String;
             if !label_ptr.is_null() {

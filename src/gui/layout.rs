@@ -149,7 +149,7 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
                                 // 相似模式提示
                                 ui.add_space(8.0);
                                 ui.label(
-                                    RichText::new("Shift+单击: 相似元素")
+                                    RichText::new("Shift: Toggle 样本 (最多5个)")
                                         .color(t.muted)
                                         .size(10.5)
                                 );
@@ -184,7 +184,7 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
                     // 根据是否处于相似模式显示不同提示
                     if self.similar_mode_active {
                         ui.label(
-                            RichText::new(format!("🔍 相似模式 — 已收集 {} 个样本", 
+                            RichText::new(format!("🔍 已收集 {} 个样本 (最多5个) — Shift 继续/移除", 
                                     self.similar_samples.len()))
                                 .color(t.capture_fg)
                                 .size(11.5),
@@ -192,31 +192,31 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
                         
                         ui.add_space(16.0);
                         
-                        // 完成按钮（更加醒目）
+                        // 完成按钮
                         let button = egui::Button::new(
-                            RichText::new("✔ 完成查找 (Enter)")
+                            RichText::new("✔ 查找相似元素")
                                 .color(egui::Color32::WHITE)
                                 .size(11.5)
                                 .strong(),
                         )
                         .fill(t.ok)
-                        .min_size(egui::Vec2::new(110.0, 22.0))
+                        .min_size(egui::Vec2::new(100.0, 22.0))
                         .stroke(Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 150)));
                         
-                        if ui.add(button).on_hover_text("点击或按 Enter 键结束样本收集并开始查找相似元素").clicked() {
+                        if ui.add(button).on_hover_text("点击按钮开始查找相似元素").clicked() {
                             complete_clicked = true;
                         }
                         
                         ui.add_space(12.0);
                         
                         ui.label(
-                            RichText::new("按 Esc 取消")
+                            RichText::new("Esc 取消")
                                 .color(t.muted)
                                 .size(10.5),
                         );
                     } else {
                         ui.label(
-                            RichText::new("⏳  请点击目标控件 — 按 Esc 或顶栏按钮取消")
+                            RichText::new("⏳  悬停目标 → Ctrl 确认 | Shift 样本 | Alt 切换 | Esc 取消")
                                 .color(t.capture_fg)
                                 .size(11.5),
                         );
