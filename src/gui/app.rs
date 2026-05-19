@@ -598,8 +598,14 @@ impl SelectorApp {
         
         // 提取样本
         if let Some(sample) = self.extract_similar_sample(&result) {
-            log::info!("添加相似元素样本: {} at ({}, {})", 
-                sample.hierarchy_node.control_type,
+            // 【优化】打印更详细的样本信息
+            let node = &sample.hierarchy_node;
+            log::info!("添加相似元素样本 #{}: {} [name='{}', automation_id='{}', class='{}'] at ({}, {})", 
+                self.similar_samples.len() + 1,
+                node.control_type,
+                node.name,
+                node.automation_id,
+                node.class_name,
                 result.cursor_x,
                 result.cursor_y
             );
@@ -688,9 +694,12 @@ impl SelectorApp {
             manager.clear();
         }
         
-        // 清除悬停高亮状态，防止在捕获过程中再次触发
-        self.last_highlight_pos = None;
-        self.last_highlight_time = None;
+        // 【关键修复】Batch 模式下不清空悬停高亮状态，避免重复查询
+        if !matches!(mode, CaptureMode::Batch) {
+            // 清除悬停高亮状态，防止在捕获过程中再次触发
+            self.last_highlight_pos = None;
+            self.last_highlight_time = None;
+        }
         
         mouse_hook::deactivate_capture();
         self.overlay.hide();
@@ -701,12 +710,49 @@ impl SelectorApp {
         }
 
         // 【关键修复】优先使用悬停时缓存的捕获结果，避免重新查询导致元素不一致
-        let result = if let Some(cached) = self.cached_hover_result.take() {
-            log::info!("[捕获] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
-            cached
+        let result = if let CaptureMode::Batch = mode {
+            // 【优化】Batch 模式下，如果鼠标位置未变，直接使用缓存结果
+            let use_cache = if let Some(cached) = &self.cached_hover_result {
+                // 检查鼠标位置是否与缓存位置相同（允许 ±5 像素误差）
+                let dx = (cached.cursor_x - x).abs();
+                let dy = (cached.cursor_y - y).abs();
+                dx <= 5 && dy <= 5
+            } else {
+                false
+            };
+            
+            if use_cache {
+                log::info!("[Batch模式] 鼠标位置未变，使用缓存结果（坐标: {}, {}）", x, y);
+                // 【关键】克隆缓存，不清空，避免后续悬停高亮重复查询
+                self.cached_hover_result.clone().unwrap()
+            } else if let Some(cached) = self.cached_hover_result.take() {
+                log::info!("[Batch模式] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
+                cached
+            } else {
+                log::info!("[Batch模式] 无缓存，重新查询（坐标: {}, {}）", x, y);
+                capture::capture_at(x, y)
+            }
+        } else if let CaptureMode::BatchFinish = mode {
+            // 【新增】BatchFinish 模式：右键结束批量模式，不需要捕获新元素
+            // 直接返回一个虚拟结果，触发后续的 BatchFinish 处理逻辑
+            log::info!("[Batch模式] Shift+右键结束批量模式");
+            // 创建一个空结果，稍后在 match 中处理
+            capture::CaptureResult {
+                cursor_x: x,
+                cursor_y: y,
+                hierarchy: vec![],
+                window_info: None,
+                error: None,
+            }
         } else {
-            log::info!("[捕获] 无缓存，重新查询（坐标: {}, {}）", x, y);
-            capture::capture_at(x, y)
+            // Single 模式：正常流程
+            if let Some(cached) = self.cached_hover_result.take() {
+                log::info!("[捕获] 使用悬停缓存的结果（坐标: {}, {}）", cached.cursor_x, cached.cursor_y);
+                cached
+            } else {
+                log::info!("[捕获] 无缓存，重新查询（坐标: {}, {}）", x, y);
+                capture::capture_at(x, y)
+            }
         };
 
         if let Some(err) = &result.error {
@@ -725,6 +771,29 @@ impl SelectorApp {
                     mouse_hook::activate_capture(true);
                     self.overlay.show();
                     return; // 提前返回，不执行后续的 Single 模式逻辑
+                }
+                CaptureMode::BatchFinish => {
+                    // 【新增】BatchFinish 模式：Shift+右键结束批量模式并启动查找
+                    log::info!("[Batch模式] 结束批量模式，当前样本数: {}", self.similar_samples.len());
+                    
+                    if self.similar_samples.len() >= 2 {
+                        // 已有足够样本，启动查找
+                        log::info!("[Batch模式] 启动后台查找...");
+                        self.start_similar_search();
+                    } else {
+                        // 样本不足，提示用户
+                        self.status_msg = format!(
+                            "样本不足（{} 个），请至少添加 2 个相似元素",
+                            self.similar_samples.len()
+                        );
+                    }
+                    
+                    // 退出捕获状态
+                    self.capture_state = CaptureState::Idle;
+                    mouse_hook::deactivate_capture();
+                    self.overlay.hide();
+                    ctx.set_cursor_icon(egui::CursorIcon::Default);
+                    return; // 提前返回
                 }
                 CaptureMode::Single | CaptureMode::None => {
                     // Single 模式：正常捕获流程
@@ -1187,21 +1256,37 @@ impl eframe::App for SelectorApp {
                     let elapsed = start_time.elapsed();
                     
                     self.found_similar_elements = results;
-                    self.status_msg = format!(
-                        "相似元素查找完成（耗时 {:.1}s）：找到 {} 个相似元素",
-                        elapsed.as_secs_f64(),
-                        self.found_similar_elements.len()
-                    );
                     
-                    log::info!("[相似元素查找] 处理完成，找到 {} 个结果", self.found_similar_elements.len());
+                    // 【优化】根据找到的数量给出不同的提示
+                    let count = self.found_similar_elements.len();
+                    if count >= 2 {
+                        self.status_msg = format!(
+                            "✓ 找到 {} 个相似元素（耗时 {:.1}s）！按 Enter 可继续查找更多",
+                            count,
+                            elapsed.as_secs_f64()
+                        );
+                        log::info!("[相似元素查找] 找到 {} 个相似元素，可以按 Enter 继续扩展", count);
+                    } else if count == 1 {
+                        self.status_msg = format!(
+                            "找到 1 个相似元素（耗时 {:.1}s）",  // 不太可能，但保留
+                            elapsed.as_secs_f64()
+                        );
+                    } else {
+                        self.status_msg = format!(
+                            "未找到更多相似元素（耗时 {:.1}s）",
+                            elapsed.as_secs_f64()
+                        );
+                    }
                     
-                    // 【新增】同时高亮所有找到的相似元素
+                    log::info!("[相似元素查找] 处理完成，找到 {} 个结果", count);
+                    
+                    // 【关键】同时高亮所有找到的相似元素
                     if !self.found_similar_elements.is_empty() {
                         self.highlight_multiple_elements();
                     }
                     
-                    // 退出相似模式
-                    self.similar_mode_active = false;
+                    // 注意：不退出相似模式，允许用户按 Enter 继续查找
+                    // self.similar_mode_active = false;  // 注释掉，保持激活状态
                     
                     // 强制刷新 UI
                     ui.ctx().request_repaint_after(Duration::from_millis(100));

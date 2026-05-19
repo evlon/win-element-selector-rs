@@ -12,7 +12,7 @@ use windows::Win32::{
     Foundation::{LPARAM, WPARAM, LRESULT},
     UI::WindowsAndMessaging::{
         SetWindowsHookExW, UnhookWindowsHookEx, CallNextHookEx,
-        WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MOUSEMOVE,
         MSLLHOOKSTRUCT, HHOOK,
         GetMessageW,
     },
@@ -56,8 +56,10 @@ pub struct MouseMovedEvent;
 pub enum CaptureMode {
     /// Normal single element capture (Ctrl + click or simple click)
     Single,
-    /// Batch capture similar elements (Shift + click)
+    /// Batch capture similar elements (Shift + left click)
     Batch,
+    /// Finish batch mode and confirm (Shift + right click)
+    BatchFinish,
     /// No capture (modifier not pressed)
     None,
 }
@@ -67,20 +69,23 @@ pub enum CaptureMode {
 pub struct ClickEvent {
     pub x: i32,
     pub y: i32,
-    pub is_down: bool,  // true for WM_LBUTTONDOWN, false for WM_LBUTTONUP
+    pub is_down: bool,  // true for WM_LBUTTONDOWN/WM_RBUTTONDOWN, false for WM_LBUTTONUP/WM_RBUTTONUP
+    pub is_right_button: bool,  // true for right click, false for left click
     pub ctrl_pressed: bool,
     pub shift_pressed: bool,
 }
 
 impl ClickEvent {
-    /// Determine the capture mode based on keyboard modifiers.
+    /// Determine the capture mode based on keyboard modifiers and mouse button.
     pub fn capture_mode(&self) -> CaptureMode {
-        if self.ctrl_pressed && self.is_down {
+        if self.ctrl_pressed && self.is_down && !self.is_right_button {
             CaptureMode::Single
-        } else if self.shift_pressed && self.is_down {
+        } else if self.shift_pressed && self.is_down && !self.is_right_button {
             CaptureMode::Batch
+        } else if self.shift_pressed && self.is_down && self.is_right_button {
+            CaptureMode::BatchFinish
         } else {
-            // No modifier pressed - do not capture
+            // No modifier pressed or wrong button - do not capture
             CaptureMode::None
         }
     }
@@ -227,8 +232,8 @@ pub mod win_hook {
                 }
             }
             
-            // Only process left button events.
-            if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
+            // Process left and right button events.
+            if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
                 // Extract mouse position from MSLLHOOKSTRUCT.
                 let hook_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
                 
@@ -242,12 +247,14 @@ pub mod win_hook {
                 let event = ClickEvent {
                     x: hook_struct.pt.x,
                     y: hook_struct.pt.y,
-                    is_down: msg == WM_LBUTTONDOWN,
+                    is_down: msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN,
+                    is_right_button: msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP,
                     ctrl_pressed,
                     shift_pressed,
                 };
                 
-                debug!("Mouse hook captured: {:?} at ({}, {})", 
+                debug!("Mouse hook captured: {:?} {} at ({}, {})", 
+                       if event.is_right_button { "RIGHT" } else { "LEFT" },
                        if event.is_down { "DOWN" } else { "UP" }, event.x, event.y);
                 
                 // Send click event to main thread (non-blocking).
