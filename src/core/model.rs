@@ -133,6 +133,45 @@ pub struct ElementRect {
     pub height: i32,
 }
 
+impl ElementRect {
+    /// 计算与另一个矩形的重叠面积占比
+    /// 返回 Some(overlap_ratio) 如果重叠，None 如果不重叠
+    pub fn overlap_ratio(&self, other: &ElementRect) -> Option<f64> {
+        // 计算重叠区域
+        let overlap_x = (self.x + self.width).min(other.x + other.width)
+                      - self.x.max(other.x);
+        let overlap_y = (self.y + self.height).min(other.y + other.height)
+                      - self.y.max(other.y);
+        
+        // 如果没有重叠，返回 None
+        if overlap_x <= 0 || overlap_y <= 0 {
+            return None;
+        }
+        
+        // 计算重叠面积
+        let overlap_area = (overlap_x * overlap_y) as f64;
+        let area_self = (self.width * self.height) as f64;
+        let area_other = (other.width * other.height) as f64;
+        
+        // 使用较小面积的作为基准
+        let min_area = area_self.min(area_other);
+        
+        if min_area <= 0.0 {
+            return None;
+        }
+        
+        Some(overlap_area / min_area)
+    }
+    
+    /// 判断两个矩形是否"视觉重叠"（重叠面积 > 80%）
+    pub fn is_visually_overlapping(&self, other: &ElementRect) -> bool {
+        match self.overlap_ratio(other) {
+            Some(ratio) => ratio > 0.8,
+            None => false,
+        }
+    }
+}
+
 // ─── HierarchyNode ───────────────────────────────────────────────────────────
 
 /// One level in the ancestor chain from root window to target element.

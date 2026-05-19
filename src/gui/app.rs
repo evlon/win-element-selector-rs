@@ -116,6 +116,10 @@ pub struct SelectorApp {
     // 【关键修复】缓存最后一次悬停的捕获结果，Ctrl+点击时直接使用
     pub cached_hover_result: Option<capture::CaptureResult>,
     
+    // 【新增】用于避免闪烁和顺序问题
+    pub last_highlighted_element_id: Option<String>,  // 上一次高亮的元素 RuntimeId
+    pub highlight_query_sequence: u64,  // 查询序列号，用于丢弃过期结果
+    
     // 【新增】多元素高亮自动清理
     pub multi_highlight_create_time: Option<std::time::Instant>,
 }
@@ -296,6 +300,10 @@ impl SelectorApp {
             
             // 【关键修复】缓存最后一次悬停的捕获结果
             cached_hover_result: None,
+            
+            // 【新增】用于避免闪烁和顺序问题
+            last_highlighted_element_id: None,
+            highlight_query_sequence: 0,
             
             // 【新增】多元素高亮自动清理
             multi_highlight_create_time: None,
@@ -997,7 +1005,59 @@ impl SelectorApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    /// 【新增】构建层级路径字符串
+    fn build_hierarchy_path(hierarchy: &[HierarchyNode]) -> String {
+        if hierarchy.is_empty() {
+            return String::new();
+        }
+        
+        // 最多显示 5 层：当前 + 3个中间层 + 根窗口
+        let max_display = 5;
+        let total = hierarchy.len();
+        
+        if total <= max_display {
+            // 层级较少，直接显示全部
+            hierarchy.iter()
+                .map(|n| n.control_type.as_str())
+                .collect::<Vec<_>>()
+                .join(" › ")
+        } else {
+            // 层级较多，智能截断
+            let mut parts = Vec::new();
+            
+            // 1. 当前元素（最后一个）
+            parts.push(hierarchy.last().unwrap().control_type.as_str());
+            
+            // 2. 从后往前找有意义的中间层
+            let mut meaningful_count = 0;
+            for node in hierarchy.iter().rev().skip(1).take(total - 2) {
+                if !node.name.is_empty() || !node.automation_id.is_empty() {
+                    parts.insert(0, node.control_type.as_str());
+                    meaningful_count += 1;
+                    if meaningful_count >= 3 {  // 最多 3 个中间层
+                        break;
+                    }
+                }
+            }
+            
+            // 3. 如果有省略，添加标记
+            if meaningful_count >= 3 {
+                parts.insert(1, "...");
+            }
+            
+            // 4. 总是包含根窗口（第一个）
+            if parts.last() != Some(&hierarchy[0].control_type.as_str()) {
+                parts.push(hierarchy[0].control_type.as_str());
+            }
+            
+            parts.join(" › ")
+        }
+    }
+
     fn highlight_element_at(&mut self, x: i32, y: i32) {
+        // 【关键修复】在查询前同步隐藏高亮窗口，确保 UIA ElementFromPoint 不会命中高亮窗口本身
+        highlight::hide_sync();
+        
         // 【关键修复】改为异步执行，防止悬停时卡顿
         let (tx, rx) = std::sync::mpsc::channel();
         
@@ -1206,8 +1266,52 @@ impl eframe::App for SelectorApp {
                 // 高亮查询完成，显示结果
                 if result.error.is_none() {
                     if let Some(last) = result.hierarchy.last() {
-                        let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
-                        highlight::update_highlight(&highlight_info);
+                        // 【关键修复1】生成元素唯一标识，用于去重
+                        // 使用 control_type + depth + rect 组合作为唯一标识
+                        let current_element_id = format!(
+                            "{}|d{}|{},{}-{}x{}",
+                            last.control_type,
+                            last.depth_from_window,
+                            last.rect.x, last.rect.y, last.rect.width, last.rect.height
+                        );
+                        
+                        // 【调试】打印详细信息
+                        eprintln!("[Highlight] Query result: {} at ({}, {})-{}x{}", 
+                            last.control_type, last.rect.x, last.rect.y, last.rect.width, last.rect.height);
+                        
+                        // 【关键修复2】检查是否是相同的元素，避免闪烁
+                        let is_same_element = self.last_highlighted_element_id.as_ref() == Some(&current_element_id);
+                        
+                        if !is_same_element {
+                            // 【优化】检测是否需要显示层级路径
+                            let should_show_path = if result.hierarchy.len() >= 2 {
+                                // 检查父子元素是否视觉重叠
+                                let current = &result.hierarchy[result.hierarchy.len() - 1];
+                                let parent = &result.hierarchy[result.hierarchy.len() - 2];
+                                current.rect.is_visually_overlapping(&parent.rect)
+                            } else {
+                                false
+                            };
+                            
+                            // 恢复高亮显示
+                            if should_show_path {
+                                // 显示层级路径
+                                let path = Self::build_hierarchy_path(&result.hierarchy);
+                                let highlight_info = HighlightInfo::new(last.rect.clone(), &path);
+                                highlight::update_highlight(&highlight_info);
+                            } else {
+                                // 显示简单标签
+                                let highlight_info = HighlightInfo::new(last.rect.clone(), &last.control_type);
+                                highlight::update_highlight(&highlight_info);
+                            }
+                            
+                            eprintln!("[Highlight] Updated to element: {:?}", last.control_type);
+                            
+                            // 更新缓存的 ID
+                            self.last_highlighted_element_id = Some(current_element_id);
+                        } else {
+                            eprintln!("[Highlight] Same element, skipping update");
+                        }
                         
                         // 【关键修复】缓存捕获结果，供 Ctrl+点击时使用
                         self.cached_hover_result = Some(result.clone());
@@ -1259,10 +1363,16 @@ impl eframe::App for SelectorApp {
         }
 
         // ── 捕获等待逻辑 ──────────────────────────────────────────────────────
-        if let CaptureState::WaitingClick { deadline } = &self.capture_state {
-            if Instant::now() > *deadline {
+        if let CaptureState::WaitingClick { deadline } = self.capture_state {
+            if Instant::now() > deadline {
                 // 超时
                 highlight::hide();
+                
+                // 【关键修复】清理多元素高亮，防止残留
+                if let Some(ref mut manager) = self.multi_highlight_manager {
+                    manager.clear();
+                }
+                
                 mouse_hook::deactivate_capture();
                 self.overlay.hide();
                 self.capture_state = CaptureState::Idle;
@@ -1279,8 +1389,7 @@ impl eframe::App for SelectorApp {
                 }
             }
 
-            // 悬停高亮（防抖 500ms）
-            // 使用节流机制避免频繁调用 capture
+            // 【优化】悬停高亮防抖逻辑（500ms + 坐标稳定性检查）
             let (mx, my, mt) = mouse_hook::get_mouse_state();
             if mt > 0 {
                 let now_ms = std::time::SystemTime::now()
@@ -1288,24 +1397,50 @@ impl eframe::App for SelectorApp {
                     .unwrap()
                     .as_millis() as u64;
                 
-                // Only attempt highlight if mouse has been stationary for at least 500ms
-                // and position has changed since last highlight
+                // 检查鼠标是否已静止足够时间（300ms → 500ms，确保完全停止）
                 let time_since_move = now_ms.saturating_sub(mt);
-                if time_since_move >= 500 && self.last_highlight_pos != Some((mx, my)) {
-                    // Check if we should throttle to avoid too frequent captures
-                    let should_highlight = if let Some(last_highlight_time) = self.last_highlight_time {
-                        now_ms - last_highlight_time >= 100  // At least 100ms between highlights
+                if time_since_move >= 500 {
+                    // 【关键修复】检查是否有正在进行的查询
+                    let has_pending_query = self.pending_highlight_rx.is_some();
+                    
+                    // 节流检查：确保两次捕获之间至少间隔 100ms
+                    let should_throttle = if let Some(last_highlight_time) = self.last_highlight_time {
+                        now_ms - last_highlight_time < 100
                     } else {
-                        true
+                        false
                     };
                     
-                    if should_highlight {
-                        self.highlight_element_at(mx, my);
-                        self.last_highlight_pos = Some((mx, my));
-                        self.last_highlight_time = Some(now_ms);
+                    // 只有在没有 pending 查询且不在节流期时，才发起新查询
+                    if !has_pending_query && !should_throttle {
+                        // 【关键优化】检查鼠标位置是否真的变化了
+                        let pos_changed = if let Some(last_pos) = self.last_highlight_pos {
+                            last_pos.0 != mx || last_pos.1 != my
+                        } else {
+                            true  // 首次查询
+                        };
+                        
+                        if pos_changed {
+                            // 【关键】递增序列号，用于丢弃过期结果
+                            self.highlight_query_sequence = self.highlight_query_sequence.wrapping_add(1);
+                            let current_sequence = self.highlight_query_sequence;
+                            
+                            // 【调试】打印鼠标状态
+                            eprintln!("[Highlight] Mouse state: pos=({}, {}), time_since_move={}ms", mx, my, time_since_move);
+                            
+                            // 【关键】始终调用 UIA 获取最新元素，确保能检测到子元素
+                            self.highlight_element_at(mx, my);
+                            self.last_highlight_pos = Some((mx, my));
+                            self.last_highlight_time = Some(now_ms);
+                            
+                            // 【调试】打印序列号
+                            eprintln!("[Highlight] Started query #{}", current_sequence);
+                        } else {
+                            // 鼠标位置未变，不重复查询（减少日志和 CPU 占用）
+                        }
                     }
-                } else if time_since_move < 500 {
-                    // Mouse is still moving, clear the highlight position
+                    // 如果有 pending 查询或处于节流期，保持当前高亮不变
+                } else {
+                    // 鼠标仍在移动，清除位置记录
                     self.last_highlight_pos = None;
                 }
             }
