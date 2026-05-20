@@ -243,37 +243,36 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
 
                 ui.add_space(6.0);
 
-                // ── 状态消息 + 操作按钮 ────────────────────────────────────────
+// ── 状态消息 + 操作按钮 ────────────────────────────────────────
                 ui.horizontal(|ui| {
-                    // 状态消息
-                    let msg_color = match &self.validation {
-                        ValidationResult::Found { .. }              => t.ok,
-                        ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
-                        ValidationResult::Running                   => t.warn,
-                        _ => t.muted,
-                    };
-                    ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
-                    
-                    // 相似模式状态指示器
-                    if self.similar_mode_active {
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(format!("🔍 相似模式: {} 个样本", self.similar_samples.len()))
-                                .color(t.warn)
-                                .size(11.0)
-                        );
-                    }
-                    
-                    // 后台查找进度指示器
-                    if self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
-                        ui.add_space(8.0);
-                        ui.spinner();
-                        ui.label(
-                            RichText::new("查找中...")
-                                .color(t.warn)
-                                .size(11.0)
-                        );
-                    }
+                    ui.push_id("status_bar", |ui| {
+                        let msg_color = match &self.validation {
+                            ValidationResult::Found { .. }              => t.ok,
+                            ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
+                            ValidationResult::Running                   => t.warn,
+                            _ => t.muted,
+                        };
+                        ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
+                        
+                        if self.similar_mode_active {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!("🔍 相似模式: {} 个样本", self.similar_samples.len()))
+                                    .color(t.warn)
+                                    .size(11.0)
+                            );
+                        }
+                        
+                        if self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                            ui.add_space(8.0);
+                            ui.spinner();
+                            ui.label(
+                                RichText::new("查找中...")
+                                    .color(t.warn)
+                                    .size(11.0)
+                            );
+                        }
+                    });
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // 确定按钮（校验通过后变绿）
@@ -638,43 +637,45 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
                 let filter_count = self.hierarchy[sel_idx].filters.len();
                 let mut dirty = false;
                 for fi in 0..filter_count {
-                    let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
+                    ui.push_id(format!("filter_row_{}", fi), |ui| {
+                        let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
 
-                    egui::Frame::NONE
-                        .fill(row_color)
-                        .inner_margin(Margin::symmetric(4, 1))
-                        .show(ui, |ui| {
-                            let filter = &mut self.hierarchy[sel_idx].filters[fi];
-                            ui.horizontal(|ui| {
-                                if ui.checkbox(&mut filter.enabled, "").changed() { dirty = true; }
+                        egui::Frame::NONE
+                            .fill(row_color)
+                            .inner_margin(Margin::symmetric(4, 1))
+                            .show(ui, |ui| {
+                                let filter = &mut self.hierarchy[sel_idx].filters[fi];
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut filter.enabled, "").changed() { dirty = true; }
 
-                                ui.add_sized(
-                                    Vec2::new(100.0, 20.0),
-                                    egui::Label::new(RichText::new(&filter.name.clone()).size(12.0)),
-                                );
+                                    ui.add_sized(
+                                        Vec2::new(100.0, 20.0),
+                                        egui::Label::new(RichText::new(&filter.name.clone()).size(12.0)),
+                                    );
 
-                                let old_op = filter.operator.clone();
-                                egui::ComboBox::from_id_salt(format!("op_{}_{}", sel_idx, fi))
-                                    .selected_text(filter.operator.label())
-                                    .width(76.0)
-                                    .show_ui(ui, |ui| {
-                                        for op in Operator::all() {
-                                            ui.selectable_value(&mut filter.operator, op.clone(), op.label());
-                                        }
-                                    });
-                                if filter.operator != old_op { dirty = true; }
+                                    let old_op = filter.operator.clone();
+                                    egui::ComboBox::from_id_salt(format!("op_{}_{}", sel_idx, fi))
+                                        .selected_text(filter.operator.label())
+                                        .width(76.0)
+                                        .show_ui(ui, |ui| {
+                                            for op in Operator::all() {
+                                                ui.selectable_value(&mut filter.operator, op.clone(), op.label());
+                                            }
+                                        });
+                                    if filter.operator != old_op { dirty = true; }
 
-                                if ui.add(
-                                    TextEdit::singleline(&mut filter.value)
-                                        .desired_width(ui.available_width() - 4.0)
-                                        .font(egui::TextStyle::Monospace)
-                                        .hint_text("—"),
-                                ).changed() {
-                                    filter.enabled = !filter.value.is_empty();
-                                    dirty = true;
-                                }
+                                    if ui.add(
+                                        TextEdit::singleline(&mut filter.value)
+                                            .desired_width(ui.available_width() - 4.0)
+                                            .font(egui::TextStyle::Monospace)
+                                            .hint_text("—"),
+                                    ).changed() {
+                                        filter.enabled = !filter.value.is_empty();
+                                        dirty = true;
+                                    }
+                                });
                             });
-                        });
+                    });
                 }
                 if dirty {
                     self.xpath_source = XPathSource::AutoGenerated;
@@ -753,43 +754,45 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
                 let filter_count = self.window_filters.len();
                 let mut dirty = false;
                 for fi in 0..filter_count {
-                    let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
+                    ui.push_id(format!("window_filter_row_{}", fi), |ui| {
+                        let row_color = if fi % 2 == 0 { t.row_even } else { t.row_odd };
 
-                    egui::Frame::NONE
-                        .fill(row_color)
-                        .inner_margin(Margin::symmetric(4, 1))
-                        .show(ui, |ui| {
-                            let filter = &mut self.window_filters[fi];
-                            ui.horizontal(|ui| {
-                                if ui.checkbox(&mut filter.enabled, "").changed() { dirty = true; }
+                        egui::Frame::NONE
+                            .fill(row_color)
+                            .inner_margin(Margin::symmetric(4, 1))
+                            .show(ui, |ui| {
+                                let filter = &mut self.window_filters[fi];
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut filter.enabled, "").changed() { dirty = true; }
 
-                                ui.add_sized(
-                                    Vec2::new(100.0, 20.0),
-                                    egui::Label::new(RichText::new(&filter.name.clone()).size(12.0)),
-                                );
+                                    ui.add_sized(
+                                        Vec2::new(100.0, 20.0),
+                                        egui::Label::new(RichText::new(&filter.name.clone()).size(12.0)),
+                                    );
 
-                                let old_op = filter.operator.clone();
-                                egui::ComboBox::from_id_salt(format!("win_op_{}", fi))
-                                    .selected_text(filter.operator.label())
-                                    .width(76.0)
-                                    .show_ui(ui, |ui| {
-                                        for op in Operator::all() {
-                                            ui.selectable_value(&mut filter.operator, op.clone(), op.label());
-                                        }
-                                    });
-                                if filter.operator != old_op { dirty = true; }
+                                    let old_op = filter.operator.clone();
+                                    egui::ComboBox::from_id_salt(format!("win_op_{}", fi))
+                                        .selected_text(filter.operator.label())
+                                        .width(76.0)
+                                        .show_ui(ui, |ui| {
+                                            for op in Operator::all() {
+                                                ui.selectable_value(&mut filter.operator, op.clone(), op.label());
+                                            }
+                                        });
+                                    if filter.operator != old_op { dirty = true; }
 
-                                if ui.add(
-                                    TextEdit::singleline(&mut filter.value)
-                                        .desired_width(ui.available_width() - 4.0)
-                                        .font(egui::TextStyle::Monospace)
-                                        .hint_text("—"),
-                                ).changed() {
-                                    filter.enabled = !filter.value.is_empty();
-                                    dirty = true;
-                                }
+                                    if ui.add(
+                                        TextEdit::singleline(&mut filter.value)
+                                            .desired_width(ui.available_width() - 4.0)
+                                            .font(egui::TextStyle::Monospace)
+                                            .hint_text("—"),
+                                    ).changed() {
+                                        filter.enabled = !filter.value.is_empty();
+                                        dirty = true;
+                                    }
+                                });
                             });
-                        });
+                    });
                 }
 
                 if dirty {
@@ -861,57 +864,50 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
     
         ui.add_space(8.0);
         ui.label(RichText::new("失败步骤分析:").color(t.muted).size(11.0));
-        ui.add_space(4.0);
+ui.add_space(4.0);
     
-        for seg in &detail.segments {
+        for (si, seg) in detail.segments.iter().enumerate() {
             if seg.matched || seg.match_count > 0 { continue; }
-    
-            egui::Frame::NONE
-                .fill(t.fail_step_bg)
-                .corner_radius(CornerRadius::same(4))
-                .inner_margin(Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("第 {} 步失败:", seg.segment_index + 1))
-                            .color(t.warn_detail_fg)
-                            .size(11.0),
-                    );
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(&seg.segment_text)
-                            .font(egui::FontId::monospace(10.0))
-                            .color(t.mono_fg),
-                    );
-    
-                    if !seg.predicate_failures.is_empty() {
-                        ui.add_space(4.0);
-                        for pf in &seg.predicate_failures {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{}: ", pf.attr_name)).color(t.muted).size(10.0));
-                                ui.label(RichText::new(format!("期望 '{}'", pf.expected_value)).color(t.expected_fg).size(10.0));
-                                if let Some(ref actual) = pf.actual_value {
-                                    ui.label(RichText::new(" vs ").color(t.muted).size(10.0));
-                                    ui.label(RichText::new(format!("实际 '{}'", actual)).color(t.actual_fg).size(10.0));
-                                }
-                            });
-                            ui.label(RichText::new(&pf.reason).color(t.muted).size(10.0));
+
+            ui.push_id(format!("seg_{}", si), |ui| {
+                egui::Frame::NONE
+                    .fill(t.fail_step_bg)
+                    .corner_radius(CornerRadius::same(4))
+                    .inner_margin(Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!("第 {} 步失败:", seg.segment_index + 1))
+                                .color(t.warn_detail_fg)
+                                .size(11.0),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(&seg.segment_text)
+                                .font(egui::FontId::monospace(10.0))
+                                .color(t.mono_fg),
+                        );
+
+                        if !seg.predicate_failures.is_empty() {
+                            ui.add_space(4.0);
+                            for (pfi, pf) in seg.predicate_failures.iter().enumerate() {
+                                ui.push_id(format!("pf_{}", pfi), |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{}: ", pf.attr_name)).color(t.muted).size(10.0));
+                                        ui.label(RichText::new(format!("期望 '{}'", pf.expected_value)).color(t.expected_fg).size(10.0));
+                                        if let Some(ref actual) = pf.actual_value {
+                                            ui.label(RichText::new(" vs ").color(t.muted).size(10.0));
+                                            ui.label(RichText::new(format!("实际 '{}'", actual)).color(t.actual_fg).size(10.0));
+                                        }
+                                    });
+                                    ui.label(RichText::new(&pf.reason).color(t.muted).size(10.0));
+                                });
+                            }
                         }
-                    } else {
-                        ui.label(RichText::new("• 属性值在验证时可能已变化").color(t.muted).size(10.0));
-                        ui.label(RichText::new("• 元素结构在捕获后可能已变化").color(t.muted).size(10.0));
-                    }
-                });
-            ui.add_space(4.0);
+                    });
+            });
         }
-    
-        ui.add_space(8.0);
-        ui.label(RichText::new("建议:").color(t.muted).size(11.0));
-        ui.add_space(4.0);
-        ui.label(RichText::new("1. 点击【智能优化】按钮，移除动态属性").color(t.muted).size(10.0));
-        ui.label(RichText::new("2. 检查动态类名是否在捕获后发生了变化").color(t.muted).size(10.0));
-        ui.label(RichText::new("3. 重新捕获元素，确保元素状态稳定").color(t.muted).size(10.0));
     }
-    
+
     /// TypeScript 代码生成对话框
     fn draw_code_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_code_dialog {

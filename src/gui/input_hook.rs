@@ -235,6 +235,7 @@ pub fn deactivate_capture() {
     debug!("Capture deactivated");
 }
 
+#[allow(dead_code)]
 pub fn is_active() -> bool {
     HOOK_STATE.lock().active
 }
@@ -243,6 +244,7 @@ pub fn poll_mouse_click() -> Option<MouseEvent> {
     CLICK_CHANNEL.1.lock().as_ref().and_then(|rx| rx.try_recv().ok())
 }
 
+#[allow(dead_code)]
 pub fn poll_mouse_moved() -> Option<()> {
     MOVED_CHANNEL.1.lock().as_ref().and_then(|rx| rx.try_recv().ok())
 }

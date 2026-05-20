@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::thread;
 use std::time::Duration;
 
-use crate::core::model::{CaptureResult, DetailedValidationResult, WindowInfo};
+use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
 
 /// UIA 操作请求类型

@@ -1405,11 +1405,11 @@ impl eframe::App for SelectorApp {
                             log::info!("[Ctrl+左键] 确认捕获 at ({}, {})", x, y);
                             self.finish_capture_at(x, y, ui.ctx());
                         }
-                        input_hook::MouseEvent::RightClick(x, y) => {
+                        input_hook::MouseEvent::RightClick(_x, _y) => {
                             log::info!("[Ctrl+右键] Toggle 样本");
                             self.toggle_sample(ui.ctx());
                         }
-                        input_hook::MouseEvent::MiddleClick(x, y) => {
+                        input_hook::MouseEvent::MiddleClick(_x, _y) => {
                             log::info!("[Ctrl+中键] 切换元素");
                             self.force_refresh_highlight(ui.ctx());
                         }
@@ -1657,52 +1657,53 @@ impl eframe::App for SelectorApp {
                                 .show(window_ui, |scroll_ui| {
                                     let entries = self.gui_logger.get_logs();
                                     
-                                    for entry in entries {
-                                        // 【关键修复】使用更柔和、更易读的颜色方案
-                                        let (color, prefix) = match entry.level {
-                                            Level::Error => (egui::Color32::from_rgb(255, 100, 100), "❌ ERROR"),  // 柔和红色
-                                            Level::Warn => (egui::Color32::from_rgb(255, 200, 100), "⚠️ WARN"),   // 柔和橙色
-                                            Level::Info => (egui::Color32::from_rgb(200, 200, 200), "ℹ️ INFO"),   // 浅灰色（主要日志）
-                                            Level::Debug => (egui::Color32::from_rgb(150, 150, 200), "🔧 DEBUG"),  // 柔和蓝色
-                                            Level::Trace => (egui::Color32::from_rgb(180, 180, 180), "📝 TRACE"),  // 中灰色
-                                        };
-                                        
-                                        let time_str = entry.timestamp
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .ok()
-                                            .map(|d| {
-                                                let secs = d.as_secs();
-                                                let millis = d.subsec_millis();
-                                                format!("{:02}:{:02}:{:02}.{:03}",
-                                                    (secs / 3600) % 24,
-                                                    (secs / 60) % 60,
-                                                    secs % 60,
-                                                    millis
-                                                )
-                                            })
-                                            .unwrap_or_default();
-                                        
-                                        scroll_ui.horizontal(|row_ui| {
-                                            row_ui.label(
-                                                egui::RichText::new(format!("[{}]", time_str))
-                                                    .color(egui::Color32::GRAY)
-                                                    .monospace()
-                                                    .size(9.0)
-                                            );
+                                    for (i, entry) in entries.iter().enumerate() {
+                                        scroll_ui.push_id(format!("log_{}", i), |row_ui| {
+                                            let (color, prefix) = match entry.level {
+                                                Level::Error => (egui::Color32::from_rgb(255, 100, 100), "❌ ERROR"),
+                                                Level::Warn => (egui::Color32::from_rgb(255, 200, 100), "⚠️ WARN"),
+                                                Level::Info => (egui::Color32::from_rgb(200, 200, 200), "ℹ️ INFO"),
+                                                Level::Debug => (egui::Color32::from_rgb(150, 150, 200), "🔧 DEBUG"),
+                                                Level::Trace => (egui::Color32::from_rgb(180, 180, 180), "📝 TRACE"),
+                                            };
                                             
-                                            row_ui.label(
-                                                egui::RichText::new(prefix)
-                                                    .color(color)
-                                                    .monospace()
-                                                    .size(10.0)
-                                            );
+                                            let time_str = entry.timestamp
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .ok()
+                                                .map(|d| {
+                                                    let secs = d.as_secs();
+                                                    let millis = d.subsec_millis();
+                                                    format!("{:02}:{:02}:{:02}.{:03}",
+                                                        (secs / 3600) % 24,
+                                                        (secs / 60) % 60,
+                                                        secs % 60,
+                                                        millis
+                                                    )
+                                                })
+                                                .unwrap_or_default();
                                             
-                                            row_ui.label(
-                                                egui::RichText::new(entry.message)
-                                                    .color(color)
-                                                    .monospace()
-                                                    .size(10.0)
-                                            );
+                                            row_ui.horizontal(|row_ui| {
+                                                row_ui.label(
+                                                    egui::RichText::new(format!("[{}]", time_str))
+                                                        .color(egui::Color32::GRAY)
+                                                        .monospace()
+                                                        .size(9.0)
+                                                );
+                                                
+                                                row_ui.label(
+                                                    egui::RichText::new(prefix)
+                                                        .color(color)
+                                                        .monospace()
+                                                        .size(10.0)
+                                                );
+                                                
+                                                row_ui.label(
+                                                    egui::RichText::new(&entry.message)
+                                                        .color(color)
+                                                        .monospace()
+                                                        .size(10.0)
+                                                );
+                                            });
                                         });
                                     }
                                 });

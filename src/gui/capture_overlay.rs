@@ -83,11 +83,13 @@ impl CaptureOverlay {
                 ui.add_space(12.0);
                 
                 // Shortcuts table
-                draw_shortcut_row(ui, "捕获单个元素", "Ctrl + 单击", "捕获单个独立控件，如按钮、输入框");
+                draw_shortcut_row(ui, "确认捕获", "Ctrl + 左键", "捕获当前悬停元素并退出");
                 ui.add_space(6.0);
-                draw_shortcut_row(ui, "捕获相似元素组", "Shift + 单击", "批量捕获列表/表格中结构相似的元素");
+                draw_shortcut_row(ui, "添加/移除样本", "Ctrl + 右键", "标记相似元素，最多5个");
                 ui.add_space(6.0);
-                draw_shortcut_row(ui, "退出捕获", "Esc", "随时终止捕获模式，回到正常界面");
+                draw_shortcut_row(ui, "切换元素", "Ctrl + 中键", "切换到同位置的父/子元素");
+                ui.add_space(6.0);
+                draw_shortcut_row(ui, "退出捕获", "Ctrl + 右键双击", "退出捕获模式");
             });
     }
 }
