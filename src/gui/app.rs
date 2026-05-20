@@ -20,7 +20,7 @@ use super::capture_overlay::CaptureOverlay;
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;  // 【新增】多元素高亮管理器
 use super::logger::{GuiLogger, init_gui_logger};
-use super::input_hook::{self, KeyEvent};
+use super::input_hook;
 
 // 引用重构后的独立模块
 use super::theme::Theme;
@@ -541,8 +541,8 @@ impl SelectorApp {
         self.capture_state = CaptureState::WaitingClick {
             deadline: Instant::now() + Duration::from_secs(30),
         };
-        self.status_msg = "请点击目标控件（Esc 取消）…".to_string();
-        input_hook::activate_capture(true);
+        self.status_msg = "悬停查看 → Ctrl+左键确认，Ctrl+右键样本，Ctrl+中键切换，Ctrl+右键双击退出".to_string();
+        input_hook::activate_capture();
         self.overlay.show();
     }
 
@@ -1373,13 +1373,16 @@ impl eframe::App for SelectorApp {
         let f7 = ui.ctx().input(|i| i.key_pressed(Key::F7));
         if f7 { self.do_validate(); }
         
-        // 【新增】检查全局热键是否激活了捕获模式（Ctrl+Shift+F4 由 rdev 处理）
-        if input_hook::is_active() && self.capture_state == CaptureState::Idle {
+        // F4 进入捕获模式（本地键盘事件，不需要焦点）
+        let f4 = ui.ctx().input(|i| i.key_pressed(Key::F4));
+        if f4 && self.capture_state == CaptureState::Idle {
+            input_hook::activate_capture();
             self.capture_state = CaptureState::WaitingClick {
-                deadline: Instant::now() + Duration::from_secs(300),
+                deadline: Instant::now() + Duration::from_secs(30),
             };
-            self.status_msg = "悬停目标 → Ctrl 确认，Shift 样本，Alt 切换，Esc 取消".to_string();
             self.overlay.show();
+            self.status_msg = "悬停查看 → Ctrl+左键确认，Ctrl+右键样本，Ctrl+中键切换，Ctrl+右键双击退出".to_string();
+            log::info!("[F4] 进入捕获模式");
         }
 
         // ── 捕获等待逻辑 ──────────────────────────────────────────────────────
@@ -1395,24 +1398,23 @@ impl eframe::App for SelectorApp {
                 self.status_msg    = "捕获超时，已取消".to_string();
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             } else {
-                // 处理键盘事件（由 rdev 发送）
-                if let Some(key_event) = input_hook::poll_key() {
-                    let (mx, my, _) = input_hook::get_mouse_state();
-                    match key_event {
-                        KeyEvent::CtrlPress => {
-                            log::info!("[Ctrl] 确认捕获 at ({}, {})", mx, my);
-                            self.finish_capture_at(mx, my, ui.ctx());
+                // 处理鼠标点击事件（由 rdev 发送）
+                if let Some(mouse_event) = input_hook::poll_mouse_click() {
+                    match mouse_event {
+                        input_hook::MouseEvent::LeftClick(x, y) => {
+                            log::info!("[Ctrl+左键] 确认捕获 at ({}, {})", x, y);
+                            self.finish_capture_at(x, y, ui.ctx());
                         }
-                        KeyEvent::ShiftPress => {
-                            log::info!("[Shift] Toggle 样本");
+                        input_hook::MouseEvent::RightClick(x, y) => {
+                            log::info!("[Ctrl+右键] Toggle 样本");
                             self.toggle_sample(ui.ctx());
                         }
-                        KeyEvent::AltPress => {
-                            log::info!("[Alt] 切换元素");
+                        input_hook::MouseEvent::MiddleClick(x, y) => {
+                            log::info!("[Ctrl+中键] 切换元素");
                             self.force_refresh_highlight(ui.ctx());
                         }
-                        KeyEvent::EscapePress => {
-                            log::info!("[Esc] 退出捕获模式");
+                        input_hook::MouseEvent::RightDoubleClick => {
+                            log::info!("[右键双击] 退出捕获模式");
                             self.reset_and_exit(ui.ctx());
                         }
                     }
@@ -1454,6 +1456,7 @@ impl eframe::App for SelectorApp {
                     }
                 }
             }
+        } else {
             highlight::hide();
             self.last_mouse_move    = None;
             self.last_highlight_pos = None;
