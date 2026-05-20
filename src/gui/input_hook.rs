@@ -232,6 +232,15 @@ pub fn deactivate_capture() {
     let mut state = HOOK_STATE.lock();
     state.active = false;
     state.report_moves = false;
+    
+    // 重置 swallow 标志，防止取消捕获时鼠标按下状态残留
+    SWALLOW_LEFT.store(false, Ordering::SeqCst);
+    SWALLOW_RIGHT.store(false, Ordering::SeqCst);
+    SWALLOW_MIDDLE.store(false, Ordering::SeqCst);
+    
+    // 重置双击检测时间
+    LAST_RIGHT_CLICK_TIME.store(0, Ordering::SeqCst);
+    
     debug!("Capture deactivated");
 }
 
