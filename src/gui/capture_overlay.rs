@@ -1,129 +1,188 @@
-// src/capture_overlay.rs
+// src/gui/capture_overlay.rs
 //
 // Floating capture guidance overlay window.
-// Displays a semi-transparent, always-on-top panel showing capture shortcuts.
+// Uses egui multi-viewport to create a true independent OS window
+// that can be moved anywhere on screen, always on top, outside main window bounds.
+//
+// Positioning: always on the primary monitor, top corner.
+// - mouse.x < 50% screen width  → overlay at top-right
+// - mouse.x >= 50% screen width → overlay at top-left
+// - mouse unknown (hook swallows) → default top-right
 
 use eframe::egui::{
-    self, Align, Color32, Frame, Layout, Margin, RichText, Stroke, Vec2,
+    self, Color32, Frame, Margin, Pos2, RichText, Stroke,
 };
 
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+};
+
+use super::types::CaptureState;
+
+const OVERLAY_SIZE: [f32; 2] = [360.0, 200.0];
+const MARGIN: f32 = 12.0;
+
 /// The floating overlay panel content.
-/// This is drawn in a secondary viewport that stays on top of all windows.
+///
+/// Positioning rules (relative to mouse's current screen):
+/// - mouse.x < 50% screen width  → overlay at top-right
+/// - mouse.x >= 50% screen width → overlay at top-left
+/// - mouse unknown (hook swallows) → default top-right
 pub struct CaptureOverlay {
-    /// Whether the overlay should be visible.
     visible: bool,
+    logged_screen: bool,
 }
 
 impl CaptureOverlay {
     pub fn new() -> Self {
-        Self { visible: false }
+        Self { visible: false, logged_screen: false }
     }
 
-    /// Show the overlay.
     pub fn show(&mut self) {
         self.visible = true;
+        self.logged_screen = false;
     }
 
-    /// Hide the overlay.
     pub fn hide(&mut self) {
         self.visible = false;
     }
 
-    /// Check if the overlay is visible.
     #[allow(dead_code)]
     pub fn is_visible(&self) -> bool {
         self.visible
     }
 
-    /// Draw the overlay panel.
-    /// Returns true if the overlay is visible and should be rendered.
-    pub fn draw(&self, ctx: &egui::Context) {
+    /// Position overlay in a top corner based on mouse X relative to 50% of screen width.
+    /// Uses physical screen dimensions (GetSystemMetrics) and global cursor position (GetCursorPos).
+    /// - mouse.x < sw/2 → top-right corner
+    /// - mouse.x >= sw/2 → top-left corner
+    /// - mouse unknown → top-right (default)
+    fn smart_position(&mut self) -> Pos2 {
+        let sw = Self::screen_width();
+        let sh = Self::screen_height();
+
+        // Log screen info once per capture session
+        if !self.logged_screen {
+            self.logged_screen = true;
+            let mx = Self::mouse_x();
+            log::info!("[overlay] screen: {}x{}, mouse_x: {:?}", sw, sh, mx);
+        }
+
+        let x = match Self::mouse_x() {
+            Some(mx) if mx < sw / 2 => {
+                log::info!("[overlay] -> RIGHT (mx={} < {})", mx, sw / 2);
+                sw - OVERLAY_SIZE[0] as i32 - MARGIN as i32
+            }
+            Some(mx) => {
+                log::info!("[overlay] -> LEFT (mx={} >= {})", mx, sw / 2);
+                MARGIN as i32
+            }
+            None => {
+                sw - OVERLAY_SIZE[0] as i32 - MARGIN as i32
+            }
+        };
+
+        Pos2::new(x as f32, MARGIN)
+    }
+
+    fn screen_width() -> i32 {
+        unsafe { GetSystemMetrics(SM_CXSCREEN) }
+    }
+
+    fn screen_height() -> i32 {
+        unsafe { GetSystemMetrics(SM_CYSCREEN) }
+    }
+
+    /// Get global cursor X position in physical screen coordinates.
+    fn mouse_x() -> Option<i32> {
+        unsafe {
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() {
+                Some(pt.x)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn draw(&mut self, ctx: &egui::Context, status_msg: &str, capture_state: &CaptureState) {
         if !self.visible {
             return;
         }
 
-        // Use an immediate viewport for the overlay.
-        // This creates a separate window that stays on top.
-        egui::Window::new("capture_overlay")
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .movable(false)
-            .interactable(false)
-            .fixed_size(Vec2::new(320.0, 220.0))
-            .anchor(egui::Align2::LEFT_TOP, Vec2::new(20.0, 20.0))
-            .frame(Frame::NONE
-                .fill(Color32::from_rgba_premultiplied(20, 20, 30, 200))  // Semi-transparent dark
-                .corner_radius(egui::CornerRadius::same(8))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 80)))
-                .inner_margin(Margin::same(16)))
-            .show(ctx, |ui| {
-                // Title
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("正在捕获元素")
-                        .color(Color32::from_rgb(255, 200, 100))
-                        .size(16.0)
-                        .strong());
-                });
-                ui.add_space(8.0);
-                
-                // Divider line
-                let painter = ui.painter();
-                let rect = ui.available_rect_before_wrap();
-                painter.line_segment(
-                    [egui::pos2(rect.left(), rect.top() + 2.0), egui::pos2(rect.right(), rect.top() + 2.0)],
-                    Stroke::new(1.0, Color32::from_rgb(80, 80, 100)),
-                );
-                ui.add_space(8.0);
-                
-                // Instruction
-                ui.label(RichText::new("将鼠标悬停在目标元素上方，按以下快捷键进行捕获：")
-                    .color(Color32::from_rgb(180, 180, 200))
-                    .size(12.0));
-                ui.add_space(12.0);
-                
-                // Shortcuts table
-                draw_shortcut_row(ui, "确认捕获", "Ctrl + 左键", "捕获当前悬停元素并退出");
-                ui.add_space(6.0);
-                draw_shortcut_row(ui, "添加/移除样本", "Ctrl + 右键", "标记相似元素，最多5个");
-                ui.add_space(6.0);
-                draw_shortcut_row(ui, "切换元素", "Ctrl + 中键", "切换到同位置的父/子元素");
-                ui.add_space(6.0);
-                draw_shortcut_row(ui, "退出捕获", "Ctrl + 右键双击", "退出捕获模式");
-            });
+        // 不显示 Idle 状态的悬浮窗口
+        if matches!(capture_state, CaptureState::Idle) {
+            return;
+        }
+
+        let (title_color, icon, show_shortcuts) = match capture_state {
+            CaptureState::WaitingClick { .. } => {
+                (Color32::from_rgb(255, 200, 100), "⚡", true)
+            }
+            CaptureState::Capturing => {
+                (Color32::from_rgb(100, 180, 255), "⟳", false)
+            }
+            CaptureState::Idle => {
+                unreachable!()
+            }
+        };
+
+        let pos = self.smart_position();
+
+        #[allow(deprecated)]
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("capture_overlay"),
+            egui::ViewportBuilder::default()
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_always_on_top()
+                .with_taskbar(false)
+                .with_resizable(false)
+                .with_inner_size(OVERLAY_SIZE)
+                .with_position([pos.x, pos.y]),
+            |ctx, _queue| {
+                egui::CentralPanel::default()
+                    .frame(Frame::NONE
+                        .fill(Color32::from_rgba_premultiplied(18, 18, 24, 245))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .stroke(Stroke::new(1.0, title_color.linear_multiply(0.6)))
+                        .inner_margin(Margin::same(12)))
+                    .show(ctx, |ui| {
+                        ui.spacing_mut().item_spacing = [8.0, 6.0].into();
+
+                        // Header
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon).size(15.0).color(title_color));
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(status_msg)
+                                .color(Color32::from_rgb(210, 215, 225))
+                                .size(12.5)
+                                .strong());
+                        });
+
+                        if show_shortcuts {
+                            ui.label(RichText::new("快捷键")
+                                .color(Color32::from_rgb(130, 140, 160))
+                                .size(10.0)
+                                .weak());
+
+                            draw_shortcut_row(ui, "确认捕获");
+                            draw_shortcut_row(ui, "添加/移除样本");
+                            draw_shortcut_row(ui, "切换元素");
+                            draw_shortcut_row(ui, "退出捕获");
+                            draw_shortcut_row(ui, "取消捕获");
+                        }
+                    });
+            },
+        );
     }
 }
 
-/// Draw a single shortcut row.
-fn draw_shortcut_row(ui: &mut egui::Ui, action: &str, shortcut: &str, desc: &str) {
-    ui.horizontal(|ui| {
-        // Action label
-        ui.label(RichText::new(action)
-            .color(Color32::WHITE)
-            .size(13.0));
-        
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Shortcut badge
-            egui::Frame::NONE
-                .fill(Color32::from_rgb(40, 60, 100))
-                .corner_radius(egui::CornerRadius::same(4))
-                .inner_margin(Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.label(RichText::new(shortcut)
-                        .color(Color32::from_rgb(200, 220, 255))
-                        .size(12.0)
-                        .strong());
-                });
-        });
-    });
-    
-    // Description
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        ui.label(RichText::new(desc)
-            .color(Color32::from_rgb(120, 120, 140))
-            .size(11.0));
-    });
+fn draw_shortcut_row(ui: &mut egui::Ui, action: &str) {
+    ui.label(RichText::new(action)
+        .color(Color32::from_rgb(170, 175, 190))
+        .size(11.0));
 }
 
 impl Default for CaptureOverlay {

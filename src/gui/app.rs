@@ -1505,7 +1505,7 @@ impl eframe::App for SelectorApp {
             self.last_highlight_pos = None;
         }
 
-        self.overlay.draw(ui.ctx());
+        self.overlay.draw(ui.ctx(), &self.status_msg, &self.capture_state);
 
         // ── 全局样式 ──────────────────────────────────────────────────────────
         let t = self.theme;

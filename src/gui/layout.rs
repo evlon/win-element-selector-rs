@@ -246,13 +246,18 @@ RichText::new("重新捕获 Ctrl+Shift+F4")
 // ── 状态消息 + 操作按钮 ────────────────────────────────────────
                 ui.horizontal(|ui| {
                     ui.push_id("status_bar", |ui| {
-                        let msg_color = match &self.validation {
-                            ValidationResult::Found { .. }              => t.ok,
-                            ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
-                            ValidationResult::Running                   => t.warn,
-                            _ => t.muted,
-                        };
-                        ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
+                        // 捕获模式下隐藏详细状态消息，由浮动窗口显示
+                        if self.capture_state == CaptureState::Idle {
+                            let msg_color = match &self.validation {
+                                ValidationResult::Found { .. }              => t.ok,
+                                ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
+                                ValidationResult::Running                   => t.warn,
+                                _ => t.muted,
+                            };
+                            ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
+                        } else {
+                            ui.label(RichText::new("[捕获模式]").color(t.warn).size(11.0).strong());
+                        }
                         
                         if self.similar_mode_active {
                             ui.add_space(8.0);
