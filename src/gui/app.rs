@@ -890,13 +890,6 @@ impl SelectorApp {
             return;
         }
 
-        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
-        if !capture::quick_check_window_exists(&self.window_selector) {
-            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
-            log::warn!("[智能优化] 窗口存在性检查失败，窗口可能已关闭");
-            return;
-        }
-
         info!("[智能优化] 开始优化，节点数: {}", self.hierarchy.len());
         info!("[智能优化] 优化前 XPath: {}", self.element_xpath);
 
@@ -946,13 +939,6 @@ impl SelectorApp {
     pub fn do_minimal_optimize(&mut self) {
         if self.hierarchy.is_empty() {
             self.status_msg = "没有可优化的元素层级".to_string();
-            return;
-        }
-        
-        // 【新增】预检查窗口是否存在（超轻量级，不使用UIA）
-        if !capture::quick_check_window_exists(&self.window_selector) {
-            self.status_msg = "XPath无效：目标窗口可能已关闭，请重新捕获元素".to_string();
-            log::warn!("[极简优化] 窗口存在性检查失败，窗口可能已关闭");
             return;
         }
         
@@ -1174,9 +1160,6 @@ impl eframe::App for SelectorApp {
         let dark = ui.ctx().global_style().visuals.dark_mode;
         self.theme = Theme::new(dark);
 
-        // 【新增】检查是否需要自动关闭日志窗口（已移除自动关闭，改为手动）
-        // if let Some(close_time) = self.log_panel_auto_close_time { ... }
-
         // 【关键修复】检查后台优化是否完成
         if let Some(rx) = self.optimization_rx.take() {
             if let Ok(result) = rx.try_recv() {
@@ -1207,11 +1190,8 @@ impl eframe::App for SelectorApp {
                             self.do_validate();
                             self.save_to_file();
                             
-                            // 【修改】优化成功后不再自动关闭日志窗口，方便用户复查
-                            // self.log_panel_auto_close_time = Some(...);
-                            
-                            // 【关键修复】强制请求 UI 重绘，确保自动关闭能立即生效
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                            // 自动关闭日志窗口
+                            self.show_log_panel = false;
                         }
                         None => {
                             self.status_msg = "极简优化已取消或失败".to_string();
