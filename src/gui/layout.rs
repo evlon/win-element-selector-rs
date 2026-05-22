@@ -15,9 +15,7 @@ use super::highlight;
 
 /// SelectorApp 的 UI 布局扩展
 pub trait LayoutComponents {
-    fn draw_titlebar(&self, ui: &mut Ui);
     fn draw_top_bar(&mut self, ui: &mut Ui);
-    fn draw_capture_banner(&self, ui: &mut Ui) -> bool;
     fn draw_bottom_panel(&mut self, ui: &mut Ui);
     fn draw_xpath_preview_content(&mut self, ui: &mut Ui);
     fn draw_element_xpath_content(&mut self, ui: &mut Ui);
@@ -33,35 +31,6 @@ pub trait LayoutComponents {
 }
 
 impl LayoutComponents for crate::gui::app::SelectorApp {
-    fn draw_titlebar(&self, ui: &mut Ui) {
-        let t = self.theme;
-        egui::Panel::top("titlebar")
-            .exact_size(32.0)
-            .frame(Frame::NONE.fill(t.title_bg))
-            .show_inside(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("🔍  Windows 元素选择器")
-                            .color(t.title_fg)
-                            .size(13.5)
-                            .strong(),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(12.0);
-                        if !self.history.is_empty() {
-                            ui.label(
-                                RichText::new(format!("历史: {}", self.history.len()))
-                                    .color(t.history_fg)
-                                    .size(10.5),
-                            );
-                        }
-                    });
-                });
-            });
-    }
-
-    /// 顶部控制栏：名称 + 捕获 + 校验
 fn draw_top_bar(&mut self, ui: &mut Ui) {
         let t = self.theme;
         egui::Panel::top("top_bar")
@@ -74,6 +43,9 @@ fn draw_top_bar(&mut self, ui: &mut Ui) {
             )
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.label(RichText::new("🔍").size(14.0));
+                    ui.add_space(4.0);
+                    
                     ui.push_id("element_name_row", |ui| {
                         ui.label(RichText::new("元素名称:").color(t.muted).size(11.5));
                         ui.add_space(4.0);
@@ -143,7 +115,7 @@ fn draw_top_bar(&mut self, ui: &mut Ui) {
                                         );
                                     });
                                 }
-                                CaptureState::Idle => {
+CaptureState::Idle => {
                                     ui.push_id("start_capture_btn", |ui| {
                                         if ui.add(
                                             egui::Button::new(
@@ -156,96 +128,21 @@ fn draw_top_bar(&mut self, ui: &mut Ui) {
                                             self.start_capture();
                                         }
                                     });
-                                    
-                                    ui.add_space(8.0);
-                                    ui.label(
-                                        RichText::new("Ctrl+右键: 添加/删除样本 (最多5个)")
-                                            .color(t.muted)
-                                            .size(10.5)
-                                    );
                                 }
                             }
-                        });
+});
                     });
                 });
-            });
+});
     }
 
-    /// 捕获状态横幅（仅在 WaitingClick 时显示）
-    /// 返回是否点击了完成按钮
-    fn draw_capture_banner(&self, ui: &mut Ui) -> bool {
-        if !matches!(self.capture_state, CaptureState::WaitingClick { .. }) {
-            return false;
-        }
-        
-        let mut complete_clicked = false;
-        let t = self.theme;
-        
-        egui::Panel::top("capture_banner")
-            .exact_size(26.0)
-            .frame(
-                Frame::NONE
-                    .fill(t.capture_bg)
-                    .stroke(Stroke::new(1.0, t.capture_border)),
-            )
-            .show_inside(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(12.0);
-                    
-                    // 根据是否处于相似模式显示不同提示
-                    if self.similar_mode_active {
-                        ui.label(
-                            RichText::new(format!("🔍 已收集 {} 个样本 (最多5个) — Ctrl+右键 继续/移除", 
-                                    self.similar_samples.len()))
-                                .color(t.capture_fg)
-                                .size(11.5),
-                        );
-                        
-                        ui.add_space(16.0);
-                        
-                        // 完成按钮
-                        let button = egui::Button::new(
-                            RichText::new("✔ 查找相似元素")
-                                .color(egui::Color32::WHITE)
-                                .size(11.5)
-                                .strong(),
-                        )
-                        .fill(t.ok)
-                        .min_size(egui::Vec2::new(100.0, 22.0))
-                        .stroke(Stroke::new(1.5, egui::Color32::from_rgb(100, 255, 150)));
-                        
-                        if ui.add(button).on_hover_text("点击按钮开始查找相似元素").clicked() {
-                            complete_clicked = true;
-                        }
-                        
-                        ui.add_space(12.0);
-                        
-                        ui.label(
-                            RichText::new("Esc 取消")
-                                .color(t.muted)
-                                .size(10.5),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new("⏳  悬停目标 → Ctrl+左键确认 | Ctrl+右键样本 | Ctrl+中键切换 | Ctrl+右键双击退出 | Esc取消")
-                                .color(t.capture_fg)
-                                .size(11.5),
-                        );
-                    }
-                });
-            });
-        
-        complete_clicked
-    }
-
-    /// 底部面板：XPath 预览 + 状态 + 确定/取消（合并为单一 Panel）
-fn draw_bottom_panel(&mut self, ui: &mut Ui) {
+    fn draw_bottom_panel(&mut self, ui: &mut Ui) {
         let t = self.theme;
         egui::Panel::bottom("bottom_panel")
             .frame(
                 Frame::NONE
                     .fill(t.bottom_bg)
-                    .inner_margin(Margin::symmetric(12, 8))
+                    .inner_margin(Margin::symmetric(12, 6))
                     .stroke(Stroke::new(1.0, t.border)),
             )
             .show_inside(ui, |ui| {
@@ -253,44 +150,50 @@ fn draw_bottom_panel(&mut self, ui: &mut Ui) {
                     self.draw_xpath_preview_content(ui);
                 });
 
-                ui.add_space(6.0);
-
                 ui.horizontal(|ui| {
                     ui.push_id("status_bar", |ui| {
                         ui.push_id("status_msg", |ui| {
-                            if self.capture_state == CaptureState::Idle {
-                                let msg_color = match &self.validation {
-                                    ValidationResult::Found { .. }              => t.ok,
-                                    ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
-                                    ValidationResult::Running                   => t.warn,
-                                    _ => t.muted,
-                                };
-                                ui.label(RichText::new(&self.status_msg).color(msg_color).size(11.5));
-                            } else {
-                                ui.label(RichText::new("[捕获模式]").color(t.warn).size(11.0).strong());
-                            }
-                        });
-                        
-                        ui.push_id("similar_mode", |ui| {
-                            if self.similar_mode_active {
-                                ui.add_space(8.0);
-                                ui.label(
-                                    RichText::new(format!("🔍 相似模式: {} 个样本", self.similar_samples.len()))
-                                        .color(t.warn)
-                                        .size(11.0)
-                                );
-                            }
+                            let (msg_text, msg_color) = match &self.capture_state {
+                                CaptureState::WaitingClick { .. } => {
+                                    if self.similar_mode_active {
+                                        (format!("🔍 相似模式: {} 个样本", self.similar_samples.len()), t.warn)
+                                    } else {
+                                        ("⏳ 悬停确认，Ctrl+右键加样本".to_string(), t.capture_fg)
+                                    }
+                                }
+                                CaptureState::Capturing => ("捕获中…".to_string(), t.warn),
+                                CaptureState::Idle => {
+                                    let color = match &self.validation {
+                                        ValidationResult::Found { .. } => t.ok,
+                                        ValidationResult::NotFound | ValidationResult::Error(_) => t.err,
+                                        ValidationResult::Running => t.warn,
+                                        _ => t.muted,
+                                    };
+                                    (self.status_msg.clone(), color)
+                                }
+                            };
+                            ui.label(RichText::new(&msg_text).color(msg_color).size(11.5));
                         });
                         
                         ui.push_id("search_spinner", |ui| {
                             if self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
                                 ui.add_space(8.0);
                                 ui.spinner();
-                                ui.label(
-                                    RichText::new("查找中...")
-                                        .color(t.warn)
-                                        .size(11.0)
-                                );
+                                ui.label(RichText::new("查找中...").color(t.warn).size(11.0));
+                            }
+                        });
+                        
+                        ui.push_id("find_similar_btn", |ui| {
+                            if self.similar_mode_active && self.similar_samples.len() >= 2 
+                               && !self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                                ui.add_space(8.0);
+                                if ui.add(
+                                    egui::Button::new(RichText::new("✔ 查找相似").color(Color32::WHITE).size(11.0))
+                                        .fill(t.ok)
+                                        .min_size(Vec2::new(80.0, 20.0)),
+                                ).clicked() {
+                                    self.start_similar_search();
+                                }
                             }
                         });
                     });

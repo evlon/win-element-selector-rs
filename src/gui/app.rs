@@ -549,7 +549,7 @@ impl SelectorApp {
         self.capture_state = CaptureState::WaitingClick {
             deadline: Instant::now() + Duration::from_secs(30),
         };
-        self.status_msg = "悬停查看 → Ctrl+左键确认，Ctrl+右键样本，Ctrl+中键切换，Ctrl+右键双击退出".to_string();
+        self.status_msg = "就绪".to_string();
         input_hook::activate_capture();
         self.overlay.show();
     }
@@ -722,7 +722,7 @@ impl SelectorApp {
         self.similar_search_rx = Some(rx);
         self.similar_search_start_time = Some(std::time::Instant::now());
         
-        self.status_msg = format!("正在后台查找相似元素（{} 个样本）...", samples.len());
+        self.status_msg = format!("🔍 正在查找... ({} 个样本)", samples.len());
         
         // 启动后台线程
         std::thread::spawn(move || {
@@ -809,13 +809,9 @@ impl SelectorApp {
 
             self.init_window_filters();
 
-            let window_hint = result.window_info
-                .as_ref()
-                .map(|w| format!(" [窗口: {}]", w.title))
-                .unwrap_or_default();
             self.status_msg = format!(
-                "已捕获 {} 层层级 — 坐标 ({}, {}){}",
-                n, result.cursor_x, result.cursor_y, window_hint
+                "✓ 已捕获 {} 层 — ({}, {})",
+                n, result.cursor_x, result.cursor_y
             );
 
             self.node_expanded = vec![true; n];
@@ -1185,9 +1181,7 @@ impl eframe::App for SelectorApp {
         if let Some(rx) = self.optimization_rx.take() {
             if let Ok(result) = rx.try_recv() {
                 // 优化完成，处理结果
-                if let Some(start_time) = self.optimization_start_time.take() {
-                    let elapsed = start_time.elapsed();
-                    
+                if let Some(_start_time) = self.optimization_start_time.take() {
                     match result {
                         Some(opt_result) => {
                             // 更新 hierarchy
@@ -1204,8 +1198,7 @@ impl eframe::App for SelectorApp {
                             
                             let summary = &opt_result.summary;
                             self.status_msg = format!(
-                                "极简优化完成（耗时 {:.1}s）：移除 {} 个属性，简化 {} 个属性",
-                                elapsed.as_secs_f64(),
+                                "✓ 极简优化完成：移除 {} / 简化 {}",
                                 summary.removed_dynamic_attrs,
                                 summary.simplified_attrs
                             );
@@ -1238,30 +1231,18 @@ impl eframe::App for SelectorApp {
         if let Some(rx) = self.similar_search_rx.take() {
             if let Ok(results) = rx.try_recv() {
                 // 查找完成，处理结果
-                if let Some(start_time) = self.similar_search_start_time.take() {
-                    let elapsed = start_time.elapsed();
-                    
+                if let Some(_start_time) = self.similar_search_start_time.take() {
                     self.found_similar_elements = results;
                     
                     // 【优化】根据找到的数量给出不同的提示
                     let count = self.found_similar_elements.len();
                     if count >= 2 {
-                        self.status_msg = format!(
-                            "✓ 找到 {} 个相似元素（耗时 {:.1}s）！按 Enter 可继续查找更多",
-                            count,
-                            elapsed.as_secs_f64()
-                        );
+                        self.status_msg = format!("✓ 找到 {} 个相似元素", count);
                         log::info!("[相似元素查找] 找到 {} 个相似元素，可以按 Enter 继续扩展", count);
                     } else if count == 1 {
-                        self.status_msg = format!(
-                            "找到 1 个相似元素（耗时 {:.1}s）",  // 不太可能，但保留
-                            elapsed.as_secs_f64()
-                        );
+                        self.status_msg = "找到 1 个相似元素".to_string();
                     } else {
-                        self.status_msg = format!(
-                            "未找到更多相似元素（耗时 {:.1}s）",
-                            elapsed.as_secs_f64()
-                        );
+                        self.status_msg = "未找到更多相似元素".to_string();
                     }
                     
                     log::info!("[相似元素查找] 处理完成，找到 {} 个结果", count);
@@ -1303,10 +1284,10 @@ impl eframe::App for SelectorApp {
                             
                             self.status_msg = match &detailed_result.overall {
                                 ValidationResult::Found { count, .. } =>
-                                    format!("校验通过 ✔ — 找到 {} 个匹配元素 (总用时: {}ms)", count, detailed_result.total_duration_ms),
+                                    format!("✓ 校验通过 — 找到 {} 个", count),
                                 ValidationResult::NotFound =>
-                                    format!("校验失败 — 未找到匹配元素 (总用时: {}ms)", detailed_result.total_duration_ms),
-                                ValidationResult::Error(e) => format!("校验错误: {}", e),
+                                    "✗ 未找到匹配元素".to_string(),
+                                ValidationResult::Error(e) => format!("⚠ {}", e),
                                 _ => String::new(),
                             };
                             self.push_history();
@@ -1424,7 +1405,7 @@ impl eframe::App for SelectorApp {
                 deadline: Instant::now() + Duration::from_secs(30),
             };
             self.overlay.show();
-            self.status_msg = "悬停查看 → Ctrl+左键确认，Ctrl+右键样本，Ctrl+中键切换，Ctrl+右键双击退出".to_string();
+            self.status_msg = "就绪".to_string();
             log::info!("[F4] 进入捕获模式");
         }
         
@@ -1523,18 +1504,8 @@ impl eframe::App for SelectorApp {
         });
 
         // ── Panel 布局 ────────────────────────────────────────────────────────
-        self.draw_titlebar(ui);
         self.draw_top_bar(ui);
-        
-        // 检查是否点击了完成按钮
-        if self.draw_capture_banner(ui) {
-            // 手动触发查找（如果还没启动）
-            if !self.similar_search_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
-                self.start_similar_search();
-            }
-        }
-        
-        self.draw_bottom_panel(ui);     // XPath 预览 + 状态 + 确定/取消（单一 Panel）
+        self.draw_bottom_panel(ui);
 
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(t.central_bg))
