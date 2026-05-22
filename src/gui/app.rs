@@ -252,7 +252,7 @@ impl SelectorApp {
             detailed_validation: None,
             capture_state: CaptureState::Idle,
             overlay: CaptureOverlay::new(),
-            status_msg: "就绪 — 按 Ctrl+Shift+F4 开始捕获元素".to_string(),
+            status_msg: "就绪 — 按 F4 开始捕获元素".to_string(),
             history: config.last_xpaths.clone(),
             pending_save: false,
             config,
@@ -676,14 +676,14 @@ impl SelectorApp {
         }
     }
 
-    /// 强制刷新高亮（Alt 切换元素）
+    /// 强制刷新高亮（Ctrl+中键切换元素）
     fn force_refresh_highlight(&mut self, ctx: &egui::Context) {
         let (mx, my, _) = input_hook::get_mouse_state();
         self.last_highlight_pos = None;
         self.last_highlighted_element_id = None;
         self.highlight_element_at(mx, my);
         ctx.request_repaint_after(Duration::from_millis(100));
-        log::info!("[Alt] 强制刷新高亮 at ({}, {})", mx, my);
+        log::info!("[Ctrl+中键] 强制刷新高亮 at ({}, {})", mx, my);
     }
 
     /// 重置并退出捕获模式

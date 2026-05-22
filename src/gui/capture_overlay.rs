@@ -157,21 +157,23 @@ impl CaptureOverlay {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
                 
-                for (key, action) in shortcuts {
-                    ui.horizontal(|ui| {
-                        Frame::NONE
-                            .fill(Color32::from_rgb(35, 50, 75))
-                            .corner_radius(egui::CornerRadius::same(3))
-                            .inner_margin(Margin::symmetric(4, 1))
-                            .show(ui, |key_ui| {
-                                key_ui.label(RichText::new(key)
-                                    .color(t.sel_fg)
-                                    .size(9.5)
-                                    .strong());
-                            });
-                        
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(action).color(t.text).size(10.5));
+                for (i, (key, action)) in shortcuts.iter().enumerate() {
+                    ui.push_id(format!("shortcut_{}", i), |ui| {
+                        ui.horizontal(|ui| {
+                            Frame::NONE
+                                .fill(Color32::from_rgb(35, 50, 75))
+                                .corner_radius(egui::CornerRadius::same(3))
+                                .inner_margin(Margin::symmetric(4, 1))
+                                .show(ui, |key_ui| {
+                                    key_ui.label(RichText::new(*key)
+                                        .color(t.sel_fg)
+                                        .size(9.5)
+                                        .strong());
+                                });
+                            
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(*action).color(t.text).size(10.5));
+                        });
                     });
                 }
             });
