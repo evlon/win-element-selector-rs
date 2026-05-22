@@ -1264,7 +1264,7 @@ impl eframe::App for SelectorApp {
                             
                             self.status_msg = match &detailed_result.overall {
                                 ValidationResult::Found { count, .. } =>
-                                    format!("✓ 校验通过 — 找到 {} 个", count),
+                                    format!("✓ 校验通过 — 找到 {} 个（{}ms）", count, elapsed.as_millis()),
                                 ValidationResult::NotFound =>
                                     "✗ 未找到匹配元素".to_string(),
                                 ValidationResult::Error(e) => format!("⚠ {}", e),
