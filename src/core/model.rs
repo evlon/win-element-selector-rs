@@ -84,6 +84,12 @@ impl Operator {
     }
 }
 
+impl std::fmt::Display for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
 // ─── PropertyFilter ──────────────────────────────────────────────────────────
 
 /// A single attribute match condition within a hierarchy node.
@@ -665,7 +671,6 @@ pub fn control_type_to_chinese(control_type: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub highlight_on_hover: bool,
-    pub show_simplified:    bool,
     pub last_xpaths:        Vec<String>,   // history, newest first
     /// Show detailed validation results (per-segment timing)
     pub show_validation_details: bool,
@@ -675,7 +680,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             highlight_on_hover: true,
-            show_simplified:    false,
             last_xpaths:        Vec::new(),
             show_validation_details: true,
         }

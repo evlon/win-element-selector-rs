@@ -4,16 +4,12 @@
 // GUI 模块
 mod gui;
 
-use gui::SelectorApp;
+use gui::iced_app::{update, view, subscription};
 use gui::input_hook;
 
-use eframe::egui;
 use log::info;
 
 fn main() -> anyhow::Result<()> {
-    // 【禁用 egui 警告】防止 Widget rect changed id 警告干扰调试
-    std::env::set_var("EGUI_WARN_ID_CHANGES", "0");
-    
     // 【Windows 控制台编码修复】设置控制台为 UTF-8
     #[cfg(windows)]
     {
@@ -23,10 +19,10 @@ fn main() -> anyhow::Result<()> {
             let _ = SetConsoleOutputCP(65001);
         }
     }
-    
+
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
-    
+
     // Show help if requested
     if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
         println!("Windows Element Selector v1.0.1");
@@ -47,9 +43,6 @@ fn main() -> anyhow::Result<()> {
         println!("    element-selector --verbose    # Verbose mode (DEBUG level)");
         return Ok(());
     }
-    
-    // 【关键修复】不再使用 env_logger，改用 GuiLogger
-    // GuiLogger 会在 App::new() 中初始化，同时输出到控制台和 GUI
 
     // COM must be initialized on the main thread (STA) for UI Automation.
     {
@@ -71,53 +64,44 @@ fn main() -> anyhow::Result<()> {
         .expect("Failed to initialize COM worker");
     info!("COM worker thread initialized");
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Windows 元素选择器 v1.0")
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([760.0, 500.0])
-            .with_icon(load_icon()),
-        ..Default::default()
+    // Load fonts from Windows system fonts
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = {
+        let font_paths = [
+            "C:\\Windows\\Fonts\\msyh.ttc",       // 微软雅黑 - 中文
+            "C:\\Windows\\Fonts\\msyhbd.ttc",     // 微软雅黑 Bold
+            "C:\\Windows\\Fonts\\msyhl.ttc",      // 微软雅黑 Light
+            "C:\\Windows\\Fonts\\seguisym.ttf",   // Segoe UI Symbol - ✓✗等符号
+            "C:\\Windows\\Fonts\\segoeui.ttf",    // Segoe UI - 西文
+        ];
+        let mut loaded = Vec::new();
+        for path in &font_paths {
+            if let Ok(data) = std::fs::read(path) {
+                info!("Loaded font: {}", path);
+                loaded.push(std::borrow::Cow::Owned(data));
+            }
+        }
+        if loaded.is_empty() {
+            log::warn!("No fonts loaded from Windows\\Fonts");
+        }
+        loaded
     };
 
-    eframe::run_native(
-        "Windows 元素选择器",
-        options,
-        Box::new(|cc| {
-            // Configure fonts for Chinese character support
-            let mut fonts = egui::FontDefinitions::default();
-            
-            // Load system Chinese font
-            {
-                // Use Microsoft YaHei (微软雅黑) which is built-in on Windows
-                let font_data = egui::FontData::from_static(include_bytes!(
-                    "C:/Windows/Fonts/msyh.ttc"
-                ));
-                fonts.font_data.insert("msyh".to_owned(), std::sync::Arc::new(font_data));
-                
-                // Insert at the beginning of font families
-                for family in [
-                    egui::FontFamily::Proportional,
-                    egui::FontFamily::Monospace,
-                ] {
-                    fonts.families.get_mut(&family).unwrap()
-                        .insert(0, "msyh".to_owned());
-                }
-            }
-            
-            cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(SelectorApp::new(cc)) as Box<dyn eframe::App>)
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
-}
+    let default_font = iced::Font::with_name("Microsoft YaHei");
 
-fn load_icon() -> egui::IconData {
-    let icon_rgba = include_bytes!("../assets/icon_32.rgba");
-    let size = 32u32;
-    egui::IconData {
-        rgba: icon_rgba.to_vec(),
-        width: size,
-        height: size,
+    // Launch iced GUI
+    let mut app = iced::application("Windows 元素选择器 v1.0", update, view)
+        .subscription(subscription)
+        .window(iced::window::Settings {
+            size: iced::Size::new(980.0, 660.0),
+            min_size: Some(iced::Size::new(760.0, 500.0)),
+            ..Default::default()
+        })
+        .default_font(default_font);
+
+    for font_data in fonts {
+        app = app.font(font_data);
     }
+
+    app.run()
+        .map_err(|e| anyhow::anyhow!("iced error: {}", e))
 }

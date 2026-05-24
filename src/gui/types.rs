@@ -39,6 +39,16 @@ pub enum CodeFormat {
     XPathOnly,
 }
 
+impl std::fmt::Display for CodeFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodeFormat::FullChain => write!(f, "完整链式调用"),
+            CodeFormat::ParamsObject => write!(f, "参数对象"),
+            CodeFormat::XPathOnly => write!(f, "仅 XPath"),
+        }
+    }
+}
+
 /// 捕获状态
 #[derive(Debug, PartialEq)]
 pub enum CaptureState {

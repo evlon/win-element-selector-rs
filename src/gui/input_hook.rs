@@ -177,13 +177,15 @@ pub fn init() -> anyhow::Result<()> {
                 }
                 
                 EventType::MouseMove { x, y } => {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+
+                    // Always update mouse state (needed for get_mouse_state() even outside capture)
+                    *MOUSE_STATE.lock() = (x as i32, y as i32, now_ms);
+
                     if state.report_moves {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
-                        
-                        *MOUSE_STATE.lock() = (x as i32, y as i32, now_ms);
                         
                         thread_local! {
                             static LAST_MOVE_SENT: std::cell::Cell<u64> = std::cell::Cell::new(0);

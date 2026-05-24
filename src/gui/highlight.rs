@@ -24,11 +24,6 @@ pub fn hide() {
     windows_impl::hide();
 }
 
-/// 【新增】同步隐藏并等待窗口销毁（用于悬停查询前）
-pub fn hide_sync() {
-    windows_impl::hide_sync();
-}
-
 pub fn update_highlight(info: &HighlightInfo) {
     windows_impl::update_highlight(info);
 }
@@ -215,33 +210,6 @@ mod windows_impl {
 
     pub fn hide() {
         hide_internal();
-    }
-    
-    /// 【新增】同步隐藏并等待窗口销毁（用于悬停查询前）
-    pub fn hide_sync() {
-        let border_val = BORDER_HWND.load(Ordering::SeqCst);
-        let label_val = LABEL_HWND.load(Ordering::SeqCst);
-        
-        if border_val != 0 || label_val != 0 {
-            // 【关键】使用 SendMessage 同步发送 WM_CLOSE，等待窗口处理完成
-            // SendMessage 会阻塞直到窗口过程返回，确保窗口已关闭
-            if border_val != 0 {
-                unsafe { 
-                    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-                    let _ = SendMessageW(HWND(border_val as _), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
-                }
-            }
-            if label_val != 0 {
-                unsafe { 
-                    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-                    let _ = SendMessageW(HWND(label_val as _), WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
-                }
-            }
-            
-            // SendMessage 返回后，窗口已经处理完 WM_CLOSE，可以安全清除标志
-            BORDER_HWND.store(0, Ordering::SeqCst);
-            LABEL_HWND.store(0, Ordering::SeqCst);
-        }
     }
     
     fn hide_internal() {

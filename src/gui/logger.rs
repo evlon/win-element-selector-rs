@@ -52,12 +52,7 @@ impl GuiLogger {
     pub fn clear(&self) {
         self.logs.lock().unwrap().clear();
     }
-    
-    /// 获取日志数量
-    pub fn len(&self) -> usize {
-        self.logs.lock().unwrap().len()
-    }
-    
+
     /// 判断是否为空
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {

@@ -1,11 +1,15 @@
 // src/gui/multi_highlight.rs
 //
 // 多元素高亮管理器 - 支持同时显示多个高亮框
-// 
+//
 // 使用场景：
 // 1. 批量捕获相似元素时，同时高亮所有匹配的元素
 // 2. 校验 XPath 时，高亮所有匹配结果
 // 3. 对比多个元素的属性时，同时高亮它们
+//
+// NOTE: 当前未使用，保留源码参考
+
+#![allow(dead_code)]
 
 use element_selector::core::model::ElementRect;
 use log::error;
