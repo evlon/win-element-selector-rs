@@ -176,6 +176,14 @@ pub struct State {
     pub found_similar_elements: Vec<capture::CaptureResult>,
     pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<capture::CaptureResult>>>,
     pub similar_search_start_time: Option<Instant>,
+
+    // Common elements (multi-sample)
+    pub common_path: Option<element_selector::core::CommonAncestorPath>,
+    pub common_search_in_progress: std::sync::Arc<AtomicBool>,
+    pub common_search_rx: Option<std::sync::mpsc::Receiver<(u64, Vec<element_selector::api::types::ElementInfo>)>>,
+    pub found_common_elements: Vec<element_selector::api::types::ElementInfo>,
+    pub common_search_sequence: u64,
+
     pub multi_highlight_manager: Option<MultiHighlightManager>,
     pub multi_highlight_create_time: Option<Instant>,
 
@@ -307,6 +315,13 @@ impl State {
             found_similar_elements: Vec::new(),
             similar_search_rx: None,
             similar_search_start_time: None,
+
+            common_path: None,
+            common_search_in_progress: std::sync::Arc::new(AtomicBool::new(false)),
+            common_search_rx: None,
+            found_common_elements: Vec::new(),
+            common_search_sequence: 0,
+
             multi_highlight_manager: None,
             multi_highlight_create_time: None,
 
@@ -656,6 +671,7 @@ impl State {
     }
 
     fn do_optimize(&mut self) {
+
         if self.hierarchy.is_empty() {
             self.status_msg = String::from("没有元素可优化");
             return;
@@ -887,13 +903,23 @@ impl State {
             if let Some(idx) = existing_idx {
                 // 移除样本
                 self.similar_samples.remove(idx);
-                self.status_msg = format!("移除样本，剩余 {} 个", self.similar_samples.len());
                 if self.similar_samples.is_empty() {
                     self.similar_mode_active = false;
                     if let Some(manager) = &mut self.multi_highlight_manager {
                         manager.clear();
                     }
-                    self.found_similar_elements.clear();
+                    self.found_common_elements.clear();
+                    self.common_path = None;
+                }
+                self.status_msg = format!("移除样本，剩余 {} 个", self.similar_samples.len());
+
+                // 如果样本数 < 2，清除共同元素搜索
+                if self.similar_samples.len() < 2 {
+                    self.found_common_elements.clear();
+                    self.common_path = None;
+                    if let Some(manager) = &mut self.multi_highlight_manager {
+                        manager.clear();
+                    }
                 }
             } else {
                 // 添加样本
@@ -909,8 +935,81 @@ impl State {
                 });
                 self.similar_mode_active = true;
                 self.status_msg = format!("已添加多选样本，共 {} 个", self.similar_samples.len());
+
+                // 样本 >= 2 时自动触发共同元素搜索
+                if self.similar_samples.len() >= 2 {
+                    self.start_common_search();
+                }
             }
         }
+    }
+
+    /// 计算共同祖先路径
+    fn compute_common_path(&mut self) {
+        self.common_path = element_selector::core::extract_common_path(
+            &self.similar_samples,
+            self.window_info.as_ref(),
+            self.config.ignore_numeric_automation_ids,
+        );
+    }
+
+    /// 启动共同元素搜索
+    fn start_common_search(&mut self) {
+        self.compute_common_path();
+
+        let Some(ref common) = self.common_path else {
+            self.status_msg = "无法提取共同特征".to_string();
+            return;
+        };
+
+        log::info!("[common_search] 共同路径: target_type='{}', ancestors={}, xpath='{}'",
+            common.target_control_type, common.common_ancestors.len(), common.search_xpath);
+
+        // 递增序列号，使旧搜索结果失效
+        self.common_search_sequence += 1;
+        let seq = self.common_search_sequence;
+
+        let in_progress = self.common_search_in_progress.clone();
+        in_progress.store(true, Ordering::SeqCst);
+
+        let window_selector = self.window_selector.clone();
+        let xpath = common.search_xpath.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let results = capture::find_common_elements(&window_selector, &xpath);
+            let _ = tx.send((seq, results));
+            in_progress.store(false, Ordering::SeqCst);
+        });
+
+        self.common_search_rx = Some(rx);
+    }
+
+    /// 高亮共同元素
+    fn highlight_common_elements(&mut self) {
+        if self.found_common_elements.is_empty() {
+            return;
+        }
+
+        if self.multi_highlight_manager.is_none() {
+            self.multi_highlight_manager = Some(MultiHighlightManager::new());
+        }
+
+        if let Some(manager) = &mut self.multi_highlight_manager {
+            manager.clear();
+            for (i, info) in self.found_common_elements.iter().enumerate() {
+                let id = format!("common_{}", i);
+                let label = format!("{}", i + 1);
+                let rect = element_selector::core::model::ElementRect {
+                    x: info.rect.x,
+                    y: info.rect.y,
+                    width: info.rect.width,
+                    height: info.rect.height,
+                };
+                manager.add(&id, &rect, &label);
+            }
+        }
+        self.multi_highlight_create_time = Some(Instant::now());
     }
 
     fn force_refresh_highlight(&mut self) {
@@ -1056,6 +1155,34 @@ impl State {
                 }
             } else {
                 self.similar_search_rx = Some(rx);
+            }
+        }
+
+        if let Some(rx) = self.common_search_rx.take() {
+            if let Ok((seq, results)) = rx.try_recv() {
+                // 只处理最新搜索的结果
+                if seq == self.common_search_sequence {
+                    log::info!("[common_search] 收到结果: {} 个元素 (seq={})", results.len(), seq);
+                    self.found_common_elements = results;
+                    let count = self.found_common_elements.len();
+                    if count > 0 {
+                        // 更新 UI XPath 为共同 XPath
+                        if let Some(ref common) = self.common_path {
+                            self.element_xpath = common.search_xpath.clone();
+                            self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
+                            self.xpath_source = XPathSource::AutoGenerated;
+                        }
+                        self.status_msg = format!("✓ 找到 {} 个共同元素", count);
+                        log::info!("[common_search] 开始高亮 {} 个元素", count);
+                        self.highlight_common_elements();
+                    } else {
+                        self.status_msg = String::from("未找到共同元素");
+                    }
+                } else {
+                    log::info!("[common_search] 忽略过期结果: seq={} (current={})", seq, self.common_search_sequence);
+                }
+            } else {
+                self.common_search_rx = Some(rx);
             }
         }
 
@@ -1213,7 +1340,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.status_msg = String::from("正在取消极简优化...");
             info!("[极简优化] 用户请求取消");
         }
-        Message::SimilarSearchPressed => {}
+        Message::SimilarSearchPressed => {
+            if state.similar_samples.len() >= 2 {
+                state.start_common_search();
+            } else {
+                state.status_msg = String::from("请先添加至少 2 个样本元素");
+            }
+        }
         Message::CodeDialogOpened => {
             state.generated_ts_code = state.generate_typescript_code();
             state.code_content = text_editor::Content::with_text(&state.generated_ts_code);

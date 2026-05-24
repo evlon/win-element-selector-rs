@@ -106,3 +106,17 @@ pub fn find_all_elements_detailed(
 pub fn list_windows() -> Vec<WindowInfo> {
     crate::core::enum_windows::enumerate_windows_fast()
 }
+
+/// 查找共同元素（基于共同祖先链 XPath）
+pub fn find_common_elements(window_selector: &str, xpath: &str) -> Vec<crate::api::types::ElementInfo> {
+    match crate::core::com_worker::global_find_common_elements(
+        window_selector.to_string(),
+        xpath.to_string(),
+    ) {
+        Ok(results) => results,
+        Err(e) => {
+            log::error!("find_common_elements failed: {}", e);
+            vec![]
+        },
+    }
+}

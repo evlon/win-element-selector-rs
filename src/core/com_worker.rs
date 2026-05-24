@@ -47,7 +47,14 @@ pub enum UiaRequest {
         threshold: f32,
         response: Sender<anyhow::Result<Vec<crate::core::model::CaptureResult>>>,
     },
-    
+
+    /// 查找共同元素（基于共同祖先链 XPath）
+    FindCommonElements {
+        window_selector: String,
+        xpath: String,
+        response: Sender<anyhow::Result<Vec<crate::api::types::ElementInfo>>>,
+    },
+
     /// 关闭工作线程
     Shutdown,
 }
@@ -178,7 +185,15 @@ impl ComWorker {
                 let start = std::time::Instant::now();
                 log::info!("[PERF] find_similar_elements started ({} samples)", samples.len());
                 let result = Self::do_find_similar_elements(automation, samples, threshold);
-                log::info!("[PERF] find_similar_elements completed in {}ms, found {} elements", 
+                log::info!("[PERF] find_similar_elements completed in {}ms, found {} elements",
+                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                let _ = response.send(result);
+            }
+            UiaRequest::FindCommonElements { window_selector, xpath, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] find_common_elements started for {}", xpath);
+                let result = Self::do_find_common_elements(automation, &window_selector, &xpath);
+                log::info!("[PERF] find_common_elements completed in {}ms, found {} elements",
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
                 let _ = response.send(result);
             }
@@ -322,7 +337,20 @@ impl ComWorker {
         log::info!("[ComWorker] 转换完成，返回 {} 个相似元素结果", results.len());
         Ok(results)
     }
-    
+
+    /// 查找共同元素（基于共同祖先链 XPath）
+    fn do_find_common_elements(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+        xpath: &str,
+    ) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
+        log::info!("[ComWorker] 开始查找共同元素: selector={}, xpath={}", window_selector, xpath);
+
+        // 复用现有的 find_all_elements_detailed
+        let results = crate::core::uia::find_all_elements_detailed(window_selector, xpath, 5.0);
+        Ok(results)
+    }
+
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -418,7 +446,30 @@ impl ComWorker {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
     }
-    
+
+    /// 发送共同元素查找请求
+    pub fn find_common_elements(
+        &self,
+        window_selector: String,
+        xpath: String,
+    ) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::FindCommonElements {
+                window_selector,
+                xpath,
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .map_err(|e| anyhow::anyhow!("COM worker common elements search timeout after 15s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 优雅关闭工作线程
     pub fn shutdown(&mut self) {
         if let Some(ref sender) = self.sender {
@@ -505,6 +556,19 @@ pub fn global_find_similar_elements(
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.find_similar_elements(samples, threshold)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程查找共同元素
+pub fn global_find_common_elements(
+    window_selector: String,
+    xpath: String,
+) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.find_common_elements(window_selector, xpath)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }

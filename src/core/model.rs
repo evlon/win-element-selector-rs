@@ -778,12 +778,15 @@ fn extract_xpath_name(xpath: &str) -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub history: Vec<HistoryEntry>,   // 历史记录，按时间倒序
+    /// 是否将纯数字的 AutomationId 视为随机值（不参与共同特征匹配）
+    pub ignore_numeric_automation_ids: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             history: Vec::new(),
+            ignore_numeric_automation_ids: true,
         }
     }
 }
@@ -895,6 +898,17 @@ pub struct SimilarElementSample {
     pub hierarchy_node: HierarchyNode,
     pub ancestor_chain: Vec<HierarchyNode>,  // 从根到父节点的链
     pub children_structure: Vec<ChildFeature>, // 子元素特征
+}
+
+/// 多元素共同祖先路径
+#[derive(Debug, Clone)]
+pub struct CommonAncestorPath {
+    /// 共同祖先链（排除窗口节点，从第一个共同子节点到目标父级）
+    pub common_ancestors: Vec<HierarchyNode>,
+    /// 目标元素类型（所有样本一致才非空）
+    pub target_control_type: String,
+    /// 生成的搜索 XPath（如 //Group/ToolBar//Button）
+    pub search_xpath: String,
 }
 
 #[cfg(test)]

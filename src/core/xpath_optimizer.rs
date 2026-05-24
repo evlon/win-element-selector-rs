@@ -45,6 +45,31 @@ struct ParsedXPathNode {
     predicates: Vec<String>,
 }
 
+/// 判断是否为纯数字 automation_id（大概率是随机生成的）
+fn is_numeric_aid(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 构建 XPath segment，但过滤掉纯数字 automation_id 的 predicate
+fn build_segment_without_numeric_aid(node: &HierarchyNode) -> String {
+    let predicates: Vec<String> = node.filters
+        .iter()
+        .filter_map(|f| {
+            // 跳过纯数字 automation_id
+            if f.name == "AutomationId" && is_numeric_aid(&f.value) {
+                return None;
+            }
+            f.predicate()
+        })
+        .collect();
+
+    if predicates.is_empty() {
+        if node.control_type.is_empty() { "*".to_string() } else { node.control_type.clone() }
+    } else {
+        format!("{}[{}]", if node.control_type.is_empty() { "*" } else { &node.control_type }, predicates.join(" and "))
+    }
+}
+
 impl Default for XPathOptimizer {
     fn default() -> Self {
         Self::new()
@@ -225,8 +250,12 @@ impl XPathOptimizer {
             
             match f.name.as_str() {
                 "AutomationId" => {
-                    // AutomationId 对锚点很重要，对目标也可保留
-                    optimized_filter.enabled = !f.value.is_empty();
+                    // 纯数字 automation_id 大概率是随机生成的，禁用
+                    if is_numeric_aid(&f.value) {
+                        optimized_filter.enabled = false;
+                    } else {
+                        optimized_filter.enabled = !f.value.is_empty();
+                    }
                 }
                 "ClassName" => {
                     // 动态类名改用 starts-with
@@ -349,16 +378,16 @@ impl XPathOptimizer {
         }
         
         log::info!("[极简优化] XPath 节点数: {}", xpath_nodes_with_indices.len());
-        
-        // 3. 生成完整 XPath
+
+        // 3. 生成完整 XPath（过滤纯数字 automation_id）
         let first_is_root = xpath_nodes_with_indices.first()
             .map(|(orig_idx, _)| *orig_idx == 0)
             .unwrap_or(false);
-        
+
         let full_xpath = if first_is_root {
             xpath_nodes_with_indices.iter()
                 .map(|(_, n)| {
-                    let segment = n.xpath_segment();
+                    let segment = build_segment_without_numeric_aid(n);
                     if segment.starts_with('/') { segment } else { format!("/{}", segment) }
                 })
                 .collect::<Vec<_>>()
@@ -366,7 +395,7 @@ impl XPathOptimizer {
         } else {
             xpath_nodes_with_indices.iter()
                 .map(|(_, n)| {
-                    let segment = n.xpath_segment();
+                    let segment = build_segment_without_numeric_aid(n);
                     if segment.starts_with('/') { segment } else { format!("/{}", segment) }
                 })
                 .collect::<Vec<_>>()
