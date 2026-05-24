@@ -19,11 +19,9 @@ fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
-/// 最后一次捕获文件路径
+/// 最后一次捕获文件路径（与 config.json 同目录）
 fn capture_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join("last_capture.json")
+    config_dir().join("capture.json")
 }
 
 /// 加载 AppConfig

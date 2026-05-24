@@ -56,20 +56,16 @@ pub enum CaptureState {
 /// 持久化捕获数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCapture {
-    pub hierarchy:         Vec<element_selector::core::model::HierarchyNode>,
-    pub selected_node:     Option<usize>,
-    pub xpath_text:        String,
-    pub window_info:       Option<element_selector::core::model::WindowInfo>,
-    /// 每个节点的过滤器 enabled 状态（用户修改）
-    pub node_filters_enabled: Vec<Vec<bool>>,
-    /// 每个节点的 included 状态（用户修改）
-    pub node_included:       Vec<bool>,
+    pub hierarchy:              Vec<element_selector::core::model::HierarchyNode>,
+    pub selected_node:          Option<usize>,
+    pub xpath_text:             String,
+    pub window_info:            Option<element_selector::core::model::WindowInfo>,
     /// 窗口过滤器状态
     pub window_filters_enabled: Vec<bool>,
     /// XPath 来源类型
-    pub xpath_source_kind:   String,  // "Auto", "Optimized", "Manual"
+    pub xpath_source_kind:      String,  // "Auto", "Optimized", "Manual"
     /// 优化摘要（如果有）
-    pub optimization_summary: Option<OptimizationSummaryPersisted>,
+    pub optimization_summary:   Option<OptimizationSummaryPersisted>,
 }
 
 /// 优化摘要持久化格式

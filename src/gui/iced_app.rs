@@ -11,7 +11,7 @@ use iced::widget::{
     text_input, text_editor, Space,
 };
 use iced::{
-    Alignment, Color, Element, Font, Length, Subscription, Task,
+    Alignment, Color, Element, Length, Subscription, Task,
     event, keyboard, stream,
 };
 use iced::futures::SinkExt;
@@ -20,7 +20,7 @@ use log::Level;
 use log::info;
 
 use element_selector::core::model::{
-    AppConfig, DetailedValidationResult, ElementTab,
+    AppConfig, DetailedValidationResult, ElementTab, HistoryEntry,
     HierarchyNode, Operator, PropertyFilter, ValidationResult, WindowInfo,
     SimilarElementSample,
 };
@@ -43,7 +43,6 @@ use super::capture_overlay::CaptureOverlay;
 #[allow(dead_code)]
 pub enum Message {
     // Top bar
-    ElementNameInput(String),
     ValidatePressed,
     CapturePressed,
     CancelCapture,
@@ -85,7 +84,15 @@ pub enum Message {
     CodeDialogClosed,
     CodeFormatChanged(CodeFormat),
     CopyAllCode,
-    HistorySelected(usize),
+    // History
+    ToggleHistoryPanel,
+    HistorySearchChanged(String),
+    HistoryEntrySelected(usize),
+    HistoryEntryDeleted(usize),
+    ShowNamingDialog,
+    NamingDialogInput(String),
+    NamingDialogConfirm,
+    NamingDialogCancel,
     ConfirmAndClose,
     CancelAndClose,
 
@@ -112,7 +119,6 @@ pub enum PaneContent {
 
 pub struct State {
     // UI state
-    pub element_name_input: String,
     pub active_tab: ElementTab,
     pub show_code_dialog: bool,
     pub show_log_panel: bool,
@@ -145,7 +151,12 @@ pub struct State {
 
     // Status & history
     pub status_msg: String,
-    pub history: Vec<String>,
+    pub history: Vec<HistoryEntry>,
+    pub show_history_panel: bool,
+    pub show_naming_dialog: bool,
+    pub naming_dialog_input: String,
+    pub pending_history_entry: Option<HistoryEntry>,
+    pub history_search_query: String,
 
     // Layout
     pub panes: pane_grid::State<PaneContent>,
@@ -186,7 +197,6 @@ pub struct State {
 
     // Config
     pub config: AppConfig,
-    pub pending_save: bool,
 }
 
 impl Default for State {
@@ -199,16 +209,29 @@ impl State {
     fn init() -> (Self, Task<Message>) {
         let config = persistence::load_config();
 
-        // Try to restore last capture
-        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled) =
+        // Try to restore last capture, track source for status message
+        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled, load_source) =
             if let Some(json) = persistence::load_capture_json() {
                 match serde_json::from_str::<PersistedCapture>(&json) {
-                    Ok(c) => Self::restore_from_persisted(c),
-                    Err(_) => Self::mock_capture(),
+                    Ok(c) => {
+                        let result = Self::restore_from_persisted(c);
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, "loaded")
+                    }
+                    Err(_) => {
+                        let result = Self::mock_capture();
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, "corrupt")
+                    }
                 }
             } else {
-                Self::mock_capture()
+                let result = Self::mock_capture();
+                (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, "empty")
             };
+
+        let status_msg = match load_source {
+            "loaded" => format!("✓ 已加载上次捕获: {} 层", hierarchy.len()),
+            "corrupt" => "上次捕获数据无效，已使用示例数据".to_string(),
+            _ => "就绪 — 按 F4 开始捕获元素".to_string(),
+        };
 
         let _n = hierarchy.len();
 
@@ -230,7 +253,6 @@ impl State {
         };
 
         let app = Self {
-            element_name_input: String::new(),
             active_tab: ElementTab::Element,
             show_code_dialog: false,
             show_log_panel: false,
@@ -257,8 +279,13 @@ impl State {
             capture_state: CaptureState::Idle,
             overlay: CaptureOverlay::new(),
 
-            status_msg: String::from("就绪 — 按 F4 开始捕获元素"),
-            history: config.last_xpaths.clone(),
+            status_msg,
+            history: config.history.clone(),
+            show_history_panel: false,
+            show_naming_dialog: false,
+            naming_dialog_input: String::new(),
+            pending_history_entry: None,
+            history_search_query: String::new(),
 
             panes: pane_grid::State::with_configuration(
                 Configuration::Split {
@@ -297,7 +324,6 @@ impl State {
             last_position_change_ms: None,
 
             config,
-            pending_save: false,
         };
 
         (app, Task::none())
@@ -312,19 +338,7 @@ impl State {
     }
 
     fn restore_from_persisted(c: PersistedCapture) -> (Vec<HierarchyNode>, Option<usize>, String, String, String, Option<WindowInfo>, XPathSource, Vec<bool>) {
-        let mut hierarchy = c.hierarchy;
-        for (i, node) in hierarchy.iter_mut().enumerate() {
-            if i < c.node_included.len() {
-                node.included = c.node_included[i];
-            }
-            if i < c.node_filters_enabled.len() {
-                for (j, enabled) in c.node_filters_enabled[i].iter().enumerate() {
-                    if j < node.filters.len() {
-                        node.filters[j].enabled = *enabled;
-                    }
-                }
-            }
-        }
+        let hierarchy = c.hierarchy;
         let window_info = c.window_info.or_else(|| {
             hierarchy.first().map(|node| WindowInfo {
                 title: node.name.clone(),
@@ -362,10 +376,6 @@ impl State {
 
     pub fn save_to_file(&self) {
         if self.hierarchy.is_empty() { return; }
-        let node_filters_enabled: Vec<Vec<bool>> = self.hierarchy.iter()
-            .map(|node| node.filters.iter().map(|f| f.enabled).collect())
-            .collect();
-        let node_included: Vec<bool> = self.hierarchy.iter().map(|node| node.included).collect();
         let window_filters_enabled: Vec<bool> = self.window_filters.iter().map(|f| f.enabled).collect();
         let xpath_source_kind = match &self.xpath_source {
             XPathSource::AutoGenerated => "Auto",
@@ -384,8 +394,6 @@ impl State {
             selected_node: self.selected_node,
             xpath_text: self.xpath_text.clone(),
             window_info: self.window_info.clone(),
-            node_filters_enabled,
-            node_included,
             window_filters_enabled,
             xpath_source_kind,
             optimization_summary,
@@ -398,7 +406,7 @@ impl State {
     /// Save app config (app_config.json) on exit — mirrors egui `save()`
     pub fn save_config_on_exit(&self) {
         let mut config = self.config.clone();
-        config.last_xpaths = self.history.clone();
+        config.history = self.history.clone();
         persistence::save_config(&config);
     }
 
@@ -552,12 +560,27 @@ impl State {
         self.validation = ValidationResult::Idle;
     }
 
-    fn push_history(&mut self) {
-        let x = self.xpath_text.clone();
-        if x.is_empty() { return; }
-        self.history.retain(|h| h != &x);
-        self.history.insert(0, x);
-        self.history.truncate(20);
+    fn prepare_history_entry(&self) -> HistoryEntry {
+        HistoryEntry::from_capture(
+            &self.xpath_text,
+            self.window_info.as_ref(),
+            &self.hierarchy,
+        )
+    }
+
+    fn add_history_entry(&mut self, entry: HistoryEntry) {
+        self.history.retain(|h| h.xpath_text != entry.xpath_text);
+        self.history.insert(0, entry);
+        self.history.truncate(50);
+    }
+
+    fn filtered_history(&self) -> Vec<&HistoryEntry> {
+        if self.history_search_query.is_empty() {
+            self.history.iter().collect()
+        } else {
+            let q = self.history_search_query.to_lowercase();
+            self.history.iter().filter(|e| e.matches_search(&q)).collect()
+        }
     }
 
     // ─── Actions ───
@@ -744,7 +767,6 @@ impl State {
             self.pending_highlight_rx = None;
             self.last_highlighted_element_id = None;
             self.rebuild_xpath();
-            self.pending_save = true;
             self.save_to_file();
             info!("capture done: {}", self.xpath_text);
         }
@@ -969,7 +991,7 @@ impl State {
                                 ValidationResult::Error(e) => format!("⚠ {}", e),
                                 _ => String::new(),
                             };
-                            self.push_history();
+                            self.add_history_entry(self.prepare_history_entry());
                         }
                         None => {
                             self.status_msg = String::from("校验失败或超时");
@@ -1050,9 +1072,6 @@ impl State {
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::ElementNameInput(val) => {
-            state.element_name_input = val;
-        }
         Message::ValidatePressed => {
             if let ValidationResult::Found { count, .. } = state.validation {
                 if count > 0 {
@@ -1215,14 +1234,63 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.copy_status_hint = "已复制！".to_string();
             return iced::clipboard::write(state.generated_ts_code.clone());
         }
-        Message::HistorySelected(idx) => {
-            if idx < state.history.len() {
-                state.xpath_text = state.history[idx].clone();
+        Message::ToggleHistoryPanel => {
+            state.show_history_panel = !state.show_history_panel;
+            if state.show_history_panel {
+                state.show_naming_dialog = false;
+            }
+        }
+        Message::HistorySearchChanged(query) => {
+            state.history_search_query = query;
+        }
+        Message::HistoryEntrySelected(filtered_idx) => {
+            let filtered = state.filtered_history();
+            if filtered_idx < filtered.len() {
+                let xpath = filtered[filtered_idx].xpath_text.clone();
+                let name = filtered[filtered_idx].name.clone();
+                state.xpath_text = xpath;
                 if let Some(comma_pos) = state.xpath_text.find(", ") {
                     state.window_selector = state.xpath_text[..comma_pos].to_string();
                     state.element_xpath = state.xpath_text[comma_pos + 2..].to_string();
                 }
+                state.show_history_panel = false;
+                state.status_msg = format!("✓ 已加载历史: {}", name);
             }
+        }
+        Message::HistoryEntryDeleted(filtered_idx) => {
+            let filtered = state.filtered_history();
+            if filtered_idx < filtered.len() {
+                let xpath_to_remove = filtered[filtered_idx].xpath_text.clone();
+                state.history.retain(|h| h.xpath_text != xpath_to_remove);
+            }
+        }
+        Message::ShowNamingDialog => {
+            let entry = state.prepare_history_entry();
+            state.naming_dialog_input = entry.name.clone();
+            state.pending_history_entry = Some(entry);
+            state.show_naming_dialog = true;
+            state.show_history_panel = false;
+        }
+        Message::NamingDialogInput(input) => {
+            state.naming_dialog_input = input;
+        }
+        Message::NamingDialogConfirm => {
+            if let Some(mut entry) = state.pending_history_entry.take() {
+                let name = state.naming_dialog_input.trim().to_string();
+                if !name.is_empty() {
+                    entry.name = name.chars().take(50).collect();
+                    let saved_name = entry.name.clone();
+                    state.add_history_entry(entry);
+                    state.status_msg = format!("✓ 已保存历史: {}", saved_name);
+                }
+            }
+            state.show_naming_dialog = false;
+            state.naming_dialog_input = String::new();
+        }
+        Message::NamingDialogCancel => {
+            state.pending_history_entry = None;
+            state.show_naming_dialog = false;
+            state.naming_dialog_input = String::new();
         }
         Message::ConfirmAndClose => {
             if let Some(err) = xpath::lint(&state.xpath_text) {
@@ -1243,7 +1311,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
                 _ => {}
             }
-            state.push_history();
+            state.add_history_entry(state.prepare_history_entry());
             state.save_to_file();
             state.save_config_on_exit();
             return iced::exit();
@@ -1361,6 +1429,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
         content = content.push(view_code_dialog(state));
     }
 
+    if state.show_history_panel {
+        content = content.push(view_history_panel(state));
+    }
+
+    if state.show_naming_dialog {
+        content = content.push(view_naming_dialog(state));
+    }
+
     if state.show_log_panel {
         content = content.push(view_log_panel(state));
     }
@@ -1452,15 +1528,6 @@ fn mouse_move_subscription() -> Subscription<Message> {
 fn view_top_bar(state: &State) -> Element<'_, Message> {
     let colors = &state.colors;
 
-    let search_label = text("元素名称:")
-        .size(12)
-        .color(colors.muted);
-
-    let input = text_input("输入...", &state.element_name_input)
-        .on_input(Message::ElementNameInput)
-        .padding(4)
-        .width(Length::Fixed(160.0));
-
     let validate_btn = button(text(validation_button_label(state)).color(if matches!(&state.validation, ValidationResult::Found { .. }) {
             Color::BLACK
         } else {
@@ -1478,7 +1545,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .padding([4, 8])
         .on_press(Message::LogPanelToggled);
 
-    let r = row![search_label, input, Space::with_width(Length::Fill), validate_btn, capture_btn, log_btn]
+    let r = row![Space::with_width(Length::Fill), validate_btn, capture_btn, log_btn]
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([8, 12]);
@@ -1927,7 +1994,6 @@ fn view_window_properties(state: &State) -> Element<'_, Message> {
 
     let selector_code = container(
         text(&state.window_selector)
-            .font(Font::MONOSPACE)
             .size(11)
             .color(colors.mono_fg)
     )
@@ -1982,7 +2048,6 @@ fn view_validation_detail<'a>(detail: &'a DetailedValidationResult, colors: &'a 
                     .color(colors.warn_detail_fg)
                     .into(),
                 text(&seg.segment_text)
-                    .font(Font::MONOSPACE)
                     .size(10)
                     .color(colors.mono_fg)
                     .into(),
@@ -2162,22 +2227,35 @@ fn view_bottom_bar(state: &State) -> Element<'_, Message> {
         .size(12)
         .color(colors.text);
 
-    let history_pick = if !state.history.is_empty() {
-        let items: Vec<String> = state.history.iter()
-            .take(10)
-            .map(|h| truncate(h, 60))
-            .collect();
-        pick_list(items, None as Option<String>, |idx_str| {
-            if let Some(idx) = state.history.iter().position(|h| truncate(h, 60) == idx_str) {
-                Message::HistorySelected(idx)
-            } else {
-                Message::HistorySelected(0)
-            }
-        }).width(Length::Fixed(120.0))
-    } else {
-        pick_list(Vec::<String>::new(), None as Option<String>, |_| Message::HistorySelected(0))
-            .width(Length::Fixed(120.0))
-    };
+    let history_btn = button(text(format!("历史 ({})", state.history.len())).size(12))
+        .padding([4, 12])
+        .width(Length::Fixed(90.0))
+        .height(Length::Fixed(32.0))
+        .style(move |_, _| button::Style {
+            border: iced::Border {
+                color: colors.border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .on_press(Message::ToggleHistoryPanel);
+
+    let save_btn = button(text("保存并命名").size(12).color(Color::BLACK))
+        .padding([4, 12])
+        .width(Length::Fixed(90.0))
+        .height(Length::Fixed(32.0))
+        .style(move |_, _| button::Style {
+            background: Some(iced::Background::Color(colors.ok)),
+            border: iced::Border {
+                color: colors.ok,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            text_color: Color::BLACK,
+            ..Default::default()
+        })
+        .on_press(Message::ShowNamingDialog);
 
     let cancel_btn = button(text("取消").size(13).color(colors.muted))
         .padding([4, 16])
@@ -2213,7 +2291,7 @@ fn view_bottom_bar(state: &State) -> Element<'_, Message> {
         })
         .on_press(Message::ConfirmAndClose);
 
-    container(row![status, Space::with_width(Length::Fill), history_pick, cancel_btn, confirm_btn]
+    container(row![status, Space::with_width(Length::Fill), history_btn, save_btn, cancel_btn, confirm_btn]
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([6, 12]),
@@ -2310,6 +2388,212 @@ fn view_code_dialog(state: &State) -> Element<'_, Message> {
     .into()
 }
 
+// ─── History Panel ───────────────────────────────────────────────────────────
+
+fn view_history_panel(state: &State) -> Element<'_, Message> {
+    let colors = &state.colors;
+
+    let header = row![
+        text("历史记录").size(14).color(colors.text),
+        Space::with_width(Length::Fill),
+        button(text("×").size(16).color(colors.muted))
+            .padding([2, 8])
+            .style(move |_, _| button::Style {
+                border: iced::Border {
+                    color: colors.border,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .on_press(Message::ToggleHistoryPanel),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let search_input = text_input("搜索名称、窗口、元素类型...", &state.history_search_query)
+        .on_input(Message::HistorySearchChanged)
+        .padding(6)
+        .width(Length::Fill);
+
+    let filtered = state.filtered_history();
+
+    let list_content: Element<'_, Message> = if filtered.is_empty() {
+        text(if state.history.is_empty() {
+            "暂无历史记录"
+        } else {
+            "无匹配结果"
+        })
+        .size(13)
+        .color(colors.muted)
+        .into()
+    } else {
+        let mut rows = column![].spacing(4);
+        for (filtered_idx, entry) in filtered.iter().enumerate() {
+            let name_text = text(&entry.name).size(13).color(colors.text);
+            let meta_text = text(format!(
+                "{}  {}  {}",
+                entry.window_title, entry.control_type, entry.display_time()
+            ))
+            .size(11)
+            .color(colors.muted);
+
+            let delete_btn = button(text("删").size(11).color(colors.err))
+                .padding([2, 8])
+                .style(move |_, _| button::Style {
+                    border: iced::Border {
+                        color: colors.err,
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .on_press(Message::HistoryEntryDeleted(filtered_idx));
+
+            let entry_row = row![
+                column![name_text, meta_text].spacing(2),
+                Space::with_width(Length::Fill),
+                delete_btn,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+            let entry_container = container(entry_row)
+                .padding([8, 12])
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(iced::Background::Color(Color::TRANSPARENT)),
+                    border: iced::Border {
+                        color: colors.border,
+                        width: 0.5,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                });
+
+            // Use button to make the whole row clickable
+            let entry_btn = button(entry_container)
+                .padding(0)
+                .style(move |_, _| button::Style {
+                    border: iced::Border::default(),
+                    background: None,
+                    shadow: Default::default(),
+                    text_color: colors.text,
+                })
+                .on_press(Message::HistoryEntrySelected(filtered_idx));
+
+            rows = rows.push(entry_btn);
+        }
+        scrollable(rows).height(Length::Fill).into()
+    };
+
+    container(column![
+        header,
+        search_input,
+        list_content,
+    ].spacing(8))
+    .padding(12)
+    .width(Length::Fixed(480.0))
+    .height(Length::Fixed(400.0))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(colors.panel_fill)),
+        border: iced::Border {
+            color: colors.border,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+// ─── Naming Dialog ───────────────────────────────────────────────────────────
+
+fn view_naming_dialog(state: &State) -> Element<'_, Message> {
+    let colors = &state.colors;
+
+    let header = text("保存到历史记录").size(14).color(colors.text);
+
+    let xpath_preview = container(
+        text(state.xpath_text.chars().take(80).collect::<String>())
+            .size(11)
+            .color(colors.muted),
+    )
+    .padding(6)
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(colors.segment_bg)),
+        border: iced::Border {
+            color: colors.border,
+            width: 0.5,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    });
+
+    let name_input = text_input("输入名称（如：Button in 微信）", &state.naming_dialog_input)
+        .on_input(Message::NamingDialogInput)
+        .on_submit(Message::NamingDialogConfirm)
+        .padding(6)
+        .width(Length::Fill);
+
+    let cancel_btn = button(text("取消").size(13).color(colors.muted))
+        .padding([4, 20])
+        .height(Length::Fixed(32.0))
+        .style(move |_, _| button::Style {
+            border: iced::Border {
+                color: colors.border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .on_press(Message::NamingDialogCancel);
+
+    let save_btn = button(text("保存").size(13).color(Color::BLACK))
+        .padding([4, 20])
+        .height(Length::Fixed(32.0))
+        .style(move |_, _| button::Style {
+            background: Some(iced::Background::Color(colors.ok)),
+            border: iced::Border {
+                color: colors.ok,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            text_color: Color::BLACK,
+            ..Default::default()
+        })
+        .on_press(Message::NamingDialogConfirm);
+
+    let footer = row![
+        Space::with_width(Length::Fill),
+        cancel_btn,
+        save_btn,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    container(column![
+        header,
+        xpath_preview,
+        name_input,
+        footer,
+    ].spacing(12))
+    .padding(16)
+    .width(Length::Fixed(400.0))
+    .height(Length::Shrink)
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(colors.panel_fill)),
+        border: iced::Border {
+            color: colors.border,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 fn view_log_panel(state: &State) -> Element<'_, Message> {
     let colors = &state.colors;
     let entries = state.gui_logger.get_logs();
@@ -2325,7 +2609,6 @@ fn view_log_panel(state: &State) -> Element<'_, Message> {
             Level::Trace => "TRACE",
         };
         let line = text(format!("[{}] {} {}", time_str, level_str, entry.message))
-            .font(Font::MONOSPACE)
             .size(10)
             .color(colors.muted);
         rows.push(line.into());
@@ -2348,14 +2631,6 @@ fn view_log_panel(state: &State) -> Element<'_, Message> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max).collect::<String>())
-    }
-}
 
 fn escape_backtick(s: &str) -> String {
     s.replace('`', "\\`")

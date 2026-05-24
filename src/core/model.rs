@@ -666,22 +666,124 @@ pub fn control_type_to_chinese(control_type: &str) -> String {
     }.to_string()
 }
 
+// ─── HistoryEntry ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub name: String,
+    pub xpath_text: String,
+    pub window_title: String,
+    pub control_type: String,
+    pub timestamp: u64,
+}
+
+impl HistoryEntry {
+    pub fn from_capture(
+        xpath_text: &str,
+        window_info: Option<&WindowInfo>,
+        hierarchy: &[HierarchyNode],
+    ) -> Self {
+        let window_title = window_info
+            .map(|w| w.title.clone())
+            .or_else(|| hierarchy.first().map(|n| n.name.clone()))
+            .unwrap_or_default();
+        let control_type = hierarchy
+            .last()
+            .map(|n| n.control_type.clone())
+            .unwrap_or_default();
+        // 优先用 hierarchy 中的 name，否则从 XPath 中提取最后一个 @Name
+        // xpath_text 格式: "window_selector, element_xpath"
+        let element_xpath = xpath_text.splitn(2, ", ").nth(1).unwrap_or(xpath_text);
+        let element_name = match hierarchy.last() {
+            Some(node) if !node.name.is_empty() => node.name.clone(),
+            _ => extract_xpath_name(element_xpath).unwrap_or_default(),
+        };
+        // 优先用元素名称生成描述性名称，如 "搜一搜 (Button)"；否则用 "Button in 微信"
+        let name = if !element_name.is_empty() {
+            format!("{element_name} ({control_type})")
+        } else if !window_title.is_empty() {
+            format!("{control_type} in {window_title}")
+        } else {
+            control_type.clone()
+        };
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            name,
+            xpath_text: xpath_text.to_string(),
+            window_title,
+            control_type,
+            timestamp,
+        }
+    }
+
+    pub fn display_time(&self) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(self.timestamp);
+        let elapsed = now.saturating_sub(self.timestamp);
+        if elapsed < 60 {
+            "刚刚".to_string()
+        } else if elapsed < 3600 {
+            format!("{}分钟前", elapsed / 60)
+        } else if elapsed < 86400 {
+            format!("{}小时前", elapsed / 3600)
+        } else if elapsed < 604800 {
+            format!("{}天前", elapsed / 86400)
+        } else {
+            format!("{}周前", elapsed / 604800)
+        }
+    }
+
+    pub fn matches_search(&self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let haystack = format!(
+            "{} {} {} {}",
+            self.name, self.window_title, self.control_type, self.xpath_text
+        )
+        .to_lowercase();
+        haystack.contains(&query.to_lowercase())
+    }
+}
+
+/// 从 element XPath 中提取最后一个 @Name 值，用于命名
+/// 例如: "//Group/Button[@Name='搜一搜']/Group/Button" → "搜一搜"
+/// 会倒序扫描所有段，找第一个带 @Name 的段
+fn extract_xpath_name(xpath: &str) -> Option<String> {
+    for segment in xpath.rsplit('/') {
+        if segment.is_empty() { continue; }
+        for quote in ['\'', '"'] {
+            let marker = &format!("@Name={}", quote);
+            if let Some(start) = segment.rfind(marker) {
+                let start = start + marker.len();
+                if let Some(end) = segment[start..].find(quote) {
+                    let name = &segment[start..start + end];
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 // ─── AppConfig (persisted) ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub highlight_on_hover: bool,
-    pub last_xpaths:        Vec<String>,   // history, newest first
-    /// Show detailed validation results (per-segment timing)
-    pub show_validation_details: bool,
+    pub history: Vec<HistoryEntry>,   // 历史记录，按时间倒序
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            highlight_on_hover: true,
-            last_xpaths:        Vec::new(),
-            show_validation_details: true,
+            history: Vec::new(),
         }
     }
 }
