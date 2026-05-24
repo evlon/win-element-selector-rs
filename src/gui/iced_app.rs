@@ -56,6 +56,10 @@ pub enum Message {
     CopyXPath,
     WindowSelectorChanged(String),
     ElementXPathChanged(String),
+    XPathTextInput(String),
+    XPathSubmitted,
+    XPathRestorePressed,
+    XPathSyncPressed,
 
     // Tree interaction
     TreeNodeSelected(usize),
@@ -401,7 +405,6 @@ impl State {
     // ─── XPath helpers ───
 
     fn rebuild_xpath(&mut self) {
-        if !self.xpath_source.is_auto() { return; }
         let window_selector = self.build_window_selector_from_info();
         let element_xpath = xpath::generate_elements(&self.hierarchy);
         self.window_selector = window_selector;
@@ -409,6 +412,93 @@ impl State {
         self.xpath_text = format!("{}, {}", self.window_selector, self.element_xpath);
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation = ValidationResult::Idle;
+    }
+
+    /// 解析手动编辑的 XPath，同步到 hierarchy 的 included 状态。
+    /// 返回同步结果描述（成功/失败原因）。
+    fn sync_xpath_to_tree(&mut self) -> String {
+        // 全部重置为 included=false
+        for node in &mut self.hierarchy {
+            node.included = false;
+        }
+
+        let xpath = self.element_xpath.trim();
+        if xpath.is_empty() {
+            return "XPath 不能为空".to_string();
+        }
+
+        // 按 `/` 分割 XPath，提取 segment 列表
+        let parts: Vec<&str> = xpath.split('/').collect();
+        let mut segments: Vec<String> = Vec::new();
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            segments.push(part.to_string());
+        }
+
+        if segments.is_empty() {
+            return "XPath 格式无效，无法解析任何节点".to_string();
+        }
+
+        // 将 segments 按顺序匹配到 hierarchy 节点
+        let seg_count = segments.len();
+        let mut matched = 0;
+        let mut seg_idx = 0;
+        for node in &mut self.hierarchy {
+            if seg_idx >= segments.len() { break; }
+
+            let seg = &segments[seg_idx];
+            // 提取 tag（`[` 之前的部分）
+            let tag_end = seg.find(|c| c == '[').unwrap_or(seg.len());
+            let tag = seg[..tag_end].trim();
+
+            if tag.is_empty() || node.control_type != tag {
+                continue;
+            }
+
+            // tag 匹配成功
+            node.included = true;
+            matched += 1;
+
+            // 提取 predicates 中的属性，更新 filters
+            let mut search_from = tag_end;
+            while let Some(open) = seg[search_from..].find('[') {
+                let open = open + search_from;
+                if let Some(close) = seg[open..].find(']') {
+                    let close = close + open;
+                    let predicate = &seg[open + 1..close];
+                    // 提取 @Attr='Value'
+                    if let Some(eq_pos) = predicate.find('=') {
+                        let attr_part = predicate[..eq_pos].trim();
+                        let val_part = predicate[eq_pos + 1..].trim();
+                        let attr_name = attr_part.trim_start_matches('@');
+                        let val = val_part.trim_matches('\'').trim_matches('"');
+
+                        // 更新对应的 filter
+                        for filter in &mut node.filters {
+                            if filter.name == attr_name {
+                                filter.enabled = true;
+                                filter.value = val.to_string();
+                                break;
+                            }
+                        }
+                    }
+                    search_from = close + 1;
+                } else {
+                    break;
+                }
+            }
+
+            seg_idx += 1;
+        }
+
+        if matched == 0 {
+            return format!("无法匹配任何节点（{} 个 segment 均未找到对应 control_type）", seg_count);
+        } else if matched < seg_count {
+            return format!("部分同步：匹配 {} / {} 个节点", matched, seg_count);
+        } else {
+            format!("已同步：匹配 {} 个节点", matched)
+        }
     }
 
     fn build_window_selector_from_info(&self) -> String {
@@ -512,6 +602,12 @@ impl State {
     }
 
     fn do_validate(&mut self) {
+        // 清除旧的高亮
+        if let Some(ref mut manager) = self.multi_highlight_manager {
+            manager.clear();
+        }
+        self.multi_highlight_create_time = None;
+
         self.xpath_error = xpath::lint(&self.xpath_text);
         if let Some(ref err) = self.xpath_error {
             self.status_msg = format!("XPath 语法错误: {}", err);
@@ -850,8 +946,21 @@ impl State {
                         Some(detailed_result) => {
                             self.detailed_validation = Some(detailed_result.clone());
                             self.validation = detailed_result.overall.clone();
-                            if let ValidationResult::Found { ref first_rect, .. } = detailed_result.overall {
-                                if let Some(r) = first_rect { highlight::flash(r, 1200); }
+                            // 统一用 MultiHighlightManager 高亮所有匹配元素（不自动消失）
+                            if let ValidationResult::Found { ref rects, .. } = detailed_result.overall {
+                                if !rects.is_empty() {
+                                    if self.multi_highlight_manager.is_none() {
+                                        self.multi_highlight_manager = Some(MultiHighlightManager::new());
+                                    }
+                                    let manager = self.multi_highlight_manager.as_mut().unwrap();
+                                    manager.clear();
+                                    for (i, rect) in rects.iter().enumerate() {
+                                        let id = format!("validation_{}", i);
+                                        let label = format!("{}", i + 1);
+                                        manager.add(&id, rect, &label);
+                                    }
+                                    self.multi_highlight_create_time = Some(Instant::now());
+                                }
                             }
                             self.status_msg = match &detailed_result.overall {
                                 ValidationResult::Found { count, .. } =>
@@ -928,17 +1037,6 @@ impl State {
             }
         }
 
-        if let Some(ref mut manager) = self.multi_highlight_manager {
-            if manager.count() > 0 {
-                if let Some(create_time) = self.multi_highlight_create_time {
-                    if create_time.elapsed() > Duration::from_secs(30) {
-                        manager.clear();
-                        self.multi_highlight_create_time = None;
-                    }
-                }
-            }
-        }
-
         if let CaptureState::WaitingClick { deadline } = self.capture_state {
             if Instant::now() > deadline {
                 self.status_msg = String::from("捕获超时，已取消");
@@ -956,7 +1054,20 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.element_name_input = val;
         }
         Message::ValidatePressed => {
-            state.do_validate();
+            if let ValidationResult::Found { count, .. } = state.validation {
+                if count > 0 {
+                    // 清除高亮，恢复按钮
+                    if let Some(ref mut manager) = state.multi_highlight_manager {
+                        manager.clear();
+                    }
+                    state.validation = ValidationResult::Idle;
+                    state.status_msg = String::from("已清除高亮");
+                } else {
+                    state.do_validate();
+                }
+            } else {
+                state.do_validate();
+            }
         }
         Message::CapturePressed => {
             if state.capture_state == CaptureState::Idle {
@@ -989,6 +1100,34 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.validation = ValidationResult::Idle;
             state.xpath_source = XPathSource::Manual;
         }
+        Message::XPathTextInput(val) => {
+            state.element_xpath = val;
+            state.xpath_text = format!("{}, {}", state.window_selector, state.element_xpath);
+            state.xpath_error = xpath::lint(&state.xpath_text);
+            state.validation = ValidationResult::Idle;
+            state.xpath_source = XPathSource::Manual;
+        }
+        Message::XPathSubmitted => {
+            let msg = state.sync_xpath_to_tree();
+            if msg.starts_with("已同步") || msg.starts_with("部分同步") {
+                state.xpath_source = XPathSource::AutoGenerated;
+                state.rebuild_xpath();
+            }
+            state.status_msg = msg;
+        }
+        Message::XPathRestorePressed => {
+            state.xpath_source = XPathSource::AutoGenerated;
+            state.rebuild_xpath();
+            state.status_msg = "已恢复为自动生成的 XPath".to_string();
+        }
+        Message::XPathSyncPressed => {
+            let msg = state.sync_xpath_to_tree();
+            if msg.starts_with("已同步") || msg.starts_with("部分同步") {
+                state.xpath_source = XPathSource::AutoGenerated;
+                state.rebuild_xpath();
+            }
+            state.status_msg = msg;
+        }
         Message::CopyXPath => {
             state.status_msg = "元素 XPath 已复制到剪贴板".to_string();
             return iced::clipboard::write(state.element_xpath.clone());
@@ -999,41 +1138,31 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::TreeNodeIncludedToggled(idx) => {
             if idx < state.hierarchy.len() {
                 state.hierarchy[idx].included = !state.hierarchy[idx].included;
-                if state.xpath_source.is_auto() {
-                    state.rebuild_xpath();
-                }
+                state.rebuild_xpath();
             }
         }
         Message::FilterOperatorChanged(node_idx, filter_idx, op) => {
             if node_idx < state.hierarchy.len() && filter_idx < state.hierarchy[node_idx].filters.len() {
                 state.hierarchy[node_idx].filters[filter_idx].operator = op;
-                if state.xpath_source.is_auto() {
-                    state.rebuild_xpath();
-                }
+                state.rebuild_xpath();
             }
         }
         Message::FilterValueChanged(node_idx, filter_idx, val) => {
             if node_idx < state.hierarchy.len() && filter_idx < state.hierarchy[node_idx].filters.len() {
                 state.hierarchy[node_idx].filters[filter_idx].value = val;
-                if state.xpath_source.is_auto() {
-                    state.rebuild_xpath();
-                }
+                state.rebuild_xpath();
             }
         }
         Message::FilterEnabledToggled(node_idx, filter_idx, enabled) => {
             if node_idx < state.hierarchy.len() && filter_idx < state.hierarchy[node_idx].filters.len() {
                 state.hierarchy[node_idx].filters[filter_idx].enabled = enabled;
-                if state.xpath_source.is_auto() {
-                    state.rebuild_xpath();
-                }
+                state.rebuild_xpath();
             }
         }
         Message::IncludeTogglePressed(idx) => {
             if idx < state.hierarchy.len() {
                 state.hierarchy[idx].included = !state.hierarchy[idx].included;
-                if state.xpath_source.is_auto() {
-                    state.rebuild_xpath();
-                }
+                state.rebuild_xpath();
             }
         }
         Message::WindowFilterEnabled(idx, enabled) => {
@@ -1511,8 +1640,15 @@ fn view_xpath_frame(state: &State) -> Element<'_, Message> {
         code_btn.into(),
     ];
 
+    // 恢复 / 同步按钮（始终可见）
+    let restore_btn = button("恢复").padding([2, 6])
+        .on_press(Message::XPathRestorePressed);
+    let sync_btn = button("同步").padding([2, 6])
+        .on_press(Message::XPathSyncPressed);
+    top_items.push(restore_btn.into());
+    top_items.push(sync_btn.into());
+
     if xpath_editable {
-        top_items.push(button("重置").padding([2, 6]).into());
         top_items.push(text("[手动编辑]").size(10).color(colors.warn).into());
     }
 
@@ -1534,12 +1670,14 @@ fn view_xpath_frame(state: &State) -> Element<'_, Message> {
         .spacing(6)
         .align_y(Alignment::Center);
 
-    // XPath text area (read-only display — use default font for CJK support)
-    let xpath_area: Element<'_, Message> = container(
-        text(&state.element_xpath)
-            .size(11)
-            .color(colors.mono_fg)
-    ).into();
+    // XPath text area (editable — on_submit triggers sync to tree checkboxes)
+    let xpath_input = text_input("XPath...", &state.element_xpath)
+        .size(11)
+        .padding([4, 8])
+        .width(Length::Fill)
+        .on_input(Message::XPathTextInput)
+        .on_submit(Message::XPathSubmitted);
+    let xpath_area: Element<'_, Message> = container(xpath_input).into();
 
     container(column![
         top_row,

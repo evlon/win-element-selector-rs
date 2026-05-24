@@ -889,13 +889,17 @@ pub mod windows_impl {
         let overall = if results.is_empty() {
             ValidationResult::NotFound
         } else {
-            let first_rect = results.first().and_then(|e| {
-                unsafe { e.CurrentBoundingRectangle().ok() }.map(|r| ElementRect {
-                    x: r.left, y: r.top,
-                    width: r.right - r.left, height: r.bottom - r.top,
-                })
-            });
-            ValidationResult::Found { count: results.len(), first_rect }
+            let mut rects = Vec::with_capacity(results.len());
+            for elem in &results {
+                if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
+                    rects.push(ElementRect {
+                        x: r.left, y: r.top,
+                        width: r.right - r.left, height: r.bottom - r.top,
+                    });
+                }
+            }
+            let first_rect = rects.first().cloned();
+            ValidationResult::Found { count: results.len(), first_rect, rects }
         };
         
         // 生成逐层校验结果（复用 uiauto-xpath 的 ancestors 和 get_property API）

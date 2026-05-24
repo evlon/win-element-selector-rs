@@ -554,7 +554,7 @@ pub struct DetailedValidationResult {
 pub enum ValidationResult {
     Idle,
     Running,
-    Found { count: usize, first_rect: Option<ElementRect> },
+    Found { count: usize, first_rect: Option<ElementRect>, rects: Vec<ElementRect> },
     NotFound,
     Error(String),
 }

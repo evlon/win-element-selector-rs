@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn flash(rect: &ElementRect, duration_ms: u64) {
     let info = HighlightInfo::new(rect.clone(), "");
     flash_with_info(&info, duration_ms);
 }
 
+#[allow(dead_code)]
 pub fn flash_with_info(info: &HighlightInfo, duration_ms: u64) {
     windows_impl::flash_with_info(info, duration_ms);
 }
@@ -154,6 +156,7 @@ mod windows_impl {
         });
     }
 
+    #[allow(dead_code)]
     pub fn flash_with_info(info: &HighlightInfo, duration_ms: u64) {
         // 【关键修复】先隐藏旧的高亮窗口，避免累积
         hide_internal();
