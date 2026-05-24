@@ -46,6 +46,7 @@ pub enum Message {
     ValidatePressed,
     CapturePressed,
     CancelCapture,
+    EscapePressed,
     LogPanelToggled,
 
     // Tab & options
@@ -203,6 +204,9 @@ pub struct State {
     pub last_known_mouse_pos: Option<(i32, i32)>,
     pub last_position_change_ms: Option<u64>,
 
+    // Raw Input ESC 检测
+    pub escape_rx: Option<crossbeam_channel::Receiver<()>>,
+
     // Config
     pub config: AppConfig,
 }
@@ -337,6 +341,8 @@ impl State {
             last_highlight_time: None,
             last_known_mouse_pos: None,
             last_position_change_ms: None,
+
+            escape_rx: Some(super::raw_input::init()),
 
             config,
         };
@@ -1186,6 +1192,16 @@ impl State {
             }
         }
 
+        // Raw Input ESC 检测（全局，不受焦点影响）
+        if let Some(ref rx) = self.escape_rx {
+            if rx.try_recv().is_ok() {
+                if self.capture_state != CaptureState::Idle {
+                    self.cancel_capture();
+                    self.status_msg = String::from("ESC 退出捕获");
+                }
+            }
+        }
+
         if let CaptureState::WaitingClick { deadline } = self.capture_state {
             if Instant::now() > deadline {
                 self.status_msg = String::from("捕获超时，已取消");
@@ -1223,6 +1239,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::CancelCapture => {
+            if state.capture_state != CaptureState::Idle {
+                state.cancel_capture();
+            }
+        }
+        Message::EscapePressed => {
             if state.capture_state != CaptureState::Idle {
                 state.cancel_capture();
             }
@@ -1598,8 +1619,6 @@ pub fn subscription(state: &State) -> Subscription<Message> {
                         return Some(Message::CapturePressed),
                     keyboard::Key::Named(keyboard::key::Named::F7) =>
                         return Some(Message::ValidatePressed),
-                    keyboard::Key::Named(keyboard::key::Named::Escape) =>
-                        return Some(Message::CancelCapture),
                     _ => {}
                 }
             }

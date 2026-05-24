@@ -8,6 +8,7 @@ pub mod highlight;
 pub mod multi_highlight;
 pub mod logger;
 pub mod input_hook;
+pub mod raw_input;
 pub mod state_model;
 
 // 类型定义（iced 和旧 GUI 共用）
