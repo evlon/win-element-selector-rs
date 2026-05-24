@@ -68,14 +68,11 @@ pub struct CaptureStateModel {
     /// 手动编辑的 XPath（仅 Manual 状态时有效）
     pub manual_element_xpath: Option<String>,
     pub manual_window_selector: Option<String>,
-    
-    /// 是否使用简化 XPath
-    pub show_simplified: bool,
 }
 
 impl CaptureStateModel {
     /// 从 CaptureResult 创建新模型（首次捕获）
-    pub fn from_capture(result: CaptureResult, show_simplified: bool) -> Self {
+    pub fn from_capture(result: CaptureResult) -> Self {
         let n = result.hierarchy.len();
         
         // 初始化节点过滤器状态：全部 included，全部 enabled
@@ -102,7 +99,6 @@ impl CaptureStateModel {
             xpath_source: XPathSourceKind::Auto,
             manual_element_xpath: None,
             manual_window_selector: None,
-            show_simplified,
         }
     }
     
@@ -250,7 +246,6 @@ impl Default for CaptureStateModel {
             xpath_source: XPathSourceKind::Auto,
             manual_element_xpath: None,
             manual_window_selector: None,
-            show_simplified: false,
         }
     }
 }
