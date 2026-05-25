@@ -347,16 +347,17 @@ impl XPathOptimizer {
         &self,
         hierarchy: &[HierarchyNode],
         window_selector: &str,
+        progress: &dyn Fn(&str),
     ) -> Option<OptimizationResult> {
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         use crate::core::model::ValidationResult;
-        
+
         if hierarchy.is_empty() {
             log::warn!("[极简优化] hierarchy 为空");
             return None;
         }
-        
-        log::info!("[极简优化] 开始优化，hierarchy 节点数: {}", hierarchy.len());
+
+        progress(&format!("开始优化，共 {} 个层级节点", hierarchy.len()));
         
         // 1. 找到目标节点
         let original_target_index = hierarchy.iter()
@@ -376,8 +377,6 @@ impl XPathOptimizer {
             log::warn!("[极简优化] 目标节点不在 XPath 列表中");
             return None;
         }
-        
-        log::info!("[极简优化] XPath 节点数: {}", xpath_nodes_with_indices.len());
 
         // 3. 生成完整 XPath（过滤纯数字 automation_id）
         let first_is_root = xpath_nodes_with_indices.first()
@@ -402,9 +401,9 @@ impl XPathOptimizer {
                 .join("")
                 .replacen("/", "//", 1)
         };
-        
-        log::info!("[极简优化] 原始 XPath 长度: {} 字符", full_xpath.len());
-        
+
+        progress(&format!("原始 XPath 长度: {} 字符", full_xpath.len()));
+
         // 4. 创建取消标志
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_flag_clone = cancel_flag.clone();
@@ -457,15 +456,15 @@ impl XPathOptimizer {
                     }
                 }
             },
-            // 进度回调 - 输出到日志
+            // 进度回调 - 转发到外部 progress 回调
             |msg: &str| {
-                log::info!("{}", msg);
+                progress(msg);
             }
         );
-        
+
         match result {
             Ok(Some(minimal_xpath)) => {
-                log::info!("[极简优化] 优化成功，最终 XPath 长度: {} 字符", minimal_xpath.len());
+                progress(&format!("优化成功，XPath 长度缩短至 {} 字符", minimal_xpath.len()));
                 
                 // 6. 解析极简 XPath 并应用到 hierarchy
                 let optimized_hierarchy = self.apply_minimal_optimization_to_hierarchy(
@@ -499,7 +498,7 @@ impl XPathOptimizer {
             }
             Ok(None) => {
                 // 被取消
-                log::info!("[极简优化] 优化已被用户取消");
+                log::warn!("[极简优化] 优化已被用户取消");
                 None
             }
             Err(e) => {
@@ -518,42 +517,37 @@ impl XPathOptimizer {
     ) -> Vec<HierarchyNode> {
         // 1. 解析 XPath，提取每个节点的标签和谓词
         let xpath_nodes = self.parse_xpath_to_nodes(minimal_xpath);
-        
-        log::info!("[极简优化-同步] XPath 解析结果：{} 个节点", xpath_nodes.len());
-        for (i, node) in xpath_nodes.iter().enumerate() {
-            log::info!("  [{}] {} - {} 个谓词: {:?}", i, node.tag, node.predicates.len(), node.predicates);
-        }
-        
+
+        log::debug!("[极简优化-同步] XPath 解析结果：{} 个节点", xpath_nodes.len());
+
         // 2. 构建原始 hierarchy 中 included 节点的索引映射
         let included_indices: Vec<usize> = hierarchy.iter()
             .enumerate()
             .filter(|(i, n)| n.included && *i <= target_index)
             .map(|(i, _)| i)
             .collect();
-        
-        log::info!("[极简优化-同步] Included 节点索引：{:?}", included_indices);
-        
+
         // 3. 创建优化后的 hierarchy
         let mut optimized_hierarchy = hierarchy.to_vec();
-        
+
         // 【关键修复】首先将所有 included 节点的 included 设置为 false
         // 然后只将被 XPath 匹配的节点重新设置为 true
         for idx in &included_indices {
             optimized_hierarchy[*idx].included = false;
         }
-        
+
         // 4. 对每个 included 节点，根据 XPath 中的谓词更新 filters
         for (xpath_idx, orig_idx) in included_indices.iter().enumerate() {
             if xpath_idx >= xpath_nodes.len() {
-                log::warn!("[极简优化-同步] XPath 节点数({}) < included 节点数({}), 停止同步", 
+                log::warn!("[极简优化-同步] XPath 节点数({}) < included 节点数({}), 停止同步",
                     xpath_nodes.len(), included_indices.len());
                 break;
             }
-            
+
             let xpath_node = &xpath_nodes[xpath_idx];
             let node = &mut optimized_hierarchy[*orig_idx];
-            
-            log::info!("[极简优化-同步] 处理节点 [{}]: XPath标签={}, Hierarchy标签={}", 
+
+            log::debug!("[极简优化-同步] 处理节点 [{}]: XPath标签={}, Hierarchy标签={}",
                 orig_idx, xpath_node.tag, node.control_type);
             
             // 如果这是 XPath 中的一个有效节点（有标签），将其 included 设置为 true

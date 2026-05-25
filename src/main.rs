@@ -6,6 +6,7 @@ mod gui;
 
 use gui::iced_app::{update, view, subscription};
 use gui::input_hook;
+use gui::persistence::load_config;
 
 use log::info;
 
@@ -20,35 +21,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize logger
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    gui::logger::init_gui_logger(1000);
 
-    // Parse command line arguments
+    // Parse command line args for narrator override
     let args: Vec<String> = std::env::args().collect();
-
-    // Show help if requested
-    if args.contains(&"-h".to_string()) || args.contains(&"--help".to_string()) {
-        println!("Windows Element Selector v1.0.1");
-        println!();
-        println!("USAGE:");
-        println!("    element-selector [OPTIONS]");
-        println!();
-        println!("OPTIONS:");
-        println!("    -v          Set log level to WARN");
-        println!("    -vv         Set log level to INFO (default)");
-        println!("    -vvv        Set log level to DEBUG (verbose mode)");
-        println!("    --verbose   Same as -vvv");
-        println!("    -h, --help  Show this help message");
-        println!();
-        println!("EXAMPLES:");
-        println!("    element-selector              # Normal mode (INFO level)");
-        println!("    element-selector -vvv         # Verbose mode (DEBUG level)");
-        println!("    element-selector --verbose    # Verbose mode (DEBUG level)");
-        return Ok(());
-    }
+    let cli_skip_narrator = args.contains(&"--no-narrator-motion".to_string());
 
     // COM must be initialized on the main thread (STA) for UI Automation.
     {
@@ -59,6 +36,18 @@ fn main() -> anyhow::Result<()> {
                 .expect("CoInitializeEx failed");
         }
     }
+
+    // Enable Narrator RunningState for full UIA tree visibility (configurable).
+    let config = load_config();
+    let _narrator_guard = if !cli_skip_narrator
+        && config.enable_narrator_running_state
+        && element_selector::core::narrator::should_enable()
+    {
+        Some(element_selector::core::narrator::enable_narrator_running_state())
+    } else {
+        info!("Narrator RunningState: skipped (--no-narrator-motion or config/env override)");
+        None
+    };
 
     // Initialize the global input hook system (rdev grab).
     input_hook::init()

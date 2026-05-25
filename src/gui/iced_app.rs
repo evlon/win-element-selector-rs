@@ -30,7 +30,7 @@ use element_selector::capture;
 
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;
-use super::logger::{GuiLogger, init_gui_logger};
+use super::logger::get_gui_logger;
 use super::input_hook::{self, MouseEvent};
 use super::iced_style::ThemeColors;
 use super::persistence;
@@ -167,10 +167,11 @@ pub struct State {
     pub colors: ThemeColors,
 
     // Logging
-    pub gui_logger: GuiLogger,
     pub optimization_in_progress: std::sync::Arc<AtomicBool>,
     pub optimization_rx: Option<std::sync::mpsc::Receiver<Option<OptimizationResult>>>,
+    pub optimization_progress_rx: Option<std::sync::mpsc::Receiver<String>>,
     pub optimization_start_time: Option<Instant>,
+    pub optimization_steps: Vec<element_selector::core::model::OptimizationStep>,
 
     // Similar elements
     pub similar_samples: Vec<SimilarElementSample>,
@@ -310,10 +311,11 @@ impl State {
             ),
 
             colors: ThemeColors::light(),
-            gui_logger: init_gui_logger(1000),
             optimization_in_progress: std::sync::Arc::new(AtomicBool::new(false)),
             optimization_rx: None,
+            optimization_progress_rx: None,
             optimization_start_time: None,
+            optimization_steps: Vec::new(),
 
             similar_samples: Vec::new(),
             similar_mode_active: false,
@@ -777,17 +779,20 @@ impl State {
         }
         self.optimization_in_progress.store(true, Ordering::SeqCst);
         self.status_msg = String::from("正在执行极简优化...");
+        self.optimization_steps.clear();
         self.show_log_panel = true;
-        self.gui_logger.clear();
         let start_time = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
+        let (ptx, prx) = std::sync::mpsc::channel();
         let hierarchy = self.hierarchy.clone();
         let window_selector = self.window_selector.clone();
         let optimization_in_progress = self.optimization_in_progress.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let optimizer = XPathOptimizer::new();
-                optimizer.optimize_minimal(&hierarchy, &window_selector)
+                optimizer.optimize_minimal(&hierarchy, &window_selector, &|msg: &str| {
+                    let _ = ptx.send(msg.to_string());
+                })
             }));
             optimization_in_progress.store(false, Ordering::SeqCst);
             match result {
@@ -801,6 +806,7 @@ impl State {
             }
         });
         self.optimization_rx = Some(rx);
+        self.optimization_progress_rx = Some(prx);
         self.optimization_start_time = Some(start_time);
     }
 
@@ -1096,6 +1102,17 @@ impl State {
     }
 
     fn poll_background_tasks(&mut self) {
+        // 收集优化进度消息
+        if let Some(ref prx) = self.optimization_progress_rx {
+            use element_selector::core::model::{OptimizationStep, OptimizationStepStatus};
+            while let Ok(msg) = prx.try_recv() {
+                self.optimization_steps.push(OptimizationStep {
+                    description: msg,
+                    status: OptimizationStepStatus::InProgress,
+                });
+            }
+        }
+
         if let Some(rx) = self.optimization_rx.take() {
             if let Ok(result) = rx.try_recv() {
                 if let Some(_start_time) = self.optimization_start_time.take() {
@@ -1113,14 +1130,22 @@ impl State {
                                 summary.removed_dynamic_attrs,
                                 summary.simplified_attrs
                             );
+                            // Mark all in-progress steps as done
+                            use element_selector::core::model::OptimizationStepStatus;
+                            for step in &mut self.optimization_steps {
+                                if matches!(step.status, OptimizationStepStatus::InProgress) {
+                                    step.status = OptimizationStepStatus::Done;
+                                }
+                            }
                             self.do_validate();
                             self.save_to_file();
-                            self.show_log_panel = false;
                         }
                         None => {
                             self.status_msg = String::from("极简优化已取消或失败");
                         }
                     }
+                    // 清理进度接收器
+                    self.optimization_progress_rx = None;
                 }
             } else {
                 self.optimization_rx = Some(rx);
@@ -2844,7 +2869,45 @@ fn view_naming_dialog(state: &State) -> Element<'_, Message> {
 
 fn view_log_panel(state: &State) -> Element<'_, Message> {
     let colors = &state.colors;
-    let entries = state.gui_logger.get_logs();
+
+    // 优化进行中：显示用户友好的步骤
+    if state.optimization_in_progress.load(Ordering::SeqCst) || !state.optimization_steps.is_empty() {
+        let mut rows = Vec::new();
+        for step in &state.optimization_steps {
+            let icon = match &step.status {
+                element_selector::core::model::OptimizationStepStatus::Done => "✓",
+                element_selector::core::model::OptimizationStepStatus::InProgress => "⟳",
+                element_selector::core::model::OptimizationStepStatus::Skipped => "·",
+            };
+            let line = text(format!("{} {}", icon, step.description))
+                .size(11)
+                .color(colors.text);
+            rows.push(line.into());
+        }
+        if state.optimization_in_progress.load(Ordering::SeqCst) {
+            rows.push(text("⟳ 正在优化中...").size(11).color(colors.muted).into());
+        }
+
+        let close_btn = button("关闭")
+            .padding([2, 8])
+            .on_press(Message::LogPanelToggled);
+
+        return container(column![
+            row![text("优化过程").size(13), close_btn].spacing(8),
+            scrollable(column(rows)).height(Length::Fixed(200.0)),
+        ].spacing(4))
+        .padding(8)
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(colors.panel_fill)),
+            ..Default::default()
+        })
+        .into();
+    }
+
+    // 默认：显示原始日志（调试用）
+    let entries = get_gui_logger()
+        .map(|l| l.get_logs())
+        .unwrap_or_default();
 
     let mut rows = Vec::new();
     for entry in entries.iter().rev().take(200) {

@@ -780,6 +780,8 @@ pub struct AppConfig {
     pub history: Vec<HistoryEntry>,   // 历史记录，按时间倒序
     /// 是否将纯数字的 AutomationId 视为随机值（不参与共同特征匹配）
     pub ignore_numeric_automation_ids: bool,
+    /// 是否在启动时启用 Narrator RunningState（通过注册表设置）
+    pub enable_narrator_running_state: bool,
 }
 
 impl Default for AppConfig {
@@ -787,6 +789,7 @@ impl Default for AppConfig {
         Self {
             history: Vec::new(),
             ignore_numeric_automation_ids: true,
+            enable_narrator_running_state: true,
         }
     }
 }
@@ -909,6 +912,20 @@ pub struct CommonAncestorPath {
     pub target_control_type: String,
     /// 生成的搜索 XPath（如 //Group/ToolBar//Button）
     pub search_xpath: String,
+}
+
+/// 优化步骤（用户友好的进度显示）
+#[derive(Debug, Clone)]
+pub struct OptimizationStep {
+    pub description: String,
+    pub status: OptimizationStepStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum OptimizationStepStatus {
+    Done,
+    InProgress,
+    Skipped,
 }
 
 #[cfg(test)]
