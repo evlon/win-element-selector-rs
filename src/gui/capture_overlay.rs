@@ -200,11 +200,6 @@ impl CaptureOverlay {
         OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
     }
 
-    #[allow(dead_code)]
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-
     fn smart_position(&mut self) -> (i32, i32) {
         let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
@@ -235,7 +230,6 @@ impl CaptureOverlay {
         }
     }
 
-    #[allow(dead_code)]
     pub fn update_position(&mut self) {
         if let Some(hwnd) = get_overlay_hwnd() {
             let (x, y) = self.smart_position();

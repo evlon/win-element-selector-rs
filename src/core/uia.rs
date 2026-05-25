@@ -1864,6 +1864,98 @@ pub mod windows_impl {
         vec![]
     }
 
+    /// Find all matching elements searching from the Desktop root.
+    /// Used for batch/common element searches where the target may be in a different
+    /// window tree than the window selector (e.g., hybrid Qt+WebView apps like WeChat).
+    pub fn find_all_elements_from_root(
+        element_xpath: &str,
+        random_range: f32,
+    ) -> Vec<crate::api::types::ElementInfo> {
+        use crate::api::types::{ElementInfo, Rect, Point};
+        use rand::Rng;
+
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+
+        let desktop = match unsafe { auto.GetRootElement() } {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("[find_from_root] Failed to get root element: {:?}", e);
+                return vec![];
+            }
+        };
+
+        log::info!("[find_from_root] Searching from Desktop root: xpath='{}'", element_xpath);
+        let (elements, _) = match find_by_xpath_detailed(&auto, &desktop, element_xpath) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("[find_from_root] XPath failed: {}", e);
+                return vec![];
+            }
+        };
+
+        if elements.is_empty() {
+            log::info!("[find_from_root] No elements found");
+            return vec![];
+        }
+
+        log::info!("[find_from_root] Found {} elements", elements.len());
+
+        let mut rng = rand::thread_rng();
+        elements.iter().filter_map(|elem| {
+            let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
+            if rect.is_none() {
+                return None;
+            }
+            let r = rect.unwrap();
+            let api_rect = Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            };
+            let center = api_rect.center();
+
+            let half_range_w = api_rect.width as f32 * random_range / 2.0;
+            let half_range_h = api_rect.height as f32 * random_range / 2.0;
+
+            let offset_x = if half_range_w > 0.0 {
+                rng.gen_range(-half_range_w..half_range_w) as i32
+            } else {
+                0
+            };
+            let offset_y = if half_range_h > 0.0 {
+                rng.gen_range(-half_range_h..half_range_h) as i32
+            } else {
+                0
+            };
+            let center_random = Point::new(center.x + offset_x, center.y + offset_y);
+
+            Some(ElementInfo {
+                rect: api_rect,
+                center,
+                center_random,
+                control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                name: get_bstr(unsafe { elem.CurrentName() }),
+                automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
+                class_name: get_bstr(unsafe { elem.CurrentClassName() }),
+                framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
+                localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
+                is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+                is_offscreen: unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) },
+                is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
+                accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
+                access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
+                item_type: get_bstr(unsafe { elem.CurrentItemType() }),
+                item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
+                process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+            })
+        }).collect()
+    }
+
     /// 从 UIA 元素提取子元素特征
     /// 
     /// # Arguments

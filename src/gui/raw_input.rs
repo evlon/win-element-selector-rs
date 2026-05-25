@@ -73,12 +73,3 @@ pub fn init() -> Receiver<()> {
     info!("[raw_input] ESC 全局检测已初始化");
     esc_rx
 }
-
-pub fn cleanup() {
-    if !INITIALIZED.load(Ordering::SeqCst) {
-        return;
-    }
-
-    INITIALIZED.store(false, Ordering::SeqCst);
-    info!("[raw_input] Raw Input 清理完成");
-}

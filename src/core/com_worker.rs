@@ -341,13 +341,15 @@ impl ComWorker {
     /// 查找共同元素（基于共同祖先链 XPath）
     fn do_find_common_elements(
         _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
-        window_selector: &str,
+        _window_selector: &str,
         xpath: &str,
     ) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
-        log::info!("[ComWorker] 开始查找共同元素: selector={}, xpath={}", window_selector, xpath);
+        log::info!("[ComWorker] 开始查找共同元素 (root 搜索): xpath={}", xpath);
 
-        // 复用现有的 find_all_elements_detailed
-        let results = crate::core::uia::find_all_elements_detailed(window_selector, xpath, 5.0);
+        // 跳过 window selector，直接从 Desktop 根节点搜索。
+        // 混合应用（如微信 Qt+WebView）的 UIA 树可能跨多个窗口，
+        // 使用 window selector 会导致找不到目标元素。
+        let results = crate::core::uia::find_all_elements_from_root(xpath, 5.0);
         Ok(results)
     }
 
