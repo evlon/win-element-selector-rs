@@ -516,12 +516,19 @@ pub async fn start_idle_motion(body: web::Json<IdleMotionStartRequest>) -> impl 
     
     // 检查当前状态
     let mut state = IDLE_STATE.write().await;
-    
+
+    // 如果已在运行，先停止再启动（允许重复调用）
     if state.active {
-        return HttpResponse::Ok().json(IdleMotionStartResponse {
-            success: false,
-            error: Some("空闲移动已在运行".to_string()),
-        });
+        if let Some(token) = state.cancel_token.take() {
+            token.cancel();
+        }
+        *state = IdleMotionState::default();
+        drop(state);
+
+        // 短暂等待让后台任务退出
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        state = IDLE_STATE.write().await;
     }
     
     // 构建窗口选择器

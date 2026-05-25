@@ -114,7 +114,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         let _center = rect_api.center();
                         
                         // 计算随机点击点
-                        let click_point = calculate_random_click_point(&rect_api, options.random_range);
+                        let click_point = calculate_random_click_point(&rect_api, options.random_range, &options.click_area);
                         
                         // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
                         let click_point_copy = click_point;
@@ -166,7 +166,11 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             
                             // 执行点击
                             let click_start = std::time::Instant::now();
-                            let click_result = mouse_control::click_at(click_point_copy);
+                            let click_result = if options_copy.button == "right" {
+                                mouse_control::right_click_at(click_point_copy)
+                            } else {
+                                mouse_control::click_at(click_point_copy)
+                            };
                             let click_duration = click_start.elapsed();
                             info!("Mouse click completed in {:?}", click_duration);
                             
@@ -275,16 +279,37 @@ fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> Str
 }
 
 /// 计算随机点击点
-fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32) -> Point {
+fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32, click_area: &Option<super::types::ClickArea>) -> Point {
     use rand::Rng;
-    
-    let center = rect.center();
-    let half_range_w = rect.width as f32 * range_percent / 2.0;
-    let half_range_h = rect.height as f32 * range_percent / 2.0;
-    
+
+    // 计算有效区域边界
+    let (eff_left, eff_right, eff_top, eff_bottom) = if let Some(ref area) = click_area {
+        let left = area.left.unwrap_or(0.0);
+        let right = area.right.unwrap_or(0.0);
+        let top = area.top.unwrap_or(0.0);
+        let bottom = area.bottom.unwrap_or(0.0);
+
+        let eff_left = rect.x as f32 + rect.width as f32 * left;
+        let eff_right = rect.x as f32 + rect.width as f32 * (1.0 - right);
+        let eff_top = rect.y as f32 + rect.height as f32 * top;
+        let eff_bottom = rect.y as f32 + rect.height as f32 * (1.0 - bottom);
+        (eff_left, eff_right, eff_top, eff_bottom)
+    } else {
+        // 无 clickArea 时以中心为基准，保持原有行为
+        let cx = rect.center().x as f32;
+        let cy = rect.center().y as f32;
+        let hw = rect.width as f32 * range_percent / 2.0;
+        let hh = rect.height as f32 * range_percent / 2.0;
+        (cx - hw, cx + hw, cy - hh, cy + hh)
+    };
+
+    let center_x = (eff_left + eff_right) / 2.0;
+    let center_y = (eff_top + eff_bottom) / 2.0;
+    let half_range_w = (eff_right - eff_left) * range_percent / 2.0;
+    let half_range_h = (eff_bottom - eff_top) * range_percent / 2.0;
+
     let mut rng = rand::thread_rng();
-    
-    // 防止空范围导致 panic
+
     let offset_x = if half_range_w > 0.0 {
         rng.gen_range(-half_range_w..half_range_w) as i32
     } else {
@@ -295,6 +320,6 @@ fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32) -
     } else {
         0
     };
-    
-    Point::new(center.x + offset_x, center.y + offset_y)
+
+    Point::new(center_x as i32 + offset_x, center_y as i32 + offset_y)
 }

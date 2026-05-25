@@ -248,7 +248,28 @@ pub struct MouseClickOptions {
     /// 点击后停顿（毫秒）
     #[serde(rename = "pauseAfter", default)]
     pub pause_after: u64,
+    /// 点击按钮类型: "left" | "right"
+    #[serde(default = "default_button")]
+    pub button: String,
+    /// 点击区域限制（按比例缩小可点击范围）
+    #[serde(rename = "clickArea", default)]
+    pub click_area: Option<ClickArea>,
 }
+
+/// 点击区域限制（按比例）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ClickArea {
+    /// 左侧排除比例（0-1），如 0.3 表示左侧 30% 区域不点击
+    pub left: Option<f32>,
+    /// 右侧排除比例（0-1），如 0.3 表示右侧 30% 区域不点击
+    pub right: Option<f32>,
+    /// 顶部排除比例（0-1）
+    pub top: Option<f32>,
+    /// 底部排除比例（0-1）
+    pub bottom: Option<f32>,
+}
+
+fn default_button() -> String { "left".to_string() }
 
 /// 鼠标点击请求
 #[derive(Debug, Clone, Deserialize)]

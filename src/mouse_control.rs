@@ -12,6 +12,7 @@ use windows::Win32::{
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT,
         MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
         MOUSE_EVENT_FLAGS,
     },
     UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
@@ -96,6 +97,29 @@ pub fn click_at(point: super::api::types::Point) -> anyhow::Result<()> {
     send_mouse_event(MOUSEEVENTF_LEFTUP, 0, 0);
     
     info!("Click executed at ({}, {})", point.x, point.y);
+    Ok(())
+}
+
+/// 在指定位置执行右键点击
+pub fn right_click_at(point: super::api::types::Point) -> anyhow::Result<()> {
+    // 先移动到目标位置
+    set_cursor_position(point.x, point.y);
+
+    // 短暂停顿模拟真实点击
+    std::thread::sleep(Duration::from_millis(50));
+
+    // 模拟按下
+    send_mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0);
+
+    // 按下持续时间（50-100ms 随机）
+    let mut rng = rand::thread_rng();
+    let press_duration = rng.gen_range(50u64..100u64);
+    std::thread::sleep(Duration::from_millis(press_duration));
+
+    // 模拟释放
+    send_mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0);
+
+    info!("Right click executed at ({}, {})", point.x, point.y);
     Ok(())
 }
 
