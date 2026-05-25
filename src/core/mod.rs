@@ -13,6 +13,7 @@ pub mod com_worker;
 pub mod similarity;
 pub mod screenshot;
 pub mod commonality;
+pub mod narrator;
 
 // Re-export commonly used types for convenience
 pub use model::*;

@@ -29,10 +29,14 @@ struct Args {
     port: u16,
 
     /// 详细日志级别 (可多次使用: -v, -vv, -vvv)
-    /// 
+    ///
     /// 提示：也可以使用环境变量 RUST_LOG=debug 启用详细日志
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// 跳过启用 Narrator RunningState（默认启用以提升 UIA 元素可见性）
+    #[arg(long)]
+    no_narrator_motion: bool,
 }
 
 /// 健康检查接口
@@ -66,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr = format!("{}:{}", args.bind, args.port);
     info!("element-selector-server starting on {}", bind_addr);
-    
+
     // COM 必须在主线程初始化 (STA)
     {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -77,7 +81,16 @@ async fn main() -> anyhow::Result<()> {
         }
         info!("COM initialized (STA)");
     }
-    
+
+    // Enable Narrator RunningState for full UIA tree visibility (configurable).
+    let skip_narrator = args.no_narrator_motion || !element_selector::core::narrator::should_enable();
+    let _narrator_guard = if !skip_narrator {
+        Some(element_selector::core::narrator::enable_narrator_running_state())
+    } else {
+        info!("Narrator RunningState: skipped (--no-narrator-motion or env override)");
+        None
+    };
+
     // Initialize global COM worker thread (single-threaded COM management)
     element_selector::core::com_worker::init_global_com_worker()
         .expect("Failed to initialize COM worker");
