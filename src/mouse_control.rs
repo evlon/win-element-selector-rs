@@ -12,7 +12,7 @@ use windows::Win32::{
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT,
         MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
         MOUSE_EVENT_FLAGS,
     },
     UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
@@ -120,6 +120,13 @@ pub fn right_click_at(point: super::api::types::Point) -> anyhow::Result<()> {
     send_mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0);
 
     info!("Right click executed at ({}, {})", point.x, point.y);
+    Ok(())
+}
+
+/// 鼠标滚轮滚动（delta > 0 向上，delta < 0 向下）
+pub fn scroll_wheel(delta: i32) -> anyhow::Result<()> {
+    send_mouse_scroll_event(delta);
+    info!("Scroll wheel delta={}", delta);
     Ok(())
 }
 
@@ -296,12 +303,33 @@ fn send_mouse_event(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) {
             time: 0,
             dwExtraInfo: 0,
         };
-        
+
         let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 { mi: mouse_input },
         };
-        
+
+        let inputs = [input];
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn send_mouse_scroll_event(delta: i32) {
+    unsafe {
+        let mouse_input = MOUSEINPUT {
+            dx: 0,
+            dy: 0,
+            mouseData: delta as u32,
+            dwFlags: MOUSEEVENTF_WHEEL,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: mouse_input },
+        };
+
         let inputs = [input];
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }

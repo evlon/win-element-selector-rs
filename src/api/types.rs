@@ -299,6 +299,52 @@ pub struct MouseClickResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 滚动 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 滚动选项
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MouseScrollOptions {
+    /// WHEEL_DELTA 单位，默认 120
+    pub delta: Option<i32>,
+    /// 滚动次数，默认 3
+    #[serde(default = "default_scroll_times")]
+    pub times: Option<u32>,
+    /// 等待出现的 xpath
+    pub wait: Option<String>,
+    /// 等待超时 ms，默认 5000
+    pub timeout: Option<u64>,
+    /// 是否自动计算 delta（基于容器高度），默认 false
+    #[serde(rename = "autoDelta", default)]
+    pub auto_delta: Option<bool>,
+    /// 容器高度倍率（0-1），默认 0.8
+    #[serde(rename = "deltaFactor", default = "default_delta_factor")]
+    pub delta_factor: Option<f32>,
+}
+
+fn default_scroll_times() -> Option<u32> { Some(3) }
+fn default_delta_factor() -> Option<f32> { Some(0.8) }
+
+/// 滚动请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct MouseScrollRequest {
+    pub xpath: String,
+    pub options: Option<MouseScrollOptions>,
+}
+
+/// 滚动响应
+#[derive(Debug, Clone, Serialize)]
+pub struct MouseScrollResponse {
+    pub success: bool,
+    /// 实际滚动次数
+    pub scrolled: u32,
+    /// 是否找到目标
+    #[serde(rename = "targetFound")]
+    pub target_found: bool,
+    pub error: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════════════════════════════════════
 

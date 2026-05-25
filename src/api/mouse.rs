@@ -8,6 +8,7 @@ use log::{info, warn};
 use super::types::{
     MouseMoveRequest, MouseMoveResponse, MouseMoveOptions,
     MouseClickRequest, MouseClickResponse, MouseClickOptions,
+    MouseScrollRequest, MouseScrollResponse, MouseScrollOptions,
     Point,
 };
 use super::super::mouse_control;
@@ -322,4 +323,188 @@ fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32, c
     };
 
     Point::new(center_x as i32 + offset_x, center_y as i32 + offset_y)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 滚动
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// POST /api/mouse/scroll
+/// 滚动鼠标滚轮，边滚边检测 wait xpath
+pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder {
+    let request = body.into_inner();
+    let options = request.options.unwrap_or(MouseScrollOptions::default());
+    let times = options.times.unwrap_or(3);
+    let delta = options.delta.unwrap_or(120);
+    let timeout_ms = options.timeout.unwrap_or(5000);
+    let auto_delta = options.auto_delta.unwrap_or(false);
+    let delta_factor = options.delta_factor.unwrap_or(0.8);
+
+    info!(
+        "API: /api/mouse/scroll xpath='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} timeout={}ms",
+        request.xpath, times, delta, auto_delta, delta_factor, options.wait, timeout_ms
+    );
+
+    // Step 1: 获取元素坐标
+    let xpath_for_query = request.xpath.clone();
+    let element_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
+        }
+
+        super::super::capture::validate_selector_and_xpath_detailed(
+            "Window",
+            &xpath_for_query,
+            &[],
+        )
+    })
+    .await;
+
+    let element_result = match element_result {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(MouseScrollResponse {
+                success: false,
+                scrolled: 0,
+                target_found: false,
+                error: Some(format!("内部错误: {}", e)),
+            });
+        }
+    };
+
+    use super::super::model::ValidationResult;
+
+    let (scroll_point, container_height_for_auto) = match &element_result.overall {
+        ValidationResult::Found { first_rect, .. } => {
+            if let Some(rect) = first_rect {
+                let rect_api: super::types::Rect = rect.clone().into();
+                let point = Point::new(
+                    rect_api.x as i32 + rect_api.width as i32 / 2,
+                    rect_api.y as i32 + rect_api.height as i32 / 2,
+                );
+                (point, Some(rect_api.height))
+            } else {
+                return HttpResponse::Ok().json(MouseScrollResponse {
+                    success: false,
+                    scrolled: 0,
+                    target_found: false,
+                    error: Some("元素坐标获取失败".to_string()),
+                });
+            }
+        }
+        ValidationResult::NotFound => {
+            return HttpResponse::Ok().json(MouseScrollResponse {
+                success: false,
+                scrolled: 0,
+                target_found: false,
+                error: Some(format!("未找到元素: {}", request.xpath)),
+            });
+        }
+        ValidationResult::Error(e) => {
+            return HttpResponse::Ok().json(MouseScrollResponse {
+                success: false,
+                scrolled: 0,
+                target_found: false,
+                error: Some(e.clone()),
+            });
+        }
+        _ => {
+            return HttpResponse::Ok().json(MouseScrollResponse {
+                success: false,
+                scrolled: 0,
+                target_found: false,
+                error: Some("校验状态未知".to_string()),
+            });
+        }
+    };
+
+    // Step 2: 移动到元素中心
+    with_auto_pause(|| async {
+        let start_point = mouse_control::get_cursor_position();
+        let _ = mouse_control::humanized_move(start_point, scroll_point, 400, "bezier");
+
+        // Step 3: 循环滚动并检测 wait xpath
+        let mut scrolled: u32 = 0;
+        let start_time = std::time::Instant::now();
+        let mut current_delta = delta; // 初始 delta
+        let mut did_initial_scroll = false;
+
+        while scrolled < times {
+            // 检测 wait xpath
+            if let Some(ref wait_xpath) = options.wait {
+                if start_time.elapsed().as_millis() as u64 >= timeout_ms {
+                    // 超时，返回结果
+                    info!("Scroll timeout after {} scrolls", scrolled);
+                    return HttpResponse::Ok().json(MouseScrollResponse {
+                        success: true,
+                        scrolled,
+                        target_found: false,
+                        error: Some(format!("超时 {}ms", timeout_ms)),
+                    });
+                }
+
+                // 检测 wait xpath 是否存在
+                let wait_xpath_clone = wait_xpath.clone();
+                let wait_result = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+                        log::error!("COM STA init failed: {}", e);
+                    }
+                    super::super::capture::validate_selector_and_xpath_detailed(
+                        "Window",
+                        &wait_xpath_clone,
+                        &[],
+                    )
+                })
+                .await;
+
+                if let Ok(wr) = wait_result {
+                    if matches!(wr.overall, ValidationResult::Found { .. }) {
+                        // 找到目标，返回
+                        info!("Wait xpath found after {} scrolls", scrolled);
+                        return HttpResponse::Ok().json(MouseScrollResponse {
+                            success: true,
+                            scrolled,
+                            target_found: true,
+                            error: None,
+                        });
+                    }
+                }
+            }
+
+            // 如果启用了 auto_delta，第一次滚动使用固定 delta，然后计算自适应 delta
+            if auto_delta && !did_initial_scroll && scrolled == 0 {
+                // 先滚动一次固定 delta
+                let _ = mouse_control::scroll_wheel(current_delta);
+                did_initial_scroll = true;
+
+                // 短暂等待让页面响应
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                // 查询容器元素的新 rect 获取可视高度
+                if let Some(height) = container_height_for_auto {
+                    // 使用容器高度计算自适应 delta
+                    current_delta = (height as f32 * delta_factor) as i32;
+                    info!("Auto delta calculated: container_height={} factor={} delta={}", height, delta_factor, current_delta);
+                }
+                scrolled += 1;
+                continue;
+            }
+
+            // 执行一次滚动
+            let _ = mouse_control::scroll_wheel(current_delta);
+            scrolled += 1;
+
+            // 滚动间隔，给页面响应时间
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        }
+
+        // 全部滚动完成
+        info!("Scroll completed {} times", scrolled);
+        HttpResponse::Ok().json(MouseScrollResponse {
+            success: true,
+            scrolled,
+            target_found: options.wait.is_none(),
+            error: None,
+        })
+    }).await
 }
