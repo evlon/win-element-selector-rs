@@ -24,7 +24,14 @@ pub enum UiaRequest {
         y: i32,
         response: Sender<anyhow::Result<CaptureResult>>,
     },
-    
+
+    /// 增强捕获：RawViewWalker + RECT 命中测试
+    CaptureEnhancedAt {
+        x: i32,
+        y: i32,
+        response: Sender<anyhow::Result<CaptureResult>>,
+    },
+
     /// 查找元素
     FindElement {
         window_selector: String,
@@ -167,6 +174,13 @@ impl ComWorker {
                 log::debug!("[PERF] capture_at completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
+            UiaRequest::CaptureEnhancedAt { x, y, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] capture_enhanced_at started for ({}, {})", x, y);
+                let result = Self::do_capture_enhanced(automation, x, y);
+                log::info!("[PERF] capture_enhanced_at completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
             UiaRequest::FindElement { window_selector, xpath, random_range, response } => {
                 let start = std::time::Instant::now();
                 log::debug!("[PERF] find_element started");
@@ -209,11 +223,18 @@ impl ComWorker {
         x: i32,
         y: i32,
     ) -> anyhow::Result<CaptureResult> {
-        // 【关键修复】直接调用 uia.rs 的底层函数，避免递归
-        // uia.rs 内部会使用 thread_local 的 automation 实例
         Ok(crate::core::uia::capture_at_point(x, y))
     }
-    
+
+    /// 执行增强捕获操作
+    fn do_capture_enhanced(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        x: i32,
+        y: i32,
+    ) -> anyhow::Result<CaptureResult> {
+        Ok(crate::core::uia::capture_enhanced_at_point(x, y))
+    }
+
     /// 执行查找操作
     fn do_find_element(
         _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
@@ -356,15 +377,11 @@ impl ComWorker {
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
-        
+
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::CaptureAt {
-                x,
-                y,
-                response: response_sender,
+                x, y, response: response_sender,
             })?;
-            
-            // 【关键修复】添加超时机制，防止永久阻塞
             response_receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .map_err(|e| anyhow::anyhow!("COM worker timeout after 10s: {:?}", e))?
@@ -372,7 +389,24 @@ impl ComWorker {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
     }
-    
+
+    /// 发送增强捕获请求
+    pub fn capture_enhanced_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::CaptureEnhancedAt {
+                x, y, response: response_sender,
+            })?;
+            // 增强捕获可能更耗时（全树枚举），给 30 秒超时
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .map_err(|e| anyhow::anyhow!("COM worker enhanced capture timeout: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 发送查找请求
     pub fn find_element(
         &self,
@@ -519,6 +553,16 @@ pub fn global_capture_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         worker.capture_at(x, y)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized. Call init_global_com_worker() first."))
+    }
+}
+
+/// 使用全局 COM 工作线程执行增强捕获（RawViewWalker + RECT 命中测试）
+pub fn global_capture_enhanced_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.capture_enhanced_at(x, y)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
     }
 }
 

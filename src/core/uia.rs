@@ -982,6 +982,182 @@ pub mod windows_impl {
         }
     }
 
+    /// Enhanced capture: enumerate all descendants of the target window using RawViewWalker,
+    /// then find the innermost element whose BoundingRectangle contains the cursor point.
+    /// This solves the problem where ElementFromPoint returns a wrapper/container element
+    /// (e.g., WebView-based apps) instead of the actual target element.
+    pub fn capture_enhanced_at_point(x: i32, y: i32) -> CaptureResult {
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(e) => {
+                return CaptureResult {
+                    hierarchy: vec![], cursor_x: x, cursor_y: y,
+                    error: Some(format!("COM 初始化失败: {}", e)),
+                    window_info: None,
+                };
+            }
+        };
+        match do_capture_enhanced(&auto, x, y) {
+            Ok(result) => result,
+            Err(e) => {
+                error!("capture_enhanced_at_point({},{}) failed: {}", x, y, e);
+                CaptureResult {
+                    hierarchy: vec![], cursor_x: x, cursor_y: y,
+                    error: Some(format!("增强捕获失败: {}", e)),
+                    window_info: None,
+                }
+            }
+        }
+    }
+
+    fn do_capture_enhanced(auto: &IUIAutomation, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
+        let pt = POINT { x, y };
+
+        // Step 1: ElementFromPoint to find the target window
+        let hit_elem = unsafe {
+            auto.ElementFromPoint(pt)
+                .map_err(|e| anyhow::anyhow!("ElementFromPoint: {}", e))?
+        };
+        let walker_control = unsafe {
+            auto.ControlViewWalker()
+                .map_err(|e| anyhow::anyhow!("ControlViewWalker: {}", e))?
+        };
+        let desktop = unsafe {
+            auto.GetRootElement()
+                .map_err(|e| anyhow::anyhow!("GetRootElement: {}", e))?
+        };
+
+        // Walk up to find the top-level window (direct child of Desktop)
+        let mut target_window = hit_elem.clone();
+        let mut current = hit_elem.clone();
+        for _ in 0..32 {
+            let parent = unsafe { walker_control.GetParentElement(&current) };
+            match parent {
+                Ok(p) => {
+                    let is_desktop_child = unsafe {
+                        auto.CompareElements(&p, &desktop)
+                            .unwrap_or(windows::core::BOOL(0))
+                            .as_bool()
+                    };
+                    if is_desktop_child {
+                        target_window = current.clone();
+                        break;
+                    }
+                    current = p;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Step 2: RawViewWalker to enumerate all descendants of the target window
+        let raw_walker = unsafe {
+            auto.RawViewWalker()
+                .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?
+        };
+        log::info!("[Enhanced Capture] Enumerating descendants of target window using RawViewWalker");
+
+        #[derive(Clone)]
+        struct HitCandidate { elem: IUIAutomationElement, area: i64, depth: usize }
+
+        let mut candidates: Vec<HitCandidate> = Vec::new();
+        use std::collections::VecDeque;
+        let mut queue: VecDeque<(IUIAutomationElement, usize)> = VecDeque::new();
+
+        // Seed with direct children
+        let mut child = unsafe { raw_walker.GetFirstChildElement(&target_window).ok() };
+        while let Some(c) = child {
+            let next = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            queue.push_back((c, 1));
+            child = next;
+        }
+
+        const MAX_NODES: usize = 5000;
+        const MAX_DEPTH: usize = 50;
+        let mut visited = 0;
+
+        while let Some((elem, depth)) = queue.pop_front() {
+            visited += 1;
+            if visited > MAX_NODES { log::warn!("[Enhanced Capture] Reached max nodes ({})", MAX_NODES); break; }
+            if depth > MAX_DEPTH { continue; }
+
+            if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                if w > 0 && h > 0 && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                    candidates.push(HitCandidate { elem: elem.clone(), area: w as i64 * h as i64, depth });
+                }
+                let mut sub_child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
+                let mut cnt = 0;
+                while let Some(ref sc) = sub_child {
+                    queue.push_back((sc.clone(), depth + 1));
+                    let next = unsafe { raw_walker.GetNextSiblingElement(sc).ok() };
+                    sub_child = next;
+                    cnt += 1;
+                    if cnt > 200 { break; }
+                }
+            }
+        }
+
+        log::info!("[Enhanced Capture] Visited {} nodes, found {} candidates", visited, candidates.len());
+        if candidates.is_empty() {
+            return Err(anyhow::anyhow!("没有找到包含光标位置的元素"));
+        }
+
+        // Step 3: Pick innermost (smallest area, then deepest)
+        candidates.sort_by_key(|c| (c.area, -(c.depth as i64)));
+        let target_elem = candidates[0].elem.clone();
+        log::info!("[Enhanced Capture] Selected innermost element (area={}, depth={})", candidates[0].area, candidates[0].depth);
+
+        // Step 4: Build ancestor chain via RawViewWalker
+        let mut chain: Vec<IUIAutomationElement> = vec![target_elem.clone()];
+        let mut cur = target_elem.clone();
+        for _ in 0..50 {
+            let parent = unsafe { raw_walker.GetParentElement(&cur) };
+            match parent {
+                Ok(p) => {
+                    chain.push(p.clone());
+                    let same = unsafe { auto.CompareElements(&p, &target_window).unwrap_or(windows::core::BOOL(0)).as_bool() };
+                    if same { break; }
+                    cur = p;
+                }
+                Err(_) => break,
+            }
+        }
+        chain.reverse();
+
+        // Step 5: Build hierarchy
+        let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
+        for (idx, elem) in chain.iter().enumerate() {
+            if let Some(node) = element_to_node(elem, &auto) {
+                let mut node = node;
+                node.depth_from_window = idx;
+                hierarchy.push(node);
+            }
+        }
+
+        if let Some(last) = hierarchy.last_mut() {
+            last.is_target = true;
+            last.index = sibling_index(&target_elem, &walker_control).unwrap_or(0);
+            if last.index > 0 {
+                if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
+                    f.value = last.index.to_string(); f.enabled = true;
+                }
+                last.sibling_count = count_siblings(&target_elem, &walker_control).unwrap_or(0);
+            }
+        }
+
+        let window_info = if hierarchy.len() > 1 {
+            let top = &hierarchy[0];
+            Some(WindowInfo {
+                title: top.name.clone(), class_name: top.class_name.clone(),
+                process_id: top.process_id,
+                process_name: get_process_name_by_id(top.process_id),
+            })
+        } else { None };
+
+        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info })
+    }
+
     /// Enumerate all top-level windows on desktop.
     /// Uses feature-based filtering instead of hardcoded class names.
     /// 

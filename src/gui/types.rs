@@ -53,6 +53,24 @@ pub enum CaptureState {
     Capturing,
 }
 
+/// 捕获模式
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaptureMode {
+    /// 普通捕获：ElementFromPoint + ControlViewWalker
+    Normal,
+    /// 增强捕获：RawViewWalker + RECT 命中测试（适用于 WebView 等复杂场景）
+    Enhanced,
+}
+
+impl std::fmt::Display for CaptureMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaptureMode::Normal => write!(f, "普通捕获"),
+            CaptureMode::Enhanced => write!(f, "增强捕获"),
+        }
+    }
+}
+
 /// 持久化捕获数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCapture {

@@ -45,6 +45,7 @@ pub enum Message {
     // Top bar
     ValidatePressed,
     CapturePressed,
+    CaptureModeChanged(CaptureMode),
     CancelCapture,
     CompleteCapture,
     EscapePressed,
@@ -149,6 +150,7 @@ pub struct State {
 
     // Capture
     pub capture_state: CaptureState,
+    pub capture_mode: CaptureMode,
     pub overlay: CaptureOverlay,
 
     // Status & history
@@ -291,6 +293,7 @@ impl State {
             detailed_validation: None,
 
             capture_state: CaptureState::Idle,
+            capture_mode: CaptureMode::Normal,
             overlay: CaptureOverlay::new(),
 
             status_msg,
@@ -668,7 +671,10 @@ impl State {
                 self.overlay.hide();
                 self.capture_state = CaptureState::Capturing;
 
-                let result = element_selector::core::uia::capture_at_point(mx, my);
+                let result = match self.capture_mode {
+                    CaptureMode::Normal => element_selector::core::uia::capture_at_point(mx, my),
+                    CaptureMode::Enhanced => element_selector::core::uia::capture_enhanced_at_point(mx, my),
+                };
 
                 if let Some(err) = &result.error {
                     self.status_msg = format!("捕获失败: {}", err);
@@ -824,7 +830,10 @@ impl State {
         let result = if let Some(cached) = self.cached_hover_result.take() {
             cached
         } else {
-            capture::capture_at(x, y)
+            match self.capture_mode {
+                CaptureMode::Normal => capture::capture_at(x, y),
+                CaptureMode::Enhanced => capture::capture_enhanced_at(x, y),
+            }
         };
 
         if let Some(err) = &result.error {
@@ -1325,6 +1334,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.cancel_capture();
             }
         }
+        Message::CaptureModeChanged(mode) => {
+            state.capture_mode = mode;
+        }
         Message::CancelCapture => {
             if state.capture_state != CaptureState::Idle {
                 state.cancel_capture();
@@ -1782,9 +1794,17 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .style(move |_, _| validation_button_style(state, colors))
         .on_press(Message::ValidatePressed);
 
-    let capture_btn = button(text(capture_button_label(state)))
-        .padding([4, 12])
-        .on_press(Message::CapturePressed);
+    // Capture button with mode selector dropdown
+    let capture_modes = vec![CaptureMode::Normal, CaptureMode::Enhanced];
+    let mode_pick = pick_list(capture_modes, Some(state.capture_mode.clone()), Message::CaptureModeChanged)
+        .width(Length::Fixed(80.0));
+
+    let capture_group = row![
+        button(text(capture_button_label(state)))
+            .padding([4, 12])
+            .on_press(Message::CapturePressed),
+        mode_pick,
+    ].spacing(2);
 
     // "完成捕获" button: shown during capture when samples have been added
     let complete_capture_btn = if matches!(&state.capture_state, CaptureState::WaitingClick { .. }) && !state.similar_samples.is_empty() {
@@ -1812,7 +1832,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .padding([4, 8])
         .on_press(Message::LogPanelToggled);
 
-    let mut items = vec![Space::with_width(Length::Fill).into(), validate_btn.into(), capture_btn.into()];
+    let mut items = vec![Space::with_width(Length::Fill).into(), validate_btn.into(), capture_group.into()];
     if let Some(btn) = complete_capture_btn {
         items.push(btn.into());
     }

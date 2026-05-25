@@ -59,6 +59,20 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
     }
 }
 
+/// Enhanced capture: uses RawViewWalker + RECT hit-test to find the innermost element.
+/// Useful for WebView-based apps where ElementFromPoint returns a wrapper element.
+pub fn capture_enhanced_at(x: i32, y: i32) -> CaptureResult {
+    match crate::core::com_worker::global_capture_enhanced_at(x, y) {
+        Ok(result) => result,
+        Err(e) => CaptureResult {
+            hierarchy: vec![],
+            cursor_x: x, cursor_y: y,
+            error: Some(format!("增强捕获失败: {}", e)),
+            window_info: None,
+        },
+    }
+}
+
 /// Validate using window selector and element XPath with detailed per-segment results.
 pub fn validate_selector_and_xpath_detailed(
     window_selector: &str,
