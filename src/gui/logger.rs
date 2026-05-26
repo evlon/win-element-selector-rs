@@ -49,6 +49,7 @@ impl GuiLogger {
     }
 
     /// 清空日志
+    #[allow(dead_code)]
     pub fn clear(&self) {
         self.logs.lock().unwrap().clear();
     }

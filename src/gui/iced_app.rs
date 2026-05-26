@@ -16,6 +16,8 @@ use iced::{
 };
 use iced::futures::SinkExt;
 use iced::widget::pane_grid::{self, PaneGrid, Axis, Configuration};
+use iced_aw::drop_down::DropDown;
+use iced::border::Radius;
 use log::Level;
 use log::info;
 
@@ -45,7 +47,9 @@ pub enum Message {
     // Top bar
     ValidatePressed,
     CapturePressed,
-    CaptureModeChanged(CaptureMode),
+    CaptureActionSelected(CaptureMode),
+    CaptureMenuToggled,
+    CaptureMenuDismissed,
     CancelCapture,
     CompleteCapture,
     EscapePressed,
@@ -151,6 +155,7 @@ pub struct State {
     // Capture
     pub capture_state: CaptureState,
     pub capture_mode: CaptureMode,
+    pub capture_menu_open: bool,
     pub overlay: CaptureOverlay,
 
     // Status & history
@@ -294,6 +299,7 @@ impl State {
 
             capture_state: CaptureState::Idle,
             capture_mode: CaptureMode::Normal,
+            capture_menu_open: false,
             overlay: CaptureOverlay::new(),
 
             status_msg,
@@ -827,6 +833,8 @@ impl State {
         self.overlay.hide();
         self.capture_state = CaptureState::Capturing;
 
+        // Use cached hover result if available (same mode, same position),
+        // otherwise do a fresh capture (e.g., mouse moved slightly after hover).
         let result = if let Some(cached) = self.cached_hover_result.take() {
             cached
         } else {
@@ -933,11 +941,13 @@ impl State {
     }
 
     fn highlight_element_at(&mut self, x: i32, y: i32) {
-        // 【不再调用 hide_sync】让 update_highlight 在结果到达时无缝切换高亮。
-        // hide_sync() 会立即销毁当前高亮，造成 50-100ms 的空白间隙。
+        let mode = self.capture_mode;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = capture::capture_at(x, y);
+            let result = match mode {
+                CaptureMode::Normal => capture::capture_at(x, y),
+                CaptureMode::Enhanced => capture::capture_enhanced_at(x, y),
+            };
             let _ = tx.send((x, y, result));
         });
         self.pending_highlight_rx = Some(rx);
@@ -1334,8 +1344,19 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.cancel_capture();
             }
         }
-        Message::CaptureModeChanged(mode) => {
+        Message::CaptureActionSelected(mode) => {
+            info!("[CaptureAction] Mode selected: {:?}", mode);
+            state.capture_menu_open = false;
             state.capture_mode = mode;
+            if state.capture_state == CaptureState::Idle {
+                state.start_capture();
+            }
+        }
+        Message::CaptureMenuToggled => {
+            state.capture_menu_open = !state.capture_menu_open;
+        }
+        Message::CaptureMenuDismissed => {
+            state.capture_menu_open = false;
         }
         Message::CancelCapture => {
             if state.capture_state != CaptureState::Idle {
@@ -1794,17 +1815,86 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .style(move |_, _| validation_button_style(state, colors))
         .on_press(Message::ValidatePressed);
 
-    // Capture button with mode selector dropdown
-    let capture_modes = vec![CaptureMode::Normal, CaptureMode::Enhanced];
-    let mode_pick = pick_list(capture_modes, Some(state.capture_mode.clone()), Message::CaptureModeChanged)
-        .width(Length::Fixed(80.0));
-
-    let capture_group = row![
-        button(text(capture_button_label(state)))
+    // Capture split-button: integrated capture button with dropdown menu
+    let capture_group: Element<'_, Message, _, _> = {
+        let capture_label = capture_button_label(state);
+        let capture_btn = button(text(capture_label))
             .padding([4, 12])
-            .on_press(Message::CapturePressed),
-        mode_pick,
-    ].spacing(2);
+            .style(move |_, _| button::Style {
+                background: Some(iced::Background::Color(if state.capture_state != CaptureState::Idle {
+                    colors.sel_bg
+                } else {
+                    colors.panel_fill
+                })),
+                text_color: colors.text,
+                border: iced::Border {
+                    width: 1.0,
+                    color: colors.border,
+                    radius: Radius {
+                        top_left: 4.0,
+                        bottom_left: 4.0,
+                        top_right: 0.0,
+                        bottom_right: 0.0,
+                    },
+                },
+                ..Default::default()
+            })
+            .on_press(Message::CapturePressed);
+
+        let dropdown_btn = button(text("▼"))
+            .padding([4, 8])
+            .style(move |_, _| button::Style {
+                background: Some(iced::Background::Color(colors.panel_fill)),
+                text_color: colors.text,
+                border: iced::Border {
+                    width: 1.0,
+                    color: colors.border,
+                    radius: Radius {
+                        top_left: 0.0,
+                        bottom_left: 0.0,
+                        top_right: 4.0,
+                        bottom_right: 4.0,
+                    },
+                },
+                ..Default::default()
+            })
+            .on_press(Message::CaptureMenuToggled);
+
+        let menu_content = column![
+            button("普通捕获")
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(|_, _| button::Style {
+                    background: None,
+                    text_color: colors.text,
+                    border: iced::Border::default(),
+                    ..Default::default()
+                })
+                .on_press(Message::CaptureActionSelected(CaptureMode::Normal)),
+            button("增强捕获")
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(|_, _| button::Style {
+                    background: None,
+                    text_color: colors.text,
+                    border: iced::Border::default(),
+                    ..Default::default()
+                })
+                .on_press(Message::CaptureActionSelected(CaptureMode::Enhanced)),
+        ]
+        .spacing(1)
+        .padding(4);
+
+        let dropdown = DropDown::new(
+            row![capture_btn, dropdown_btn].spacing(0),
+            menu_content,
+            state.capture_menu_open,
+        )
+        .on_dismiss(Message::CaptureMenuDismissed)
+        .width(Length::Fixed(130.0));
+
+        dropdown.into()
+    };
 
     // "完成捕获" button: shown during capture when samples have been added
     let complete_capture_btn = if matches!(&state.capture_state, CaptureState::WaitingClick { .. }) && !state.similar_samples.is_empty() {
@@ -1902,7 +1992,13 @@ fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style
 
 fn capture_button_label(state: &State) -> String {
     match &state.capture_state {
-        CaptureState::Idle => String::from("捕获 F4"),
+        CaptureState::Idle => {
+            let mode_str = match state.capture_mode {
+                CaptureMode::Normal => "普通",
+                CaptureMode::Enhanced => "增强",
+            };
+            format!("捕获({mode_str}) F4")
+        }
         CaptureState::WaitingClick { deadline } => {
             let remaining = deadline.saturating_duration_since(Instant::now());
             format!("取消捕获 ({:.0}s)", remaining.as_secs())

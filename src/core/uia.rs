@@ -17,6 +17,7 @@ use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
 // ═══════════════════════════════════════════════════════════════════════════════
 pub mod windows_impl {
     use super::*;
+    use std::collections::HashSet;
     use windows::{
         core::BSTR,
         Win32::{
@@ -25,7 +26,8 @@ pub mod windows_impl {
             UI::{
                 Accessibility::{
                     CUIAutomation, IUIAutomation, IUIAutomationElement,
-                    IUIAutomationTreeWalker,
+                    IUIAutomationTreeWalker, TreeScope_Ancestors,
+                    TreeScope_Subtree,
                 },
                 WindowsAndMessaging::{
                     GetCursorPos, EnumWindows, GetWindowThreadProcessId,
@@ -34,6 +36,25 @@ pub mod windows_impl {
             },
         },
     };
+
+    /// Check if a screen point is within a bounding rectangle (inclusive of edges).
+    #[inline]
+    fn point_in_rect(x: i32, y: i32, r: &RECT) -> bool {
+        x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+    }
+
+    /// Build a dedup key from an element's RuntimeId.
+    fn runtime_id_key(elem: &IUIAutomationElement) -> Option<Vec<i32>> {
+        unsafe {
+            let variant = elem.GetRuntimeId().ok()?;
+            let len = (*variant).rgsabound[0].cElements as usize;
+            let ptr = (*variant).pvData as *const i32;
+            if ptr.is_null() || len == 0 {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(ptr, len).to_vec())
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // COM Management Layer - Unified COM lifecycle management
@@ -357,148 +378,72 @@ pub mod windows_impl {
     fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let auto = get_automation()?;
         let pt   = POINT { x, y };
+        info!("[Normal] Starting capture at ({}, {})", x, y);
 
+        // 1. Get the element at the point
         let target: IUIAutomationElement = unsafe {
             auto.ElementFromPoint(pt)
                 .map_err(|e| anyhow::anyhow!("ElementFromPoint: {e}"))?
         };
+        let target_name = get_bstr(unsafe { target.CurrentName() });
+        let target_ct = unsafe { target.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        debug!("[Normal] ElementFromPoint: type='{}' name='{}'", target_ct, target_name);
 
-        let mut chain: Vec<IUIAutomationElement> = vec![target.clone()];
-
-        // Walk up ancestors (max 32 levels).
-        let walker: IUIAutomationTreeWalker = unsafe {
-            auto.ControlViewWalker()
-                .map_err(|e| anyhow::anyhow!("ControlViewWalker: {e}"))?
+        // 2. Get full ancestor chain using FindAll(TreeScope_Ancestors)
+        let condition = unsafe {
+            auto.CreateTrueCondition()
+                .map_err(|e| anyhow::anyhow!("CreateTrueCondition: {e}"))?
+        };
+        let ancestors = unsafe {
+            target.FindAll(TreeScope_Ancestors, &condition)
+                .map_err(|e| anyhow::anyhow!("FindAll(Ancestors): {e}"))?
         };
 
-        let mut current = target.clone();
-        for _ in 0..32 {
-            let parent = unsafe { walker.GetParentElement(&current) };
-            match parent {
-                Ok(p) => {
-                    // Null element means we've reached the root.
-                    let is_null = unsafe { 
-                        auto.CompareElements(&p, &auto.GetRootElement()?)
-                            .unwrap_or(windows::core::BOOL(0))
-                            .as_bool()
-                    };
-                    if is_null {
-                        chain.push(p);
-                        break;
-                    }
-                    chain.push(p.clone());
-                    current = p;
-                }
-                Err(_) => break,
+        let ancestor_count = unsafe { ancestors.Length()? };
+        debug!("[Normal] FindAll(Ancestors) returned {} elements", ancestor_count);
+
+        let mut chain: Vec<IUIAutomationElement> = Vec::with_capacity(ancestor_count as usize + 1);
+        chain.push(target.clone());
+        for i in 0..ancestor_count {
+            if let Ok(elem) = unsafe { ancestors.GetElement(i) } {
+                chain.push(elem);
             }
         }
 
-        chain.reverse(); // root → target
+        // Chain is: [target, parent, grandparent, ..., root]
+        chain.reverse(); // now: root → target
 
-        // 验证并补充遗漏的中间节点
-        // GetParentElement 可能返回"逻辑父节点"而非"树结构父节点"，导致中间节点被跳过
-        // 我们需要验证：父节点的子节点列表是否包含当前节点
-        // 如果不包含，说明有遗漏，需要补充中间节点
-        let mut verified_chain: Vec<IUIAutomationElement> = Vec::new();
-        for (i, elem) in chain.iter().enumerate() {
-            verified_chain.push(elem.clone());
-            if i + 1 < chain.len() {
-                let parent = elem;
-                let child = &chain[i + 1];
-                // 检查 parent 的直接子节点是否包含 child
-                let child_found = unsafe {
-                    use std::time::Instant;
-                    let start = Instant::now();
-                    let mut found = false;
-                    let mut iteration_count = 0;
-                    const MAX_ITERATIONS: usize = 500; // 防止无限循环
-                    const TIMEOUT_MS: u128 = 2000; // 2秒超时
-                    
-                    let mut c = walker.GetFirstChildElement(parent).ok();
-                    while let Some(ref current_child) = c {
-                        iteration_count += 1;
-                        
-                        // 超时检查
-                        if iteration_count > MAX_ITERATIONS {
-                            log::warn!("Child search exceeded max iterations ({}), aborting", MAX_ITERATIONS);
-                            break;
-                        }
-                        if start.elapsed().as_millis() > TIMEOUT_MS {
-                            log::warn!("Child search timed out after {}ms, aborting", start.elapsed().as_millis());
-                            break;
-                        }
-                        
-                        if auto.CompareElements(current_child, child)
-                            .map(|b| b.as_bool())
-                            .unwrap_or(false) {
-                            found = true;
-                            break;
-                        }
-                        c = walker.GetNextSiblingElement(current_child).ok();
-                    }
-                    
-                    if iteration_count > 100 {
-                        log::debug!("Checked {} siblings to find child", iteration_count);
-                    }
-                    
-                    found
-                };
-                
-                if !child_found {
-                    // 子节点不在父节点的直接子节点列表中，说明有遗漏
-                    // 尾递归搜索：从 parent 开始向下查找 child，补充路径上的所有中间节点
-                    info!("[Capture] 发现遗漏的中间节点：父节点 {} 的子节点中不包含 {}", 
-                          unsafe { parent.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                          unsafe { child.CurrentControlType().map(control_type_name).unwrap_or_default() });
-                    
-                    // 搜索从 parent 到 child 的路径
-                    if let Some(intermediates) = find_path_to_element(&auto, &walker, parent, child) {
-                        for intermediate in intermediates {
-                            verified_chain.push(intermediate);
-                        }
-                    }
-                }
-            }
-        }
-        
-        chain = verified_chain;
-        
-        // 计算每个节点相对于窗口根的深度
-        // chain 结构：[Desktop, 顶层窗口, ..., target]
-        // 顶层窗口 = Desktop 的直接子节点（chain[1]）
-        // depth_from_window = chain_index - 1
-        let window_index = 1; // 顶层窗口始终在 chain[1]
+        // 3. Build hierarchy (root → target order)
+        let window_index = 1;
 
         let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
         for (chain_idx, elem) in chain.iter().enumerate() {
-            if let Some(node) = element_to_node(elem, &auto) {
-                // 计算真实深度：从窗口到该节点需要走多少步
-                // depth = chain_idx - window_index
-                // 例如：window_index=1，chain_idx=2 → depth=1（窗口的直接子节点）
-                let mut node = node;
+            if let Some(mut node) = element_to_node(elem, &auto) {
                 node.depth_from_window = chain_idx.saturating_sub(window_index);
                 hierarchy.push(node);
             }
         }
 
-        // Compute sibling index for the last element (target).
-        // Mark the last node as the target element for optimizer.
+        // 4. Compute sibling index for the target element
         if let Some(last) = hierarchy.last_mut() {
-            last.is_target = true;  // 标记为目标节点
-            last.index = sibling_index(&target, &walker).unwrap_or(0);
-            if last.index > 0 {
-                // Update the Index filter value.
-                if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
-                    f.value   = last.index.to_string();
-                    f.enabled = true;
+            last.is_target = true;
+            let walker = unsafe { auto.ControlViewWalker().ok() };
+            if let Some(ref w) = walker {
+                last.index = sibling_index(&target, w).unwrap_or(0);
+                if last.index > 0 {
+                    if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
+                        f.value   = last.index.to_string();
+                        f.enabled = true;
+                    }
+                    last.sibling_count = count_siblings(&target, w).unwrap_or(0);
                 }
-                // Compute total sibling count for last() function support
-                last.sibling_count = count_siblings(&target, &walker).unwrap_or(0);
             }
         }
 
-        // Extract window info before moving hierarchy.
         let window_info = extract_window_info(&hierarchy);
+
+        debug!("[Normal] Capture complete: hierarchy_depth={} target='{}'",
+            hierarchy.len(), target_name);
 
         Ok(CaptureResult {
             hierarchy,
@@ -584,61 +529,6 @@ pub mod windows_impl {
         node.build_extended_filters();
         
         Some(node)
-    }
-
-    /// 从 parent 开始向下搜索 target，返回路径上的所有中间节点
-    /// 使用递归 DFS 搜索，找到目标后返回路径
-    fn find_path_to_element(
-        auto: &IUIAutomation,
-        walker: &IUIAutomationTreeWalker,
-        parent: &IUIAutomationElement,
-        target: &IUIAutomationElement,
-    ) -> Option<Vec<IUIAutomationElement>> {
-        // 【关键修复】添加最大深度限制，防止栈溢出
-        const MAX_DEPTH: usize = 20;
-        find_path_to_element_with_depth(auto, walker, parent, target, MAX_DEPTH)
-    }
-    
-    /// 带深度限制的递归搜索
-    fn find_path_to_element_with_depth(
-        auto: &IUIAutomation,
-        walker: &IUIAutomationTreeWalker,
-        parent: &IUIAutomationElement,
-        target: &IUIAutomationElement,
-        max_depth: usize,
-    ) -> Option<Vec<IUIAutomationElement>> {
-        if max_depth == 0 {
-            log::warn!("find_path_to_element exceeded max depth (20), aborting search");
-            return None;
-        }
-        
-        // 直接检查 parent 的子节点是否包含 target
-        let mut child = unsafe { walker.GetFirstChildElement(parent).ok() };
-        
-        while let Some(ref c) = child {
-            let is_target = unsafe {
-                auto.CompareElements(c, target)
-                    .map(|b| b.as_bool())
-                    .unwrap_or(false)
-            };
-            
-            if is_target {
-                // target 是 parent 的直接子节点，不需要中间节点
-                return Some(Vec::new());
-            }
-            
-            // 递归搜索子节点（深度 -1）
-            if let Some(path) = find_path_to_element_with_depth(auto, walker, c, target, max_depth - 1) {
-                // 找到了！c 是路径上的第一个中间节点
-                let mut result = vec![c.clone()];
-                result.extend(path);
-                return Some(result);
-            }
-            
-            child = unsafe { walker.GetNextSiblingElement(c).ok() };
-        }
-        
-        None
     }
 
     /// 1-based index among same-type siblings under the parent.
@@ -1012,129 +902,135 @@ pub mod windows_impl {
 
     fn do_capture_enhanced(auto: &IUIAutomation, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let pt = POINT { x, y };
+        debug!("[Enhanced] Starting at ({}, {})", x, y);
 
-        // Step 1: ElementFromPoint to find the target window
+        let true_cond = unsafe { auto.CreateTrueCondition()? };
+
+        // Step 1: ElementFromPoint to get the top-level element at cursor
         let hit_elem = unsafe {
             auto.ElementFromPoint(pt)
                 .map_err(|e| anyhow::anyhow!("ElementFromPoint: {}", e))?
         };
-        let walker_control = unsafe {
-            auto.ControlViewWalker()
-                .map_err(|e| anyhow::anyhow!("ControlViewWalker: {}", e))?
-        };
-        let desktop = unsafe {
-            auto.GetRootElement()
-                .map_err(|e| anyhow::anyhow!("GetRootElement: {}", e))?
-        };
+        let hit_name = get_bstr(unsafe { hit_elem.CurrentName() });
+        let hit_ct = unsafe { hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        debug!("[Enhanced] ElementFromPoint: type='{}' name='{}'", hit_ct, hit_name);
 
-        // Walk up to find the top-level window (direct child of Desktop)
-        let mut target_window = hit_elem.clone();
-        let mut current = hit_elem.clone();
-        for _ in 0..32 {
-            let parent = unsafe { walker_control.GetParentElement(&current) };
-            match parent {
-                Ok(p) => {
-                    let is_desktop_child = unsafe {
-                        auto.CompareElements(&p, &desktop)
-                            .unwrap_or(windows::core::BOOL(0))
-                            .as_bool()
-                    };
-                    if is_desktop_child {
-                        target_window = current.clone();
-                        break;
-                    }
-                    current = p;
-                }
-                Err(_) => break,
+        // Step 2: FindAll(TreeScope_Subtree) on the hit element to get ALL descendants
+        let all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
+        let element_count = unsafe { all_elements.Length()? };
+        debug!("[Enhanced] FindAll(Subtree) returned {} elements", element_count);
+
+        // Step 3: Iterate, filter by point-in-rect + offscreen + RuntimeId dedup, pick innermost
+        let mut best_elem: Option<IUIAutomationElement> = None;
+        let mut best_area = i64::MAX;
+        let mut best_ct = String::new();
+        let mut best_name = String::new();
+        let mut best_rid_len: usize = 0;
+        let mut best_index: i32 = 0;
+        let mut seen_ids: HashSet<Vec<i32>> = HashSet::new();
+        let mut point_match_count = 0;
+        let mut offscreen_skip_count = 0;
+
+        for i in 0..element_count {
+            let elem = unsafe { all_elements.GetElement(i)? };
+
+            // RuntimeId dedup
+            let Some(rid) = runtime_id_key(&elem) else { continue };
+            let rid_len = rid.len();
+            if !seen_ids.insert(rid) { continue; }
+
+            // IsOffscreen filter
+            if let Ok(is_offscreen) = unsafe { elem.CurrentIsOffscreen() } {
+                if is_offscreen.0 != 0 { offscreen_skip_count += 1; continue; }
+            }
+
+            // BoundingRectangle must contain the point
+            let rect = match unsafe { elem.CurrentBoundingRectangle() } {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let w = rect.right - rect.left;
+            let h = rect.bottom - rect.top;
+            if w <= 0 || h <= 0 || !point_in_rect(x, y, &rect) { continue; }
+
+            point_match_count += 1;
+            let area = w as i64 * h as i64;
+            let e_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+            let e_name = get_bstr(unsafe { elem.CurrentName() });
+            debug!("[Enhanced]   match #{}: type='{}' name='{}' area={} rid_len={} rect=[{},{},{}x{}]",
+                point_match_count, e_ct, e_name, area, rid_len, rect.left, rect.top, w, h);
+
+            // Pick innermost: RuntimeId length (depth proxy) > smallest area > array index (later = deeper)
+            let dominated = rid_len > best_rid_len
+                || (rid_len == best_rid_len && area < best_area)
+                || (rid_len == best_rid_len && area == best_area && i > best_index);
+            if dominated {
+                best_area = area;
+                best_ct = e_ct;
+                best_name = e_name;
+                best_elem = Some(elem);
+                best_rid_len = rid_len;
+                best_index = i;
             }
         }
 
-        // Step 2: RawViewWalker to enumerate all descendants of the target window
-        let raw_walker = unsafe {
-            auto.RawViewWalker()
-                .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?
-        };
-        log::info!("[Enhanced Capture] Enumerating descendants of target window using RawViewWalker");
+        debug!("[Enhanced] filtered — point_match={}, offscreen_skip={}",
+            point_match_count, offscreen_skip_count);
 
-        #[derive(Clone)]
-        struct HitCandidate { elem: IUIAutomationElement, area: i64, depth: usize }
+        let target_elem = best_elem
+            .ok_or_else(|| anyhow::anyhow!("没有找到包含光标位置的元素"))?;
+        debug!("[Enhanced] SELECTED: type='{}' name='{}' area={} rid_len={}", best_ct, best_name, best_area, best_rid_len);
+        debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
+            hit_ct, hit_name, best_ct, best_name);
 
-        let mut candidates: Vec<HitCandidate> = Vec::new();
-        use std::collections::VecDeque;
-        let mut queue: VecDeque<(IUIAutomationElement, usize)> = VecDeque::new();
+        // Step 4: Build ancestor chain
+        let target_ancestors = unsafe { target_elem.FindAll(TreeScope_Ancestors, &true_cond)? };
+        let ancestor_count = unsafe { target_ancestors.Length()? };
 
-        // Seed with direct children
-        let mut child = unsafe { raw_walker.GetFirstChildElement(&target_window).ok() };
-        while let Some(c) = child {
-            let next = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
-            queue.push_back((c, 1));
-            child = next;
-        }
-
-        const MAX_NODES: usize = 5000;
-        const MAX_DEPTH: usize = 50;
-        let mut visited = 0;
-
-        while let Some((elem, depth)) = queue.pop_front() {
-            visited += 1;
-            if visited > MAX_NODES { log::warn!("[Enhanced Capture] Reached max nodes ({})", MAX_NODES); break; }
-            if depth > MAX_DEPTH { continue; }
-
-            if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
-                let w = r.right - r.left;
-                let h = r.bottom - r.top;
-                if w > 0 && h > 0 && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-                    candidates.push(HitCandidate { elem: elem.clone(), area: w as i64 * h as i64, depth });
-                }
-                let mut sub_child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
-                let mut cnt = 0;
-                while let Some(ref sc) = sub_child {
-                    queue.push_back((sc.clone(), depth + 1));
-                    let next = unsafe { raw_walker.GetNextSiblingElement(sc).ok() };
-                    sub_child = next;
-                    cnt += 1;
-                    if cnt > 200 { break; }
-                }
+        let mut chain: Vec<IUIAutomationElement> = Vec::with_capacity(ancestor_count as usize + 1);
+        for i in (0..ancestor_count).rev() {
+            if let Ok(e) = unsafe { target_ancestors.GetElement(i) } {
+                chain.push(e);
             }
         }
+        chain.push(target_elem.clone());
 
-        log::info!("[Enhanced Capture] Visited {} nodes, found {} candidates", visited, candidates.len());
-        if candidates.is_empty() {
-            return Err(anyhow::anyhow!("没有找到包含光标位置的元素"));
-        }
+        // Fallback: FindAll(Ancestors) returns 0 for elements outside Control view (e.g. WebView).
+        // Fall back to ControlViewWalker loop.
+        if ancestor_count == 0 {
+            debug!("[Enhanced] FindAll(Ancestors) returned 0, falling back to walker");
+            chain.clear();
+            let walker = unsafe { auto.ControlViewWalker()? };
+            let desktop = unsafe { auto.GetRootElement()? };
 
-        // Step 3: Pick innermost (smallest area, then deepest)
-        candidates.sort_by_key(|c| (c.area, -(c.depth as i64)));
-        let target_elem = candidates[0].elem.clone();
-        log::info!("[Enhanced Capture] Selected innermost element (area={}, depth={})", candidates[0].area, candidates[0].depth);
-
-        // Step 4: Build ancestor chain via RawViewWalker
-        let mut chain: Vec<IUIAutomationElement> = vec![target_elem.clone()];
-        let mut cur = target_elem.clone();
-        for _ in 0..50 {
-            let parent = unsafe { raw_walker.GetParentElement(&cur) };
-            match parent {
-                Ok(p) => {
-                    chain.push(p.clone());
-                    let same = unsafe { auto.CompareElements(&p, &target_window).unwrap_or(windows::core::BOOL(0)).as_bool() };
-                    if same { break; }
-                    cur = p;
+            let mut elements: Vec<IUIAutomationElement> = vec![target_elem.clone()];
+            let mut current = unsafe { walker.GetParentElement(&target_elem).ok() };
+            while let Some(elem) = current {
+                let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+                elements.push(elem.clone());
+                if is_desktop {
+                    break;
                 }
-                Err(_) => break,
+                current = unsafe { walker.GetParentElement(&elem).ok() };
             }
+            elements.reverse();
+            chain = elements;
+            debug!("[Enhanced] walker chain length = {}", chain.len());
         }
-        chain.reverse();
 
-        // Step 5: Build hierarchy
+        // Step 5: Build hierarchy (same structure as normal capture)
+        let window_index = 1;
         let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
-        for (idx, elem) in chain.iter().enumerate() {
-            if let Some(node) = element_to_node(elem, &auto) {
-                let mut node = node;
-                node.depth_from_window = idx;
+        for (chain_idx, elem) in chain.iter().enumerate() {
+            if let Some(mut node) = element_to_node(elem, &auto) {
+                node.depth_from_window = chain_idx.saturating_sub(window_index);
+                debug!("[Enhanced]   hierarchy[{}]: type='{}' name='{}' depth={}",
+                    chain_idx, node.control_type, node.name, node.depth_from_window);
                 hierarchy.push(node);
             }
         }
 
+        let walker_control = unsafe { auto.ControlViewWalker()? };
         if let Some(last) = hierarchy.last_mut() {
             last.is_target = true;
             last.index = sibling_index(&target_elem, &walker_control).unwrap_or(0);
@@ -1146,14 +1042,11 @@ pub mod windows_impl {
             }
         }
 
-        let window_info = if hierarchy.len() > 1 {
-            let top = &hierarchy[0];
-            Some(WindowInfo {
-                title: top.name.clone(), class_name: top.class_name.clone(),
-                process_id: top.process_id,
-                process_name: get_process_name_by_id(top.process_id),
-            })
-        } else { None };
+        let window_info = extract_window_info(&hierarchy);
+        info!("[Enhanced] hierarchy depth={} target='{}' vs normal type='{}' name='{}'",
+            hierarchy.len(),
+            hierarchy.last().map(|n| &n.control_type).unwrap_or(&String::new()),
+            hit_ct, hit_name);
 
         Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info })
     }

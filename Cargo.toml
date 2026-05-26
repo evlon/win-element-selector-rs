@@ -8,7 +8,7 @@ description = "Windows UI Automation element selector tool"
 [dependencies]
 # GUI framework: migrated from egui/eframe to iced
 iced = { version = "0.13", features = ["tokio", "advanced"] }
-iced_aw = "0.12"
+iced_aw = { version = "0.12", features = ["menu", "drop_down"] }
 dirs      = "6"
 anyhow    = "1.0"
 thiserror = "2.0"

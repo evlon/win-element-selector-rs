@@ -54,7 +54,7 @@ pub enum CaptureState {
 }
 
 /// 捕获模式
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureMode {
     /// 普通捕获：ElementFromPoint + ControlViewWalker
     Normal,
