@@ -132,10 +132,9 @@ impl<'de> serde::Deserialize<'de> for WindowSelectorOrString {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ElementQuery {
     /// 窗口选择器，如 "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
-    #[serde(rename = "windowSelector")]
-    pub window_selector: String,
+    pub window: String,
     /// 元素 XPath，如 "//Button[@AutomationId='btnSend']"
-    pub xpath: String,
+    pub element: String,
     /// 随机坐标范围百分比（默认 0.55）
     #[serde(rename = "randomRange", default = "default_random_range")]
     pub random_range: f32,
@@ -187,6 +186,9 @@ pub struct ElementInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct ElementResponse {
     pub found: bool,
+    #[serde(rename = "elementSelector")]
+    pub element_selector: String,
+    #[serde(flatten)]
     pub element: Option<ElementInfo>,
     pub error: Option<String>,
 }
@@ -276,7 +278,7 @@ fn default_button() -> String { "left".to_string() }
 pub struct MouseClickRequest {
     /// 窗口选择器，支持字符串形式 "Window[@Name='xxx']" 或对象形式
     pub window: WindowSelectorOrString,
-    pub xpath: String,
+    pub element: String,
     pub options: Option<MouseClickOptions>,
 }
 
@@ -328,7 +330,7 @@ fn default_delta_factor() -> Option<f32> { Some(0.8) }
 /// 滚动请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct MouseScrollRequest {
-    pub xpath: String,
+    pub element: String,
     pub options: Option<MouseScrollOptions>,
 }
 

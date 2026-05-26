@@ -12,15 +12,21 @@ use super::types::{ElementQuery, ElementResponse, ElementInfo};
 // 多元素查找响应类型
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// 元素信息附带其选择器
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ElementWithSelector {
+    #[serde(rename = "elementSelector")]
+    pub element_selector: String,
+    #[serde(flatten)]
+    pub info: ElementInfo,
+}
+
+/// 多元素查找响应（扁平化：elementSelector 与 ElementInfo 属性同级）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AllElementsResponse {
-    /// 是否找到元素
     pub found: bool,
-    /// 元素列表
-    pub elements: Vec<ElementInfo>,
-    /// 总数量
+    pub elements: Vec<ElementWithSelector>,
     pub total: usize,
-    /// 错误信息
     pub error: Option<String>,
 }
 
@@ -38,27 +44,28 @@ pub async fn get_element(
     } else {
         return HttpResponse::BadRequest().json(ElementResponse {
             found: false,
+            element_selector: String::new(),
             element: None,
             error: Some("缺少查询参数".to_string()),
         });
     };
-    
+
     info!(
-        "API: /api/element window_selector='{}' xpath='{}' random_range={}",
-        element_query.window_selector, element_query.xpath, element_query.random_range
+        "API: /api/element window='{}' element='{}' random_range={}",
+        element_query.window, element_query.element, element_query.random_range
     );
-    
+
     // Clone query for spawn_blocking (需要 'static)
-    let window_selector = element_query.window_selector.clone();
-    let xpath = element_query.xpath.clone();
+    let window = element_query.window.clone();
+    let element = element_query.element.clone();
     let random_range = element_query.random_range;
-    
+
     // Use global COM worker thread (single-threaded COM management)
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(window_selector, xpath, Some(random_range))
+        crate::core::com_worker::global_find_element(window, element, Some(random_range))
     })
     .await;
-    
+
     match result {
         Ok(Ok(elements)) => {
             if let Some(element_info) = elements.into_iter().next() {
@@ -69,6 +76,7 @@ pub async fn get_element(
                 );
                 HttpResponse::Ok().json(ElementResponse {
                     found: true,
+                    element_selector: element_query.element.clone(),
                     element: Some(element_info),
                     error: None,
                 })
@@ -76,6 +84,7 @@ pub async fn get_element(
                 warn!("Element not found");
                 HttpResponse::Ok().json(ElementResponse {
                     found: false,
+                    element_selector: element_query.element.clone(),
                     element: None,
                     error: Some("未找到匹配元素".to_string()),
                 })
@@ -85,6 +94,7 @@ pub async fn get_element(
             warn!("COM worker error: {}", e);
             HttpResponse::InternalServerError().json(ElementResponse {
                 found: false,
+                element_selector: element_query.element.clone(),
                 element: None,
                 error: Some(format!("内部错误: {}", e)),
             })
@@ -93,6 +103,7 @@ pub async fn get_element(
             warn!("Spawn blocking error: {}", e);
             HttpResponse::InternalServerError().json(ElementResponse {
                 found: false,
+                element_selector: element_query.element.clone(),
                 element: None,
                 error: Some(format!("线程错误: {}", e)),
             })
@@ -119,30 +130,37 @@ pub async fn get_all_elements(
             error: Some("缺少查询参数".to_string()),
         });
     };
-    
+
     info!(
-        "API: /api/element/all window_selector='{}' xpath='{}' random_range={}",
-        element_query.window_selector, element_query.xpath, element_query.random_range
+        "API: /api/element/all window='{}' element='{}' random_range={}",
+        element_query.window, element_query.element, element_query.random_range
     );
-    
-    let window_selector = element_query.window_selector.clone();
-    let xpath = element_query.xpath.clone();
+
+    let window = element_query.window.clone();
+    let element = element_query.element.clone();
     let random_range = element_query.random_range;
-    
+
     // Use global COM worker thread
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(window_selector, xpath, Some(random_range))
+        crate::core::com_worker::global_find_element(window, element, Some(random_range))
     })
     .await;
-    
+
     match result {
         Ok(Ok(elements)) => {
             let total = elements.len();
             if total > 0 {
                 info!("Found {} elements", total);
+                let elements_with_selector: Vec<ElementWithSelector> = elements
+                    .into_iter()
+                    .map(|info| ElementWithSelector {
+                        element_selector: element_query.element.clone(),
+                        info,
+                    })
+                    .collect();
                 HttpResponse::Ok().json(AllElementsResponse {
                     found: true,
-                    elements,
+                    elements: elements_with_selector,
                     total,
                     error: None,
                 })

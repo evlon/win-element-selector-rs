@@ -19,18 +19,18 @@ use super::idle_motion::with_auto_pause;
 pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
     let request = body.into_inner();
     let options = request.options.unwrap_or(MouseMoveOptions::default());
-    
+
     info!(
         "API: /api/mouse/move target=({}, {}) humanize={} trajectory={} duration={}ms",
         request.target.x, request.target.y,
         options.humanize, options.trajectory, options.duration
     );
-    
+
     // 使用 with_auto_pause 包装，自动暂停空闲移动
     with_auto_pause(|| async {
         // 获取当前鼠标位置
         let start_point = mouse_control::get_cursor_position();
-        
+
         // 执行移动
         let result = if options.humanize {
             mouse_control::humanized_move(
@@ -42,7 +42,7 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
         } else {
             mouse_control::linear_move(start_point, request.target)
         };
-        
+
         match result {
             Ok(_) => {
                 info!("Mouse moved successfully");
@@ -73,54 +73,54 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
 pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     let request = body.into_inner();
     let options = request.options.unwrap_or(MouseClickOptions::default());
-    
+
     info!(
-        "API: /api/mouse/click window='{}' xpath='{}' humanize={} random_range={}",
+        "API: /api/mouse/click window='{}' element='{}' humanize={} random_range={}",
         match &request.window {
             super::types::WindowSelectorOrString::String(s) => s.as_str(),
             super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or(""),
         },
-        request.xpath,
+        request.element,
         options.humanize,
         options.random_range
     );
-    
+
     // Step 1: 构建窗口选择器
     let window_selector = build_window_selector(&request.window);
     let window_selector_for_click = window_selector.clone();  // 克隆一份用于点击
-    
+
     // Step 2: 获取元素坐标
-    let xpath = request.xpath.clone();
+    let element = request.element.clone();
     let element_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
             log::error!("COM STA init failed: {}", e);
         }
-        
+
         super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector,
-            &xpath,
+            &element,
             &[],  // API层无 hierarchy 数据，layers 为空
         )
     })
     .await;
-    
+
     match element_result {
         Ok(detailed_result) => {
             use super::super::model::ValidationResult;
-            
+
             match &detailed_result.overall {
                 ValidationResult::Found { first_rect, .. } => {
                     if let Some(rect) = first_rect {
                         let rect_api: super::types::Rect = rect.clone().into();
                         let _center = rect_api.center();
-                        
+
                         // 计算随机点击点
                         let click_point = calculate_random_click_point(&rect_api, options.random_range, &options.click_area);
-                        
+
                         // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
                         let click_point_copy = click_point;
                         let options_copy = options.clone();
-                        
+
                         with_auto_pause(|| async {
                             // 确保窗口在前台
                             info!("Activating window before click: {}", window_selector_for_click);
@@ -129,13 +129,13 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                                 warn!("Failed to activate window, but continuing...");
                                 // 继续尝试点击，可能窗口已经在前台
                             }
-                            
+
                             // 短暂等待让窗口激活
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                            
+
                             let move_start = std::time::Instant::now();
                             let start_point = mouse_control::get_cursor_position();
-                            
+
                             let move_result = if options_copy.humanize {
                                 mouse_control::humanized_move(
                                     start_point,
@@ -146,10 +146,10 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             } else {
                                 mouse_control::linear_move(start_point, click_point_copy)
                             };
-                            
+
                             let move_duration = move_start.elapsed();
                             info!("Mouse move completed in {:?}", move_duration);
-                            
+
                             if let Err(e) = move_result {
                                 warn!("Move to click position failed: {}", e);
                                 return HttpResponse::Ok().json(MouseClickResponse {
@@ -159,12 +159,12 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                                     error: Some(format!("移动失败: {}", e)),
                                 });
                             }
-                            
+
                             // 点击前停顿
                             if options_copy.pause_before > 0 {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_before)).await;
                             }
-                            
+
                             // 执行点击
                             let click_start = std::time::Instant::now();
                             let click_result = if options_copy.button == "right" {
@@ -174,12 +174,12 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             };
                             let click_duration = click_start.elapsed();
                             info!("Mouse click completed in {:?}", click_duration);
-                            
+
                             // 点击后停顿
                             if options_copy.pause_after > 0 {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_after)).await;
                             }
-                            
+
                             match click_result {
                                 Ok(_) => {
                                     info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
@@ -259,7 +259,7 @@ fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> Str
         super::types::WindowSelectorOrString::String(s) => s.clone(),
         super::types::WindowSelectorOrString::Object(obj) => {
             let mut predicates: Vec<String> = Vec::new();
-            
+
             if let Some(ref title) = obj.title {
                 predicates.push(format!("@Name='{}'", title));
             }
@@ -269,7 +269,7 @@ fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> Str
             if let Some(ref process_name) = obj.process_name {
                 predicates.push(format!("@ProcessName='{}'", process_name));
             }
-            
+
             if predicates.is_empty() {
                 "Window".to_string()
             } else {
@@ -341,12 +341,12 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let delta_factor = options.delta_factor.unwrap_or(0.8);
 
     info!(
-        "API: /api/mouse/scroll xpath='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} timeout={}ms",
-        request.xpath, times, delta, auto_delta, delta_factor, options.wait, timeout_ms
+        "API: /api/mouse/scroll element='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} timeout={}ms",
+        request.element, times, delta, auto_delta, delta_factor, options.wait, timeout_ms
     );
 
     // Step 1: 获取元素坐标
-    let xpath_for_query = request.xpath.clone();
+    let element_for_query = request.element.clone();
     let element_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
             log::error!("COM STA init failed: {}", e);
@@ -354,7 +354,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
         super::super::capture::validate_selector_and_xpath_detailed(
             "Window",
-            &xpath_for_query,
+            &element_for_query,
             &[],
         )
     })
@@ -397,7 +397,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 success: false,
                 scrolled: 0,
                 target_found: false,
-                error: Some(format!("未找到元素: {}", request.xpath)),
+                error: Some(format!("未找到元素: {}", request.element)),
             });
         }
         ValidationResult::Error(e) => {
