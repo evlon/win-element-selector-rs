@@ -114,6 +114,87 @@ F4 按下
 
 ---
 
+## HTTP API 端点
+
+服务端监听 `127.0.0.1:8080`，提供 RESTful API 供 SDK 消费。
+
+### 元素查找
+
+```
+POST /api/element
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `window` | string | 窗口选择器 XPath |
+| `element` | string | 元素 XPath |
+| `randomRange` | number | 随机坐标范围（默认 0.55） |
+
+**响应**（`ElementInfo` 属性扁平化到顶层，`elementSelector` 独立）：
+```json
+{
+  "found": true,
+  "elementSelector": "//Button[@Name='发送']",
+  "rect": {"x": 0, "y": 0, "width": 60, "height": 30},
+  "center": {"x": 30, "y": 15},
+  "controlType": "Button",
+  "name": "发送",
+  ...
+}
+```
+
+### 多元素查找
+
+```
+POST /api/element/all
+```
+
+参数同上，返回 `elements` 数组，每个元素含 `elementSelector` + 扁平化 `ElementInfo` 属性。
+
+### 鼠标操作
+
+```
+POST /api/mouse/click
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `window` | string/object | 窗口选择器 |
+| `element` | string | 元素 XPath |
+| `options` | object | 点击选项（button, humanize, randomRange, clickArea） |
+
+```
+POST /api/move/mouse      → 鼠标移动
+POST /api/mouse/scroll    → 鼠标滚动
+POST /api/mouse/idle/start → 启动空闲移动
+POST /api/mouse/idle/stop  → 停止空闲移动
+GET  /api/mouse/idle/status → 空闲移动状态
+```
+
+### 键盘操作
+
+```
+POST /api/keyboard/type     → 输入文本
+POST /api/keyboard/shortcut → 快捷键组合
+POST /api/keyboard/key      → 单个按键
+```
+
+### 窗口操作
+
+```
+POST /api/window/list          → 窗口列表
+POST /api/window/activate      → 激活窗口
+POST /api/window/focus-element → 聚焦元素
+```
+
+### 健康检查
+
+```
+GET /api/health → {"status": "ok", "version": "1.0.0"}
+```
+
+---
+
 ## 扩展方向
 
 - [ ] `IUIAutomationCondition` 原生条件组合替代 post-filter（性能更好）
