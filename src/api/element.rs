@@ -6,20 +6,63 @@ use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use super::types::{ElementQuery, ElementResponse, ElementInfo};
+use super::types::{ElementQuery, ElementResponse};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// 元素信息附带其选择器
+/// 元素信息附带其选择器（ElementInfo 属性直接扁平化，无嵌套）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElementWithSelector {
     #[serde(rename = "elementSelector")]
     pub element_selector: String,
-    #[serde(flatten)]
-    pub info: ElementInfo,
+    pub rect: Rect,
+    pub center: Point,
+    #[serde(rename = "centerRandom")]
+    pub center_random: Point,
+    #[serde(rename = "controlType")]
+    pub control_type: String,
+    pub name: String,
+    #[serde(rename = "automationId")]
+    pub automation_id: String,
+    #[serde(rename = "className")]
+    pub class_name: String,
+    #[serde(rename = "frameworkId")]
+    pub framework_id: String,
+    #[serde(rename = "helpText")]
+    pub help_text: String,
+    #[serde(rename = "localizedControlType")]
+    pub localized_control_type: String,
+    #[serde(rename = "isEnabled")]
+    pub is_enabled: bool,
+    #[serde(rename = "isOffscreen")]
+    pub is_offscreen: bool,
+    #[serde(rename = "isPassword")]
+    pub is_password: bool,
+    #[serde(rename = "acceleratorKey")]
+    pub accelerator_key: String,
+    #[serde(rename = "accessKey")]
+    pub access_key: String,
+    #[serde(rename = "itemType")]
+    pub item_type: String,
+    #[serde(rename = "itemStatus")]
+    pub item_status: String,
+    #[serde(rename = "processId")]
+    pub process_id: u32,
+    #[serde(default, rename = "isCheckable", skip_serializing_if = "Option::is_none")]
+    pub is_checkable: Option<bool>,
+    #[serde(default, rename = "isChecked", skip_serializing_if = "Option::is_none")]
+    pub is_checked: Option<bool>,
+    #[serde(default, rename = "isClickable", skip_serializing_if = "Option::is_none")]
+    pub is_clickable: Option<bool>,
+    #[serde(default, rename = "isScrollable", skip_serializing_if = "Option::is_none")]
+    pub is_scrollable: Option<bool>,
+    #[serde(default, rename = "isSelected", skip_serializing_if = "Option::is_none")]
+    pub is_selected: Option<bool>,
 }
+
+use super::types::{Point, Rect};
 
 /// 多元素查找响应（扁平化：elementSelector 与 ElementInfo 属性同级）
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,9 +196,31 @@ pub async fn get_all_elements(
                 info!("Found {} elements", total);
                 let elements_with_selector: Vec<ElementWithSelector> = elements
                     .into_iter()
-                    .map(|info| ElementWithSelector {
+                    .map(|el_info| ElementWithSelector {
                         element_selector: element_query.element.clone(),
-                        info,
+                        rect: el_info.rect,
+                        center: el_info.center,
+                        center_random: el_info.center_random,
+                        control_type: el_info.control_type,
+                        name: el_info.name,
+                        automation_id: el_info.automation_id,
+                        class_name: el_info.class_name,
+                        framework_id: el_info.framework_id,
+                        help_text: el_info.help_text,
+                        localized_control_type: el_info.localized_control_type,
+                        is_enabled: el_info.is_enabled,
+                        is_offscreen: el_info.is_offscreen,
+                        is_password: el_info.is_password,
+                        accelerator_key: el_info.accelerator_key,
+                        access_key: el_info.access_key,
+                        item_type: el_info.item_type,
+                        item_status: el_info.item_status,
+                        process_id: el_info.process_id,
+                        is_checkable: el_info.is_checkable,
+                        is_checked: el_info.is_checked,
+                        is_clickable: el_info.is_clickable,
+                        is_scrollable: el_info.is_scrollable,
+                        is_selected: el_info.is_selected,
                     })
                     .collect();
                 HttpResponse::Ok().json(AllElementsResponse {
