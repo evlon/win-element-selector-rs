@@ -91,6 +91,7 @@ pub fn validate_selector_and_xpath_detailed(
             segments: vec![],
             layers: vec![],
             total_duration_ms: 0,
+            is_offscreen: None,
         },
     }
 }

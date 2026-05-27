@@ -147,10 +147,12 @@ fn default_random_range() -> f32 {
 /// 元素信息（API 响应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementInfo {
-    pub rect: Rect,
-    pub center: Point,
-    #[serde(rename = "centerRandom")]
-    pub center_random: Point,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<Rect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub center: Option<Point>,
+    #[serde(rename = "centerRandom", skip_serializing_if = "Option::is_none")]
+    pub center_random: Option<Point>,
     #[serde(rename = "controlType")]
     pub control_type: String,
     pub name: String,
@@ -200,6 +202,8 @@ pub struct ElementResponse {
     #[serde(rename = "elementSelector")]
     pub element_selector: String,
     pub element: Option<ElementInfo>,
+    /// 匹配到的元素总数（findOne 返回第一个但告知总共有多少个匹配）
+    pub total: usize,
     pub error: Option<String>,
 }
 
@@ -332,6 +336,9 @@ pub struct MouseScrollOptions {
     /// 容器高度倍率（0-1），默认 0.8
     #[serde(rename = "deltaFactor", default = "default_delta_factor")]
     pub delta_factor: Option<f32>,
+    /// 等待模式：exist=元素存在即可，visible=元素存在且不在屏幕外
+    #[serde(rename = "waitMode", default)]
+    pub wait_mode: Option<String>,
 }
 
 fn default_scroll_times() -> Option<u32> { Some(3) }
@@ -340,6 +347,8 @@ fn default_delta_factor() -> Option<f32> { Some(0.8) }
 /// 滚动请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct MouseScrollRequest {
+    /// 窗口选择器（用于限定搜索范围，避免遍历所有窗口）
+    pub window: Option<String>,
     pub element: String,
     pub options: Option<MouseScrollOptions>,
 }

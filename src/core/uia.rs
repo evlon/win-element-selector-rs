@@ -681,6 +681,7 @@ pub mod windows_impl {
                     segments: vec![],
                     layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
+                    is_offscreen: None,
                 };
             }
         };
@@ -702,6 +703,7 @@ pub mod windows_impl {
                 segments: vec![],
                 layers: vec![],
                 total_duration_ms: total_start.elapsed().as_millis() as u64,
+                is_offscreen: None,
             };
         }
         
@@ -788,6 +790,7 @@ pub mod windows_impl {
                     segments: vec![],
                     layers: vec![],
                     total_duration_ms: total_start.elapsed().as_millis() as u64,
+                    is_offscreen: None,
                 };
             }
         };
@@ -806,6 +809,15 @@ pub mod windows_impl {
             }
             let first_rect = rects.first().cloned();
             ValidationResult::Found { count: results.len(), first_rect, rects }
+        };
+
+        // 查询第一个匹配元素的 isOffscreen
+        let is_offscreen = if !results.is_empty() {
+            Some(unsafe { results[0].CurrentIsOffscreen() }
+                .map(|b| b.as_bool())
+                .unwrap_or(false))
+        } else {
+            None
         };
         
         // 生成逐层校验结果（复用 uiauto-xpath 的 ancestors 和 get_property API）
@@ -885,6 +897,7 @@ pub mod windows_impl {
             segments,
             layers,
             total_duration_ms: total_start.elapsed().as_millis() as u64,
+            is_offscreen,
         }
     }
 
@@ -1489,8 +1502,10 @@ pub mod windows_impl {
         match conditions.len() {
             0 => {
                 // No specific conditions, use TrueCondition
-                unsafe { auto.CreateTrueCondition() }.unwrap_or_else(|_| {
-                    panic!("CreateTrueCondition failed");
+                unsafe { auto.CreateTrueCondition() }.unwrap_or_else(|e| {
+                    log::error!("CreateTrueCondition failed: {}", e);
+                    // 使用第一个可用的条件作为 fallback（不应该到这里，因为 conditions 为空）
+                    panic!("CreateTrueCondition failed — no fallback available");
                 })
             }
             1 => conditions.remove(0),
@@ -1506,9 +1521,10 @@ pub mod windows_impl {
             _ => {
                 // Combine multiple conditions with AND using CreateAndConditionFromNativeArray
                 let opts: Vec<Option<IUIAutomationCondition>> = conditions.into_iter().map(Some).collect();
+                let first = opts.first().and_then(|o| o.clone());
                 unsafe {
                     auto.CreateAndConditionFromNativeArray(&opts)
-                        .unwrap_or_else(|_| opts.into_iter().next().unwrap().unwrap())
+                        .unwrap_or_else(|_| first.expect("at least one condition required"))
                 }
             }
         }
@@ -1892,11 +1908,10 @@ pub mod windows_impl {
                 let mut rng = rand::thread_rng();
                 
                 return elements.iter().filter_map(|elem| {
-                    let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
-                    if rect.is_none() {
-                        return None;
-                    }
-                    let r = rect.unwrap();
+                    let r = match unsafe { elem.CurrentBoundingRectangle() } {
+                        Ok(r) => r,
+                        Err(_) => return None,
+                    };
                     let api_rect = Rect {
                         x: r.left,
                         y: r.top,
@@ -1922,10 +1937,18 @@ pub mod windows_impl {
                     };
                     let center_random = Point::new(center.x + offset_x, center.y + offset_y);
                     
+                    let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
+
+                    let (rect_opt, center_opt, cr_opt) = if is_offscreen {
+                        (None, None, None)
+                    } else {
+                        (Some(api_rect), Some(center), Some(center_random))
+                    };
+
                     Some(ElementInfo {
-                        rect: api_rect,
-                        center,
-                        center_random,
+                        rect: rect_opt,
+                        center: center_opt,
+                        center_random: cr_opt,
                         control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
                         name: get_bstr(unsafe { elem.CurrentName() }),
                         automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
@@ -1934,7 +1957,7 @@ pub mod windows_impl {
                         help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
                         localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
                         is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
-                        is_offscreen: unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) },
+                        is_offscreen,
                         is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
                         accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
                         access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
@@ -1995,11 +2018,10 @@ pub mod windows_impl {
 
         let mut rng = rand::thread_rng();
         elements.iter().filter_map(|elem| {
-            let rect = unsafe { elem.CurrentBoundingRectangle().ok() };
-            if rect.is_none() {
-                return None;
-            }
-            let r = rect.unwrap();
+            let r = match unsafe { elem.CurrentBoundingRectangle() } {
+                Ok(r) => r,
+                Err(_) => return None,
+            };
             let api_rect = Rect {
                 x: r.left,
                 y: r.top,
@@ -2023,10 +2045,18 @@ pub mod windows_impl {
             };
             let center_random = Point::new(center.x + offset_x, center.y + offset_y);
 
+            let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
+
+            let (rect_opt, center_opt, cr_opt) = if is_offscreen {
+                (None, None, None)
+            } else {
+                (Some(api_rect), Some(center), Some(center_random))
+            };
+
             Some(ElementInfo {
-                rect: api_rect,
-                center,
-                center_random,
+                rect: rect_opt,
+                center: center_opt,
+                center_random: cr_opt,
                 control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
                 name: get_bstr(unsafe { elem.CurrentName() }),
                 automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
@@ -2035,7 +2065,7 @@ pub mod windows_impl {
                 help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
                 localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
                 is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
-                is_offscreen: unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) },
+                is_offscreen,
                 is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
                 accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
                 access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),

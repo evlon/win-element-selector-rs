@@ -1091,13 +1091,14 @@ impl State {
         if let Some(manager) = &mut self.multi_highlight_manager {
             manager.clear();
             for (i, info) in self.found_common_elements.iter().enumerate() {
+                let Some(rect_val) = &info.rect else { continue };
                 let id = format!("common_{}", i);
                 let label = format!("{}", i + 1);
                 let rect = element_selector::core::model::ElementRect {
-                    x: info.rect.x,
-                    y: info.rect.y,
-                    width: info.rect.width,
-                    height: info.rect.height,
+                    x: rect_val.x,
+                    y: rect_val.y,
+                    width: rect_val.width,
+                    height: rect_val.height,
                 };
                 manager.add(&id, &rect, &label);
             }

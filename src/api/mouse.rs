@@ -341,21 +341,26 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let timeout_ms = options.timeout.unwrap_or(5000);
     let auto_delta = options.auto_delta.unwrap_or(false);
     let delta_factor = options.delta_factor.unwrap_or(0.8);
+    let wait_visible = options.wait_mode.as_deref() == Some("visible");
+    // 优先使用传入的窗口选择器，否则回退到通用 "Window"
+    let window_selector = request.window.as_deref().unwrap_or("Window").to_string();
+    let window_selector_for_wait = window_selector.clone();
 
     info!(
-        "API: /api/mouse/scroll element='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} timeout={}ms",
-        request.element, times, delta, auto_delta, delta_factor, options.wait, timeout_ms
+        "API: /api/mouse/scroll window='{}' element='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} wait_mode={:?} timeout={}ms",
+        window_selector, request.element, times, delta, auto_delta, delta_factor, options.wait, options.wait_mode, timeout_ms
     );
 
     // Step 1: 获取元素坐标
     let element_for_query = request.element.clone();
+    let window_selector_for_element = window_selector.clone();
     let element_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
             log::error!("COM STA init failed: {}", e);
         }
 
         super::super::capture::validate_selector_and_xpath_detailed(
-            "Window",
+            &window_selector_for_element,
             &element_for_query,
             &[],
         )
@@ -447,12 +452,13 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                 // 检测 wait xpath 是否存在
                 let wait_xpath_clone = wait_xpath.clone();
+                let win_sel = window_selector_for_wait.clone();
                 let wait_result = tokio::task::spawn_blocking(move || {
                     if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
                         log::error!("COM STA init failed: {}", e);
                     }
                     super::super::capture::validate_selector_and_xpath_detailed(
-                        "Window",
+                        &win_sel,
                         &wait_xpath_clone,
                         &[],
                     )
@@ -461,14 +467,31 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                 if let Ok(wr) = wait_result {
                     if matches!(wr.overall, ValidationResult::Found { .. }) {
-                        // 找到目标，返回
-                        info!("Wait xpath found after {} scrolls", scrolled);
-                        return HttpResponse::Ok().json(MouseScrollResponse {
-                            success: true,
-                            scrolled,
-                            target_found: true,
-                            error: None,
-                        });
+                        if wait_visible {
+                            // visible 模式：还需检查元素不在屏幕外
+                            if wr.is_offscreen.unwrap_or(false) {
+                                // 元素存在但在屏幕外，继续滚动
+                                info!("Wait xpath found but offscreen, continue scrolling");
+                            } else {
+                                // 元素可见，返回
+                                info!("Wait xpath found and visible after {} scrolls", scrolled);
+                                return HttpResponse::Ok().json(MouseScrollResponse {
+                                    success: true,
+                                    scrolled,
+                                    target_found: true,
+                                    error: None,
+                                });
+                            }
+                        } else {
+                            // exist 模式：找到即可
+                            info!("Wait xpath found after {} scrolls", scrolled);
+                            return HttpResponse::Ok().json(MouseScrollResponse {
+                                success: true,
+                                scrolled,
+                                target_found: true,
+                                error: None,
+                            });
+                        }
                     }
                 }
             }
@@ -484,9 +507,11 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                 // 查询容器元素的新 rect 获取可视高度
                 if let Some(height) = container_height_for_auto {
-                    // 使用容器高度计算自适应 delta
-                    current_delta = (height as f32 * delta_factor) as i32;
-                    info!("Auto delta calculated: container_height={} factor={} delta={}", height, delta_factor, current_delta);
+                    // 使用容器高度计算自适应 delta，保留原始 delta 的方向（符号）
+                    let abs_delta = (height as f32 * delta_factor) as i32;
+                    let sign = delta.signum();
+                    current_delta = sign * abs_delta;
+                    info!("Auto delta calculated: container_height={} factor={} abs_delta={} sign={} final_delta={}", height, delta_factor, abs_delta, sign, current_delta);
                 }
                 scrolled += 1;
                 continue;

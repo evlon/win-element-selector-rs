@@ -62,6 +62,24 @@ pub enum UiaRequest {
         response: Sender<anyhow::Result<Vec<crate::api::types::ElementInfo>>>,
     },
 
+    /// 激活窗口
+    ActivateWindow {
+        window_selector: String,
+        response: Sender<anyhow::Result<bool>>,
+    },
+
+    /// 激活窗口并聚焦元素
+    ActivateAndFocusElement {
+        window_selector: String,
+        xpath: String,
+        response: Sender<anyhow::Result<bool>>,
+    },
+
+    /// 列出窗口
+    ListWindows {
+        response: Sender<anyhow::Result<Vec<crate::core::model::WindowInfo>>>,
+    },
+
     /// 关闭工作线程
     Shutdown,
 }
@@ -208,6 +226,28 @@ impl ComWorker {
                 log::info!("[PERF] find_common_elements started for {}", xpath);
                 let result = Self::do_find_common_elements(automation, &window_selector, &xpath);
                 log::info!("[PERF] find_common_elements completed in {}ms, found {} elements",
+                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                let _ = response.send(result);
+            }
+            UiaRequest::ActivateWindow { window_selector, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] activate_window started for {}", window_selector);
+                let result = Self::do_activate_window(automation, &window_selector);
+                log::debug!("[PERF] activate_window completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
+            UiaRequest::ActivateAndFocusElement { window_selector, xpath, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] activate_and_focus_element started for {} / {}", window_selector, xpath);
+                let result = Self::do_activate_and_focus_element(automation, &window_selector, &xpath);
+                log::debug!("[PERF] activate_and_focus_element completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
+            UiaRequest::ListWindows { response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] list_windows started");
+                let result = Self::do_list_windows();
+                log::debug!("[PERF] list_windows completed in {}ms, found {} windows",
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
                 let _ = response.send(result);
             }
@@ -374,6 +414,28 @@ impl ComWorker {
         Ok(results)
     }
 
+    /// 激活窗口
+    fn do_activate_window(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(crate::core::uia::activate_window_by_selector(window_selector))
+    }
+
+    /// 激活窗口并聚焦元素
+    fn do_activate_and_focus_element(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+        xpath: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(crate::core::uia::activate_and_focus_element(window_selector, xpath))
+    }
+
+    /// 列出所有窗口
+    fn do_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
+        Ok(crate::capture::list_windows())
+    }
+
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -506,6 +568,60 @@ impl ComWorker {
         }
     }
 
+    /// 激活窗口
+    pub fn activate_window(&self, window_selector: String) -> anyhow::Result<bool> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::ActivateWindow {
+                window_selector,
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker activate_window timeout after 10s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
+    /// 激活窗口并聚焦元素
+    pub fn activate_and_focus_element(&self, window_selector: String, xpath: String) -> anyhow::Result<bool> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::ActivateAndFocusElement {
+                window_selector,
+                xpath,
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .map_err(|e| anyhow::anyhow!("COM worker activate_and_focus_element timeout after 15s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
+    /// 列出所有窗口
+    pub fn list_windows(&self) -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::ListWindows {
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker list_windows timeout after 10s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 优雅关闭工作线程
     pub fn shutdown(&mut self) {
         if let Some(ref sender) = self.sender {
@@ -615,6 +731,36 @@ pub fn global_find_common_elements(
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.find_common_elements(window_selector, xpath)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程激活窗口
+pub fn global_activate_window(window_selector: String) -> anyhow::Result<bool> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.activate_window(window_selector)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程激活窗口并聚焦元素
+pub fn global_activate_and_focus_element(window_selector: String, xpath: String) -> anyhow::Result<bool> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.activate_and_focus_element(window_selector, xpath)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程列出所有窗口
+pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.list_windows()
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }

@@ -164,6 +164,22 @@ POST /api/mouse/click
 | `options` | object | 点击选项（button, humanize, randomRange, clickArea） |
 
 ```
+POST /api/mouse/scroll
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `window` | string | 窗口选择器（可选，默认 `"Window"`） |
+| `element` | string | 要滚动到的元素 XPath |
+| `options.delta` | number | 滚动量（正值向上，负值向下，默认 120） |
+| `options.times` | number | 最大滚动次数（默认 3） |
+| `options.autoDelta` | bool | 自动根据容器高度计算滚动量（默认 false） |
+| `options.deltaFactor` | number | autoDelta 乘数因子（默认 0.8） |
+| `options.wait` | string | 等待目标元素出现的 XPath |
+| `options.waitMode` | string | `"visible"` 或 `"exist"`（默认 exist） |
+| `options.timeout` | number | 超时毫秒数（默认 5000） |
+
+```
 POST /api/move/mouse      → 鼠标移动
 POST /api/mouse/scroll    → 鼠标滚动
 POST /api/mouse/idle/start → 启动空闲移动

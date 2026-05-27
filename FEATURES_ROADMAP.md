@@ -162,8 +162,8 @@ centerRandom = {
 6. ✅ 标签页切换（元素/窗口元素模式）
 7. ✅ 复制按钮和历史记录
 
-### Phase 2: HTTP 服务 + Node.js SDK（当前阶段）
-**目标时间：已完成核心 API**
+### Phase 2: HTTP 服务 + Node.js SDK ✅ 已完成
+**目标时间：已完成**
 
 1. ✅ HTTP 服务架构（Actix-web）
 2. ✅ 实现 4 个核心 API
@@ -174,8 +174,14 @@ centerRandom = {
 3. ✅ 拟人化鼠标模块
    - 贝塞尔曲线轨迹生成
    - 随机坐标计算
-4. 📋 Node.js SDK 开发
-5. 📋 示例代码与文档
+4. ✅ Node.js SDK 开发
+   - Element 类（findOne/findFirst/find/scrollIntoView 等）
+   - Client 类（scrollMouse/click/move/hover/drag 等）
+   - scrollIntoView 支持 wait + window 作用域 + auto_delta
+5. ✅ 滚动与等待 API
+   - POST /api/mouse/scroll（支持 wait/waitMode/timeout/autoDelta）
+   - auto_delta 保留原始滚动方向符号
+   - window 作用域避免遍历所有窗口
 
 ### Phase 3: 高级特性（后续规划）
 1. 📋 多屏支持
@@ -194,6 +200,6 @@ centerRandom = {
 
 ---
 
-**最后更新：** 2026-04-28  
+**最后更新：** 2026-05-27  
 **维护人：** AI Assistant  
-**当前阶段：** Phase 2 - HTTP 服务 + Node.js SDK 开发
+**当前阶段：** Phase 3 - 高级特性开发

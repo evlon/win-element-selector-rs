@@ -562,6 +562,8 @@ pub struct DetailedValidationResult {
     pub layers: Vec<LayerValidationResult>,
     /// Total validation time (in milliseconds)
     pub total_duration_ms: u64,
+    /// 第一个匹配元素是否在屏幕外
+    pub is_offscreen: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

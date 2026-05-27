@@ -71,6 +71,14 @@ pub fn humanized_move(
         start.x, start.y, end.x, end.y, duration_ms, trajectory_type
     );
     
+    // 距离太近时直接设置位置，不走轨迹
+    let dx = (end.x - start.x).abs();
+    let dy = (end.y - start.y).abs();
+    if dx <= 1 && dy <= 1 {
+        set_cursor_position(end.x, end.y);
+        return Ok(());
+    }
+    
     match trajectory_type {
         "bezier" => bezier_move(start, end, duration_ms),
         "linear" => linear_move_with_easing(start, end, duration_ms),
@@ -196,17 +204,36 @@ fn generate_bezier_control_points(start: super::api::types::Point, end: super::a
     let dx = (end.x - start.x) as f32;
     let dy = (end.y - start.y) as f32;
     
+    // 距离太近时直接返回起终点，避免 rand gen_range 空范围 panic
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist < 2.0 {
+        return [
+            Point::new(start.x, start.y),
+            Point::new(start.x, start.y),
+            Point::new(end.x, end.y),
+            Point::new(end.x, end.y),
+        ];
+    }
+    
     // 控制点扰动范围：10-30% 的路径长度
     let mut rng = rand::thread_rng();
     let perturb_range = 0.3;
     
+    // 安全的随机范围：确保 range 不为空
+    let safe_range = |v: f32| -> (f32, f32) {
+        if v == 0.0 { (-1.0, 1.0) } else { (-v, v) }
+    };
+    
+    let dx_range = safe_range(dx.abs() * perturb_range);
+    let dy_range = safe_range(dy.abs() * perturb_range);
+    
     // P1 在起点附近，向前偏移
-    let p1_x = start.x + (dx * 0.25 + rng.gen_range(-dx.abs() * perturb_range..dx.abs() * perturb_range)) as i32;
-    let p1_y = start.y + (dy * 0.25 + rng.gen_range(-dy.abs() * perturb_range..dy.abs() * perturb_range)) as i32;
+    let p1_x = start.x + (dx * 0.25 + rng.gen_range(dx_range.0..dx_range.1)) as i32;
+    let p1_y = start.y + (dy * 0.25 + rng.gen_range(dy_range.0..dy_range.1)) as i32;
     
     // P2 在终点附近，向后偏移
-    let p2_x = start.x + (dx * 0.75 + rng.gen_range(-dx.abs() * perturb_range..dx.abs() * perturb_range)) as i32;
-    let p2_y = start.y + (dy * 0.75 + rng.gen_range(-dy.abs() * perturb_range..dy.abs() * perturb_range)) as i32;
+    let p2_x = start.x + (dx * 0.75 + rng.gen_range(dx_range.0..dx_range.1)) as i32;
+    let p2_y = start.y + (dy * 0.75 + rng.gen_range(dy_range.0..dy_range.1)) as i32;
     
     [
         Point::new(start.x, start.y),  // P0: 起点

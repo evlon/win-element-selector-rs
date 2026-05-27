@@ -4,7 +4,6 @@
 
 use actix_web::{HttpResponse, Responder, web};
 use log::info;
-use serde::Deserialize;
 
 use super::types::WindowListResponse;
 
@@ -14,12 +13,8 @@ pub async fn list_windows() -> impl Responder {
     info!("API: /api/window/list");
     
     let windows = tokio::task::spawn_blocking(|| {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
-        let result = super::super::capture::list_windows();
-        result
+        crate::core::com_worker::global_list_windows()
+            .unwrap_or_default()
     })
     .await
     .unwrap_or_default();
@@ -36,7 +31,7 @@ pub async fn list_windows() -> impl Responder {
 // 激活窗口 API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct ActivateWindowRequest {
     /// 窗口选择器 XPath
     /// 例如: "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
@@ -59,15 +54,22 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     
     let window_selector = req.window_selector.clone();
     
-    let success = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
-        super::super::core::uia::windows_impl::activate_window_by_selector(&window_selector)
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_activate_window(window_selector)
     })
-    .await
-    .unwrap_or(false);
+    .await;
+    
+    let success = match result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            log::error!("activate_window COM worker error: {}", e);
+            false
+        }
+        Err(e) => {
+            log::error!("activate_window spawn_blocking error: {}", e);
+            false
+        }
+    };
     
     let response = ActivateWindowResponse {
         success,
@@ -81,7 +83,7 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
 
 /// POST /api/window/focus-element
 /// 激活窗口并使指定元素获得焦点
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct FocusElementRequest {
     #[serde(rename = "windowSelector")]
     pub window_selector: String,
@@ -100,15 +102,22 @@ pub async fn focus_element(req: web::Json<FocusElementRequest>) -> impl Responde
     let window_selector = req.window_selector.clone();
     let xpath = req.xpath.clone();
     
-    let success = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
-        super::super::core::uia::windows_impl::activate_and_focus_element(&window_selector, &xpath)
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_activate_and_focus_element(window_selector, xpath)
     })
-    .await
-    .unwrap_or(false);
+    .await;
+    
+    let success = match result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            log::error!("focus_element COM worker error: {}", e);
+            false
+        }
+        Err(e) => {
+            log::error!("focus_element spawn_blocking error: {}", e);
+            false
+        }
+    };
     
     HttpResponse::Ok().json(FocusElementResponse {
         success,

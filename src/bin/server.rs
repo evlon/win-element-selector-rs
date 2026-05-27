@@ -129,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/keyboard/shortcut", web::post().to(keyboard::execute_shortcut_api))
             .route("/api/keyboard/key", web::post().to(keyboard::execute_key_api))
     })
+    .keep_alive(std::time::Duration::from_secs(75))   // 保持连接 75 秒，避免频繁断连
+    .client_request_timeout(std::time::Duration::from_secs(30))  // 请求超时 30 秒
+    .client_disconnect_timeout(std::time::Duration::from_secs(30)) // 客户端断开超时 30 秒
     .bind(&bind_addr)?
     .run()
     .await?;

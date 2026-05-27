@@ -45,6 +45,7 @@ pub async fn get_element(
             found: false,
             element_selector: String::new(),
             element: None,
+            total: 0,
             error: Some("缺少查询参数".to_string()),
         });
     };
@@ -67,16 +68,20 @@ pub async fn get_element(
 
     match result {
         Ok(Ok(elements)) => {
+            let total = elements.len();
             if let Some(element_info) = elements.into_iter().next() {
+                let center_pos = element_info.center
+                    .map(|c| format!("({}, {})", c.x, c.y))
+                    .unwrap_or_else(|| "N/A".to_string());
                 info!(
-                    "Element found: type='{}' name='{}' center=({},{})",
-                    element_info.control_type, element_info.name,
-                    element_info.center.x, element_info.center.y
+                    "Element found: type='{}' name='{}' center={} (total={})",
+                    element_info.control_type, element_info.name, center_pos, total
                 );
                 HttpResponse::Ok().json(ElementResponse {
                     found: true,
                     element_selector: element_query.element.clone(),
                     element: Some(element_info),
+                    total,
                     error: None,
                 })
             } else {
@@ -85,6 +90,7 @@ pub async fn get_element(
                     found: false,
                     element_selector: element_query.element.clone(),
                     element: None,
+                    total: 0,
                     error: Some("未找到匹配元素".to_string()),
                 })
             }
@@ -95,6 +101,7 @@ pub async fn get_element(
                 found: false,
                 element_selector: element_query.element.clone(),
                 element: None,
+                total: 0,
                 error: Some(format!("内部错误: {}", e)),
             })
         }
@@ -104,6 +111,7 @@ pub async fn get_element(
                 found: false,
                 element_selector: element_query.element.clone(),
                 element: None,
+                total: 0,
                 error: Some(format!("线程错误: {}", e)),
             })
         }
