@@ -17,6 +17,7 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
 };
+use std::thread;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 点和轨迹
@@ -127,6 +128,46 @@ pub fn right_click_at(point: super::api::types::Point) -> anyhow::Result<()> {
 pub fn scroll_wheel(delta: i32) -> anyhow::Result<()> {
     send_mouse_scroll_event(delta);
     info!("Scroll wheel delta={}", delta);
+    Ok(())
+}
+
+/// 鼠标悬停在指定位置（拟人化移动 + 停留）
+pub fn hover_at(
+    point: super::api::types::Point,
+    duration_ms: u64,
+) -> anyhow::Result<()> {
+    let start = get_cursor_position();
+    humanized_move(start, point, duration_ms, "bezier")?;
+    // 悬停停留时间，让 tooltip/hover 菜单有足够时间出现
+    thread::sleep(Duration::from_millis(duration_ms));
+    info!("Hover completed at ({}, {})", point.x, point.y);
+    Ok(())
+}
+
+/// 拖拽操作：从起点移动到终点
+/// 实现: move to source → LEFTDOWN → bezier_move to target → LEFTUP
+pub fn drag_mouse(
+    source: super::api::types::Point,
+    target: super::api::types::Point,
+    duration_ms: u64,
+) -> anyhow::Result<()> {
+    // 1. 移动到起点
+    let start = get_cursor_position();
+    humanized_move(start, source, duration_ms / 2, "bezier")?;
+    thread::sleep(Duration::from_millis(100));
+
+    // 2. 按下鼠标左键
+    send_mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0);
+    thread::sleep(Duration::from_millis(50));
+
+    // 3. 拖拽到终点
+    bezier_move(source, target, duration_ms)?;
+    thread::sleep(Duration::from_millis(50));
+
+    // 4. 释放鼠标左键
+    send_mouse_event(MOUSEEVENTF_LEFTUP, 0, 0);
+
+    info!("Drag completed: ({}, {}) -> ({}, {})", source.x, source.y, target.x, target.y);
     Ok(())
 }
 

@@ -180,6 +180,17 @@ pub struct ElementInfo {
     pub item_status: String,
     #[serde(rename = "processId")]
     pub process_id: u32,
+    // ─── UIA Pattern availability ──────────────────────────────────────────
+    #[serde(default, rename = "isCheckable", skip_serializing_if = "Option::is_none")]
+    pub is_checkable: Option<bool>,
+    #[serde(default, rename = "isChecked", skip_serializing_if = "Option::is_none")]
+    pub is_checked: Option<bool>,
+    #[serde(default, rename = "isClickable", skip_serializing_if = "Option::is_none")]
+    pub is_clickable: Option<bool>,
+    #[serde(default, rename = "isScrollable", skip_serializing_if = "Option::is_none")]
+    pub is_scrollable: Option<bool>,
+    #[serde(default, rename = "isSelected", skip_serializing_if = "Option::is_none")]
+    pub is_selected: Option<bool>,
 }
 
 /// 元素查找响应
@@ -343,6 +354,76 @@ pub struct MouseScrollResponse {
     /// 是否找到目标
     #[serde(rename = "targetFound")]
     pub target_found: bool,
+    pub error: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 悬停 & 拖拽 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 悬停选项
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MouseHoverOptions {
+    /// 是否启用拟人化移动
+    #[serde(default = "default_humanize")]
+    pub humanize: bool,
+    /// 悬停停留时间（毫秒），默认 500
+    #[serde(default = "default_hover_duration")]
+    pub duration: u64,
+}
+
+fn default_hover_duration() -> u64 { 500 }
+
+/// 悬停请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct MouseHoverRequest {
+    /// 窗口选择器
+    pub window: WindowSelectorOrString,
+    /// 元素 XPath
+    pub element: String,
+    pub options: Option<MouseHoverOptions>,
+}
+
+/// 悬停响应
+#[derive(Debug, Clone, Serialize)]
+pub struct MouseHoverResponse {
+    pub success: bool,
+    pub hover_point: Point,
+    pub error: Option<String>,
+}
+
+/// 拖拽选项
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MouseDragOptions {
+    /// 是否启用拟人化移动
+    #[serde(default = "default_humanize")]
+    pub humanize: bool,
+    /// 拖拽持续时间（毫秒）
+    #[serde(default = "default_duration")]
+    pub duration: u64,
+}
+
+/// 拖拽请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct MouseDragRequest {
+    /// 源元素窗口选择器
+    pub window: WindowSelectorOrString,
+    /// 源元素 XPath
+    #[serde(rename = "sourceElement")]
+    pub source_element: String,
+    /// 目标元素 XPath
+    #[serde(rename = "targetElement")]
+    pub target_element: String,
+    pub options: Option<MouseDragOptions>,
+}
+
+/// 拖拽响应
+#[derive(Debug, Clone, Serialize)]
+pub struct MouseDragResponse {
+    pub success: bool,
+    pub source_point: Point,
+    pub target_point: Point,
+    pub duration_ms: u64,
     pub error: Option<String>,
 }
 

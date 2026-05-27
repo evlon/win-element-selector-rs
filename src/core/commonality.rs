@@ -275,6 +275,11 @@ mod tests {
             position_mode: String::new(),
             sibling_count: 1,
             depth_from_window: 0,
+            is_checkable: false,
+            is_checked: None,
+            is_clickable: false,
+            is_scrollable: false,
+            is_selected: None,
         }
     }
 
@@ -304,6 +309,11 @@ mod tests {
             position_mode: String::new(),
             sibling_count: 1,
             depth_from_window: 0,
+            is_checkable: false,
+            is_checked: None,
+            is_clickable: false,
+            is_scrollable: false,
+            is_selected: None,
         }
     }
 

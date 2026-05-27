@@ -1,6 +1,6 @@
 [package]
 name = "element-selector"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 authors = ["evlon"]
 description = "Windows UI Automation element selector tool"

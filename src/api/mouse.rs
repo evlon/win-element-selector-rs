@@ -9,6 +9,8 @@ use super::types::{
     MouseMoveRequest, MouseMoveResponse, MouseMoveOptions,
     MouseClickRequest, MouseClickResponse, MouseClickOptions,
     MouseScrollRequest, MouseScrollResponse, MouseScrollOptions,
+    MouseHoverRequest, MouseHoverResponse, MouseHoverOptions,
+    MouseDragRequest, MouseDragResponse, MouseDragOptions,
     Point,
 };
 use super::super::mouse_control;
@@ -506,5 +508,295 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
             target_found: options.wait.is_none(),
             error: None,
         })
+    }).await
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 悬停 & 拖拽
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// POST /api/mouse/hover
+/// 鼠标悬停在元素上（触发 tooltip/hover 菜单）
+pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
+    let request = body.into_inner();
+    let options = request.options.unwrap_or(MouseHoverOptions::default());
+
+    info!(
+        "API: /api/mouse/hover window='{}' element='{}' humanize={} duration={}ms",
+        match &request.window {
+            super::types::WindowSelectorOrString::String(s) => s.as_str(),
+            super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or(""),
+        },
+        request.element,
+        options.humanize,
+        options.duration
+    );
+
+    let window_selector = build_window_selector(&request.window);
+    let element = request.element.clone();
+
+    let element_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
+        }
+        super::super::capture::validate_selector_and_xpath_detailed(
+            &window_selector,
+            &element,
+            &[],
+        )
+    })
+    .await;
+
+    match element_result {
+        Ok(detailed_result) => {
+            use super::super::model::ValidationResult;
+            match &detailed_result.overall {
+                ValidationResult::Found { first_rect, .. } => {
+                    if let Some(rect) = first_rect {
+                        let rect_api: super::types::Rect = rect.clone().into();
+                        let hover_point = rect_api.center();
+
+                        with_auto_pause(|| async {
+                            // 确保窗口在前台
+                            let _ = super::super::core::uia::activate_window_by_selector(
+                                &build_window_selector(&request.window),
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                            if options.humanize {
+                                let start = mouse_control::get_cursor_position();
+                                let _ = mouse_control::humanized_move(
+                                    start, hover_point, options.duration / 2, "bezier",
+                                );
+                            } else {
+                                let _ = mouse_control::linear_move(
+                                    mouse_control::get_cursor_position(), hover_point,
+                                );
+                            }
+
+                            // 悬停停留
+                            tokio::time::sleep(tokio::time::Duration::from_millis(options.duration)).await;
+
+                            info!("Hover completed at ({}, {})", hover_point.x, hover_point.y);
+                            HttpResponse::Ok().json(MouseHoverResponse {
+                                success: true,
+                                hover_point,
+                                error: None,
+                            })
+                        }).await
+                    } else {
+                        HttpResponse::Ok().json(MouseHoverResponse {
+                            success: false,
+                            hover_point: Point::new(0, 0),
+                            error: Some("元素坐标获取失败".to_string()),
+                        })
+                    }
+                }
+                ValidationResult::NotFound => {
+                    HttpResponse::Ok().json(MouseHoverResponse {
+                        success: false,
+                        hover_point: Point::new(0, 0),
+                        error: Some(format!("未找到匹配元素")),
+                    })
+                }
+                ValidationResult::Error(e) => {
+                    HttpResponse::Ok().json(MouseHoverResponse {
+                        success: false,
+                        hover_point: Point::new(0, 0),
+                        error: Some(e.clone()),
+                    })
+                }
+                _ => {
+                    HttpResponse::Ok().json(MouseHoverResponse {
+                        success: false,
+                        hover_point: Point::new(0, 0),
+                        error: Some("校验状态未知".to_string()),
+                    })
+                }
+            }
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(MouseHoverResponse {
+                success: false,
+                hover_point: Point::new(0, 0),
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+    }
+}
+
+/// POST /api/mouse/drag
+/// 从源元素拖拽到目标元素
+pub async fn drag_mouse(body: web::Json<MouseDragRequest>) -> impl Responder {
+    let request = body.into_inner();
+    let options = request.options.unwrap_or(MouseDragOptions::default());
+
+    info!(
+        "API: /api/mouse/drag window='{}' source='{}' target='{}' duration={}ms",
+        match &request.window {
+            super::types::WindowSelectorOrString::String(s) => s.as_str(),
+            super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or(""),
+        },
+        request.source_element,
+        request.target_element,
+        options.duration
+    );
+
+    let window_selector = build_window_selector(&request.window);
+    let source_xpath = request.source_element.clone();
+    let target_xpath = request.target_element.clone();
+
+    // 查询源元素和目标元素坐标
+    let element_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
+            log::error!("COM STA init failed: {}", e);
+        }
+        let source_result = super::super::capture::validate_selector_and_xpath_detailed(
+            &window_selector, &source_xpath, &[],
+        );
+        let target_result = super::super::capture::validate_selector_and_xpath_detailed(
+            &window_selector, &target_xpath, &[],
+        );
+        (source_result, target_result)
+    })
+    .await;
+
+    let (source_result, target_result) = match element_result {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(MouseDragResponse {
+                success: false,
+                source_point: Point::new(0, 0),
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some(format!("内部错误: {}", e)),
+            });
+        }
+    };
+
+    use super::super::model::ValidationResult;
+
+    let source_point = match &source_result.overall {
+        ValidationResult::Found { first_rect, .. } => {
+            if let Some(rect) = first_rect {
+                let rect_api: super::types::Rect = rect.clone().into();
+                rect_api.center()
+            } else {
+                return HttpResponse::Ok().json(MouseDragResponse {
+                    success: false,
+                    source_point: Point::new(0, 0),
+                    target_point: Point::new(0, 0),
+                    duration_ms: 0,
+                    error: Some("源元素坐标获取失败".to_string()),
+                });
+            }
+        }
+        ValidationResult::NotFound => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point: Point::new(0, 0),
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some(format!("未找到源元素: {}", request.source_element)),
+            });
+        }
+        ValidationResult::Error(e) => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point: Point::new(0, 0),
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some(e.clone()),
+            });
+        }
+        _ => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point: Point::new(0, 0),
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some("校验状态未知".to_string()),
+            });
+        }
+    };
+
+    let target_point = match &target_result.overall {
+        ValidationResult::Found { first_rect, .. } => {
+            if let Some(rect) = first_rect {
+                let rect_api: super::types::Rect = rect.clone().into();
+                rect_api.center()
+            } else {
+                return HttpResponse::Ok().json(MouseDragResponse {
+                    success: false,
+                    source_point,
+                    target_point: Point::new(0, 0),
+                    duration_ms: 0,
+                    error: Some("目标元素坐标获取失败".to_string()),
+                });
+            }
+        }
+        ValidationResult::NotFound => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point,
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some(format!("未找到目标元素: {}", request.target_element)),
+            });
+        }
+        ValidationResult::Error(e) => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point,
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some(e.clone()),
+            });
+        }
+        _ => {
+            return HttpResponse::Ok().json(MouseDragResponse {
+                success: false,
+                source_point,
+                target_point: Point::new(0, 0),
+                duration_ms: 0,
+                error: Some("校验状态未知".to_string()),
+            });
+        }
+    };
+
+    with_auto_pause(|| async {
+        // 确保窗口在前台
+        let _ = super::super::core::uia::activate_window_by_selector(
+            &build_window_selector(&request.window),
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let drag_start = std::time::Instant::now();
+        let result = mouse_control::drag_mouse(source_point, target_point, options.duration);
+        let drag_duration = drag_start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(_) => {
+                info!("Drag completed: ({}, {}) -> ({}, {})",
+                    source_point.x, source_point.y, target_point.x, target_point.y);
+                HttpResponse::Ok().json(MouseDragResponse {
+                    success: true,
+                    source_point,
+                    target_point,
+                    duration_ms: drag_duration,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                warn!("Drag failed: {}", e);
+                HttpResponse::Ok().json(MouseDragResponse {
+                    success: false,
+                    source_point,
+                    target_point,
+                    duration_ms: 0,
+                    error: Some(format!("拖拽失败: {}", e)),
+                })
+            }
+        }
     }).await
 }

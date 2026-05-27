@@ -226,6 +226,17 @@ pub struct HierarchyNode {
     /// 窗口节点本身 depth=0，其直接子节点 depth=1，以此类推。
     #[serde(default)]
     pub depth_from_window:     usize,
+    // ─── UIA Pattern availability (for element state detection) ─────────────
+    #[serde(default)]
+    pub is_checkable:          bool,        // TogglePattern available
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_checked:            Option<bool>, // ToggleState
+    #[serde(default)]
+    pub is_clickable:          bool,        // InvokePattern available or clickable ControlType
+    #[serde(default)]
+    pub is_scrollable:         bool,        // ScrollPattern available
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_selected:           Option<bool>, // SelectionItemPattern IsSelected
 }
 
 impl HierarchyNode {
@@ -295,6 +306,11 @@ impl HierarchyNode {
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture
             depth_from_window: 0,  // 默认值，捕获时会计算真实深度
+            is_checkable: false,
+            is_checked: None,
+            is_clickable: false,
+            is_scrollable: false,
+            is_selected: None,
         }
     }
 

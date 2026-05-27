@@ -116,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/mouse/click", web::post().to(mouse::click_mouse))
             // 鼠标滚动
             .route("/api/mouse/scroll", web::post().to(mouse::scroll_mouse))
+            // 鼠标悬停
+            .route("/api/mouse/hover", web::post().to(mouse::hover_mouse))
+            // 鼠标拖拽
+            .route("/api/mouse/drag", web::post().to(mouse::drag_mouse))
             // 空闲移动 API
             .route("/api/mouse/idle/start", web::post().to(idle_motion::start_idle_motion))
             .route("/api/mouse/idle/stop", web::post().to(idle_motion::stop_idle_motion))

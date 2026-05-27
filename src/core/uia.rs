@@ -454,6 +454,13 @@ pub mod windows_impl {
         })
     }
 
+    /// Determine if a ControlType is inherently clickable (even without InvokePattern).
+    fn is_control_type_clickable(control_type: &str) -> bool {
+        matches!(control_type, "Button" | "Hyperlink" | "ListItem" | "MenuItem"
+            | "TabItem" | "TreeItem" | "RadioButton" | "CheckBox"
+            | "ComboBox" | "Link" | "Image" | "Document")
+    }
+
     fn element_to_node(
         elem: &IUIAutomationElement,
         _auto: &IUIAutomation,
@@ -524,6 +531,58 @@ pub mod windows_impl {
         node.access_key = get_bstr(unsafe { elem.CurrentAccessKey() });
         node.item_type = get_bstr(unsafe { elem.CurrentItemType() });
         node.item_status = get_bstr(unsafe { elem.CurrentItemStatus() });
+
+        // ─── UIA Pattern detection ───────────────────────────────────────────
+        use windows::Win32::UI::Accessibility::{
+            UIA_TogglePatternId, UIA_InvokePatternId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
+        };
+        let has_toggle = unsafe {
+            elem.GetCurrentPattern(UIA_TogglePatternId).is_ok()
+        };
+        let has_invoke = unsafe {
+            elem.GetCurrentPattern(UIA_InvokePatternId).is_ok()
+        };
+        let has_scroll = unsafe {
+            elem.GetCurrentPattern(UIA_ScrollPatternId).is_ok()
+        };
+        let has_selection_item = unsafe {
+            elem.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok()
+        };
+
+        node.is_checkable = has_toggle;
+        node.is_clickable = has_invoke || is_control_type_clickable(&control_type);
+        node.is_scrollable = has_scroll;
+
+        // Read ToggleState if checkable
+        if has_toggle {
+            if let Ok(pattern) = unsafe {
+                elem.GetCurrentPattern(UIA_TogglePatternId)
+            } {
+                use windows::Win32::UI::Accessibility::IToggleProvider;
+                let toggle: IToggleProvider = unsafe {
+                    std::mem::transmute(pattern)
+                };
+                if let Ok(state) = unsafe { toggle.ToggleState() } {
+                    // ToggleState_Off = 0, ToggleState_On = 1, ToggleState_Indeterminate = 2
+                    node.is_checked = Some(state.0 == 1);
+                }
+            }
+        }
+
+        // Read SelectionItem IsSelected if available
+        if has_selection_item {
+            if let Ok(pattern) = unsafe {
+                elem.GetCurrentPattern(UIA_SelectionItemPatternId)
+            } {
+                use windows::Win32::UI::Accessibility::ISelectionItemProvider;
+                let sel: ISelectionItemProvider = unsafe {
+                    std::mem::transmute(pattern)
+                };
+                if let Ok(selected) = unsafe { sel.IsSelected() } {
+                    node.is_selected = Some(selected.as_bool());
+                }
+            }
+        }
         
         // Build extended property filters from all populated fields
         node.build_extended_filters();
@@ -1882,6 +1941,11 @@ pub mod windows_impl {
                         item_type: get_bstr(unsafe { elem.CurrentItemType() }),
                         item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
                         process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+                        is_checkable: None,
+                        is_checked: None,
+                        is_clickable: None,
+                        is_scrollable: None,
+                        is_selected: None,
                     })
                 }).collect();
             }
@@ -1978,6 +2042,11 @@ pub mod windows_impl {
                 item_type: get_bstr(unsafe { elem.CurrentItemType() }),
                 item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
                 process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+                is_checkable: None,
+                is_checked: None,
+                is_clickable: None,
+                is_scrollable: None,
+                is_selected: None,
             })
         }).collect()
     }
