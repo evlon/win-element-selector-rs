@@ -362,6 +362,9 @@ pub struct MouseScrollResponse {
     /// 是否找到目标
     #[serde(rename = "targetFound")]
     pub target_found: bool,
+    /// 目标元素的矩形区域（仅当 target_found=true 时有值）
+    #[serde(rename = "targetRect", skip_serializing_if = "Option::is_none")]
+    pub target_rect: Option<Rect>,
     pub error: Option<String>,
 }
 

@@ -374,6 +374,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 success: false,
                 scrolled: 0,
                 target_found: false,
+                target_rect: None,
                 error: Some(format!("内部错误: {}", e)),
             });
         }
@@ -395,6 +396,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                     success: false,
                     scrolled: 0,
                     target_found: false,
+                    target_rect: None,
                     error: Some("元素坐标获取失败".to_string()),
                 });
             }
@@ -404,6 +406,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 success: false,
                 scrolled: 0,
                 target_found: false,
+                target_rect: None,
                 error: Some(format!("未找到元素: {}", request.element)),
             });
         }
@@ -412,6 +415,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 success: false,
                 scrolled: 0,
                 target_found: false,
+                target_rect: None,
                 error: Some(e.clone()),
             });
         }
@@ -420,6 +424,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 success: false,
                 scrolled: 0,
                 target_found: false,
+                target_rect: None,
                 error: Some("校验状态未知".to_string()),
             });
         }
@@ -446,6 +451,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                         success: true,
                         scrolled,
                         target_found: false,
+                        target_rect: None,
                         error: Some(format!("超时 {}ms", timeout_ms)),
                     });
                 }
@@ -467,6 +473,13 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                 if let Ok(wr) = wait_result {
                     if matches!(wr.overall, ValidationResult::Found { .. }) {
+                        // 提取目标元素的 rect（用于客户端判断元素是否完全可见）
+                        let target_rect = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                            first_rect.as_ref().map(|r| r.clone().into())
+                        } else {
+                            None
+                        };
+
                         if wait_visible {
                             // visible 模式：还需检查元素不在屏幕外
                             if wr.is_offscreen.unwrap_or(false) {
@@ -479,6 +492,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                     success: true,
                                     scrolled,
                                     target_found: true,
+                                    target_rect,
                                     error: None,
                                 });
                             }
@@ -489,6 +503,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                 success: true,
                                 scrolled,
                                 target_found: true,
+                                target_rect,
                                 error: None,
                             });
                         }
@@ -531,6 +546,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
             success: true,
             scrolled,
             target_found: options.wait.is_none(),
+            target_rect: None,
             error: None,
         })
     }).await
