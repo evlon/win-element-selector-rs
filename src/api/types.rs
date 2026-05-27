@@ -199,7 +199,6 @@ pub struct ElementResponse {
     pub found: bool,
     #[serde(rename = "elementSelector")]
     pub element_selector: String,
-    #[serde(flatten)]
     pub element: Option<ElementInfo>,
     pub error: Option<String>,
 }
