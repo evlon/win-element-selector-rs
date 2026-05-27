@@ -288,7 +288,7 @@ impl XPathOptimizer {
                     optimized_filter.enabled = f.value.parse::<i32>().unwrap_or(0) > 0;
                 }
                 // 扩展属性：条件性添加的属性，保留（它们已有区分度）
-                "FrameworkId" | "HelpText" | "LocalizedControlType" | "AcceleratorKey"
+                "FrameworkId" | "HelpText" | "AcceleratorKey"
                 | "AccessKey" | "ItemType" | "ItemStatus" => {
                     // 字符串属性：非空时保留
                     optimized_filter.enabled = !f.value.is_empty();

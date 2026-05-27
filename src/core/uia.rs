@@ -10,7 +10,7 @@
 
 use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
-use uiauto_xpath::{XPath, UiElement as UiaXPathElement};
+use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Windows implementation
@@ -594,50 +594,7 @@ pub mod windows_impl {
     }
 
     fn control_type_name(id: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> String {
-        use windows::Win32::UI::Accessibility::*;
-        match id {
-            UIA_ButtonControlTypeId       => "Button",
-            UIA_CalendarControlTypeId     => "Calendar",
-            UIA_CheckBoxControlTypeId     => "CheckBox",
-            UIA_ComboBoxControlTypeId     => "ComboBox",
-            UIA_CustomControlTypeId       => "Custom",
-            UIA_DataGridControlTypeId     => "DataGrid",
-            UIA_DataItemControlTypeId     => "DataItem",
-            UIA_DocumentControlTypeId     => "Document",
-            UIA_EditControlTypeId         => "Edit",
-            UIA_GroupControlTypeId        => "Group",
-            UIA_HeaderControlTypeId       => "Header",
-            UIA_HeaderItemControlTypeId   => "HeaderItem",
-            UIA_HyperlinkControlTypeId    => "Hyperlink",
-            UIA_ImageControlTypeId        => "Image",
-            UIA_ListControlTypeId         => "List",
-            UIA_ListItemControlTypeId     => "ListItem",
-            UIA_MenuBarControlTypeId      => "MenuBar",
-            UIA_MenuControlTypeId         => "Menu",
-            UIA_MenuItemControlTypeId     => "MenuItem",
-            UIA_PaneControlTypeId         => "Pane",
-            UIA_ProgressBarControlTypeId  => "ProgressBar",
-            UIA_RadioButtonControlTypeId  => "RadioButton",
-            UIA_ScrollBarControlTypeId    => "ScrollBar",
-            UIA_SemanticZoomControlTypeId => "SemanticZoom",
-            UIA_SeparatorControlTypeId    => "Separator",
-            UIA_SliderControlTypeId       => "Slider",
-            UIA_SpinnerControlTypeId      => "Spinner",
-            UIA_SplitButtonControlTypeId  => "SplitButton",
-            UIA_StatusBarControlTypeId    => "StatusBar",
-            UIA_TabControlTypeId          => "Tab",
-            UIA_TabItemControlTypeId      => "TabItem",
-            UIA_TableControlTypeId        => "Table",
-            UIA_TextControlTypeId         => "Text",
-            UIA_ThumbControlTypeId        => "Thumb",
-            UIA_TitleBarControlTypeId     => "TitleBar",
-            UIA_ToolBarControlTypeId      => "ToolBar",
-            UIA_ToolTipControlTypeId      => "ToolTip",
-            UIA_TreeControlTypeId         => "Tree",
-            UIA_TreeItemControlTypeId     => "TreeItem",
-            UIA_WindowControlTypeId       => "Window",
-            _                             => "Control",
-        }.to_string()
+        control_type_id_to_name(id.0).to_string()
     }
 
     // ── Validation ────────────────────────────────────────────────────────────

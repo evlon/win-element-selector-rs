@@ -311,9 +311,7 @@ impl HierarchyNode {
         if !self.help_text.is_empty() {
             self.filters.push(PropertyFilter::new("HelpText", &self.help_text));
         }
-        if !self.localized_control_type.is_empty() {
-            self.filters.push(PropertyFilter::new("LocalizedControlType", &self.localized_control_type));
-        }
+        // LocalizedControlType is system-language dependent, skip to keep XPath portable
         if !self.accelerator_key.is_empty() {
             self.filters.push(PropertyFilter::new("AcceleratorKey", &self.accelerator_key));
         }

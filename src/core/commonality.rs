@@ -119,11 +119,12 @@ fn compute_common_properties(samples: &[SimilarElementSample], i: usize, ignore_
 
     // 定义可比较的属性列表及提取函数
     // 按优先级排列：AutomationId 最稳定，其次是 ClassName 等
+    // 注意：LocalizedControlType 是系统语言相关的（中文返回"按钮"，英文返回"Button"），
+    // 会导致 XPath 不可移植，因此不加入。ControlType 已通过 XPath 标签名表达，也不重复。
     let props: Vec<(&str, &dyn Fn(&HierarchyNode) -> String)> = vec![
         ("AutomationId", &|n: &HierarchyNode| n.automation_id.clone()),
         ("ClassName", &|n: &HierarchyNode| n.class_name.clone()),
         ("FrameworkId", &|n: &HierarchyNode| if !n.framework_id.is_empty() { n.framework_id.clone() } else { String::new() }),
-        ("LocalizedControlType", &|n: &HierarchyNode| if !n.localized_control_type.is_empty() { n.localized_control_type.clone() } else { String::new() }),
         ("Name", &|n: &HierarchyNode| n.name.clone()),
         ("HelpText", &|n: &HierarchyNode| if !n.help_text.is_empty() { n.help_text.clone() } else { String::new() }),
         ("ItemType", &|n: &HierarchyNode| if !n.item_type.is_empty() { n.item_type.clone() } else { String::new() }),
@@ -442,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_dynamic_common_properties() {
-        // 模拟真实微信场景：Group 和 Custom 没有 AutomationId/Name，但有共同的 ClassName/FrameworkId/LocalizedControlType
+        // 模拟真实微信场景：Group 和 Custom 没有 AutomationId/Name，但有共同的 ClassName/FrameworkId
         let chain1 = vec![
             make_node("Window", "", "微信"),
             make_node_full("Group", "", "QWidget", "", "Qt", "组"),
