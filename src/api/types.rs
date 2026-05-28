@@ -323,7 +323,7 @@ pub struct MouseClickResponse {
 pub struct MouseScrollOptions {
     /// WHEEL_DELTA 单位，默认 120
     pub delta: Option<i32>,
-    /// 滚动次数，默认 3
+    /// 滚动次数，默认 30
     #[serde(default = "default_scroll_times")]
     pub times: Option<u32>,
     /// 等待出现的 xpath
@@ -339,9 +339,18 @@ pub struct MouseScrollOptions {
     /// 等待模式：exist=元素存在即可，visible=元素存在且不在屏幕外
     #[serde(rename = "waitMode", default)]
     pub wait_mode: Option<String>,
+    /// 是否滚动到视口中心（仅 visible 模式生效），默认 true
+    #[serde(rename = "scrollToCenter", default = "default_scroll_to_center")]
+    pub scroll_to_center: Option<bool>,
+    /// scrollToCenter 模式下，元素可见后继续调整到视口中心的最大滚动次数，避免死循环，默认 5
+    #[serde(rename = "scrollToCenterAdjustTimes", default = "default_scroll_to_center_adjust_times")]
+    pub scroll_to_center_adjust_times: Option<u32>,
 }
 
-fn default_scroll_times() -> Option<u32> { Some(3) }
+fn default_scroll_to_center() -> Option<bool> { Some(true) }
+fn default_scroll_to_center_adjust_times() -> Option<u32> { Some(5) }
+
+fn default_scroll_times() -> Option<u32> { Some(30) }
 fn default_delta_factor() -> Option<f32> { Some(0.8) }
 
 /// 滚动请求

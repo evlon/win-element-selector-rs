@@ -338,6 +338,8 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let auto_delta = options.auto_delta.unwrap_or(false);
     let delta_factor = options.delta_factor.unwrap_or(0.8);
     let wait_visible = options.wait_mode.as_deref() == Some("visible");
+    let scroll_to_center = options.scroll_to_center.unwrap_or(true);
+    let scroll_to_center_adjust_times = options.scroll_to_center_adjust_times.unwrap_or(5);
     // 优先使用传入的窗口选择器，否则回退到通用 "Window"
     let window_selector = request.window.as_deref().unwrap_or("Window").to_string();
     let window_selector_for_wait = window_selector.clone();
@@ -374,7 +376,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
     use super::super::model::ValidationResult;
 
-    let (scroll_point, container_height_for_auto) = match &element_result.overall {
+    let (scroll_point, container_rect) = match &element_result.overall {
         ValidationResult::Found { first_rect, .. } => {
             if let Some(rect) = first_rect {
                 let rect_api: super::types::Rect = rect.clone().into();
@@ -382,7 +384,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                     rect_api.x as i32 + rect_api.width as i32 / 2,
                     rect_api.y as i32 + rect_api.height as i32 / 2,
                 );
-                (point, Some(rect_api.height))
+                (point, Some(rect_api))
             } else {
                 return HttpResponse::Ok().json(MouseScrollResponse {
                     success: false,
@@ -422,6 +424,34 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         }
     };
 
+    // 用滚动容器的 rect 计算方向性视口目标 Y
+    // 下滚(delta<0, 元素从下方进入): 目标在视口 70% 处，留顶部余量防过冲
+    // 上滚(delta>0, 元素从上方进入): 目标在视口 30% 处，留底部余量防过冲
+    let viewport_center_y: Option<i32> = if scroll_to_center {
+        container_rect.as_ref().map(|r| {
+            let target = if delta < 0 {
+                // 向下滚动 → 目标偏下(70%)，过冲时元素仍在上半区可见
+                r.y + (r.height as f32 * 0.7) as i32
+            } else {
+                // 向上滚动 → 目标偏上(30%)，过冲时元素仍在下半区可见
+                r.y + (r.height as f32 * 0.3) as i32
+            };
+            target
+        })
+    } else {
+        None
+    };
+    if let Some(vy) = viewport_center_y {
+        let dir_label = if delta < 0 { "down→70%" } else { "up→30%" };
+        info!("Viewport target Y = {} (direction: {})", vy, dir_label);
+    } else if scroll_to_center {
+        warn!("scrollToCenter enabled but viewport target Y unavailable");
+    }
+
+    let container_height_for_auto = container_rect.as_ref().map(|r| r.height);
+    // 容器视口高度，用于百分比计算（threshold、delta 缩放等都基于此）
+    let container_height = container_rect.as_ref().map(|r| r.height as f32).unwrap_or(600.0);
+
     // Step 2: 移动到元素中心
     with_auto_pause(|| async {
         let start_point = mouse_control::get_cursor_position();
@@ -432,6 +462,8 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         let start_time = std::time::Instant::now();
         let mut current_delta = delta; // 初始 delta
         let mut did_initial_scroll = false;
+        let mut scroll_to_center_adjust_count: u32 = 0; // scrollToCenter 模式下可见后的调整次数
+        let original_delta_sign = delta.signum(); // 原始滚动方向符号，调整时始终保持同方向
 
         while scrolled < times {
             // 检测 wait xpath
@@ -463,19 +495,28 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 if let Ok(wr) = wait_result {
                     if matches!(wr.overall, ValidationResult::Found { .. }) {
                         // 提取目标元素的 rect（用于客户端判断元素是否完全可见）
-                        let target_rect = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                        let target_rect: Option<super::types::Rect> = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
                             first_rect.as_ref().map(|r| r.clone().into())
                         } else {
                             None
                         };
 
+                        // 提取当前元素中心 Y（用于测量滚动比例）
+                        let cur_element_center_y = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                            first_rect.as_ref().map(|r| r.y + r.height / 2)
+                        } else {
+                            None
+                        };
+
+                        let cur_offscreen = wr.is_offscreen.unwrap_or(false);
+
                         if wait_visible {
                             // visible 模式：还需检查元素不在屏幕外
-                            if wr.is_offscreen.unwrap_or(false) {
-                                // 元素存在但在屏幕外，继续滚动
-                                info!("Wait xpath found but offscreen, continue scrolling");
-                            } else {
-                                // 元素可见，返回
+                            if cur_offscreen {
+                                // 阶段1：元素在屏幕外，继续同方向滚动
+                                info!("Wait xpath found but offscreen, continue scrolling (delta={})", current_delta);
+                            } else if !scroll_to_center {
+                                // 不需要居中，元素可见即返回
                                 info!("Wait xpath found and visible after {} scrolls", scrolled);
                                 return HttpResponse::Ok().json(MouseScrollResponse {
                                     success: true,
@@ -484,6 +525,61 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                     target_rect,
                                     error: None,
                                 });
+                            } else {
+                                // 阶段2：元素已可见，scrollToCenter 调整到视口中心
+                                scroll_to_center_adjust_count += 1;
+                                if scroll_to_center_adjust_count > scroll_to_center_adjust_times {
+                                    // 已达最大调整次数，停止滚动避免死循环
+                                    info!("Wait xpath visible, scrollToCenter adjust limit reached (adjust_count={}, max={}), stopping after {} scrolls", scroll_to_center_adjust_count, scroll_to_center_adjust_times, scrolled);
+                                    return HttpResponse::Ok().json(MouseScrollResponse {
+                                        success: true,
+                                        scrolled,
+                                        target_found: true,
+                                        target_rect,
+                                        error: Some(format!("scrollToCenter 调整次数已达上限 {}", scroll_to_center_adjust_times)),
+                                    });
+                                }
+
+                                match (cur_element_center_y, viewport_center_y) {
+                                    (Some(ey), Some(vy)) => {
+                                        let distance = (ey - vy).abs();
+                                        // 居中阈值：视口高度的 15%（元素中心距目标中心在此范围内即认为居中）
+                                        let threshold = (container_height * 0.15) as i32;
+                                        if distance <= threshold {
+                                            info!("Wait xpath centered (element_y={}, viewport_y={}, distance={}, threshold={}) after {} scrolls (adjust_count={})", ey, vy, distance, threshold, scrolled, scroll_to_center_adjust_count);
+                                            return HttpResponse::Ok().json(MouseScrollResponse {
+                                                success: true,
+                                                scrolled,
+                                                target_found: true,
+                                                target_rect,
+                                                error: None,
+                                            });
+                                        } else {
+                                            // 同方向渐进缩小策略：
+                                            // 始终保持原始滚动方向，只缩小 delta 量级
+                                            // 这样不会反向滚动导致过冲，更像人的操作
+                                            //
+                                            // 距离越大用较大 delta，距离越小用较小 delta
+                                            // 使用原始 delta 的绝对值作为基准，按距离占视口高度的比例缩放
+                                            let base_abs_delta = delta.abs().max(120);
+                                            let distance_ratio = (distance as f32 / container_height).min(1.0);
+                                            let scaled = (base_abs_delta as f32 * distance_ratio) as i32;
+                                            // 最小 delta 为原始 delta 的 10%，且不低于一个滚轮刻度(120)
+                                            let min_delta = (base_abs_delta as f32 * 0.10).max(120.0) as i32;
+                                            let adjust_delta = scaled.max(min_delta) * original_delta_sign;
+                                            current_delta = adjust_delta;
+                                            info!("Same-direction adjust: element_y={}, viewport_y={}, distance={}, threshold={}, distance_ratio={:.2}, base_abs_delta={}, min_delta={}, adjust_delta={} (adjust_count={}/{})",
+                                                ey, vy, distance, threshold, distance_ratio, base_abs_delta, min_delta, adjust_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
+                                        }
+                                    }
+                                    _ => {
+                                        // 中心数据不可用，继续同方向滚动（不放弃，受 adjust 次数限制）
+                                        // 每次缩减到原来的一半，最小为原始 delta 的 10%
+                                        let min_delta = (delta.abs() as f32 * 0.10).max(120.0) as i32;
+                                        current_delta = (current_delta.abs() / 2).max(min_delta) * original_delta_sign;
+                                        info!("Wait xpath visible, scrollToCenter no center data, reduced delta={} (adjust_count={}/{})", current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
+                                    }
+                                }
                             }
                         } else {
                             // exist 模式：找到即可
