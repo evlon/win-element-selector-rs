@@ -80,6 +80,13 @@ pub enum UiaRequest {
         response: Sender<anyhow::Result<Vec<crate::core::model::WindowInfo>>>,
     },
 
+    /// 获取元素可视区域位置信息
+    GetElementVisibility {
+        window_selector: String,
+        element_xpath: String,
+        response: Sender<anyhow::Result<crate::api::types::ElementVisibilityResponse>>,
+    },
+
     /// 关闭工作线程
     Shutdown,
 }
@@ -249,6 +256,13 @@ impl ComWorker {
                 let result = Self::do_list_windows();
                 log::debug!("[PERF] list_windows completed in {}ms, found {} windows",
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                let _ = response.send(result);
+            }
+            UiaRequest::GetElementVisibility { window_selector, element_xpath, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] get_element_visibility started for {}", element_xpath);
+                let result = Self::do_get_element_visibility(automation, &window_selector, &element_xpath);
+                log::info!("[PERF] get_element_visibility completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -434,6 +448,189 @@ impl ComWorker {
     /// 列出所有窗口
     fn do_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
         Ok(crate::capture::list_windows())
+    }
+
+    /// 获取元素可视区域位置
+    fn do_get_element_visibility(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+        element_xpath: &str,
+    ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
+        use crate::api::types::{ElementVisibilityResponse, OverflowInfo, Rect};
+        use crate::core::model::ValidationResult;
+
+        // 1. 获取元素信息（rect + is_offscreen）
+        let detailed = crate::core::uia::validate_selector_and_xpath_detailed(
+            window_selector,
+            element_xpath,
+            &[],
+        );
+
+        let (element_rect, is_offscreen) = match &detailed.overall {
+            ValidationResult::Found { first_rect, .. } => {
+                let rect = first_rect.clone();
+                let offscreen = detailed.is_offscreen;
+                (rect, offscreen)
+            }
+            ValidationResult::NotFound => {
+                return Ok(ElementVisibilityResponse {
+                    found: false,
+                    is_offscreen: None,
+                    visibility: "not_found".to_string(),
+                    position: "unknown".to_string(),
+                    element_rect: None,
+                    viewport_rect: None,
+                    overflow: None,
+                    scroll_direction: None,
+                    error: Some("元素未找到".to_string()),
+                });
+            }
+            ValidationResult::Error(e) => {
+                return Ok(ElementVisibilityResponse {
+                    found: false,
+                    is_offscreen: None,
+                    visibility: "error".to_string(),
+                    position: "unknown".to_string(),
+                    element_rect: None,
+                    viewport_rect: None,
+                    overflow: None,
+                    scroll_direction: None,
+                    error: Some(e.clone()),
+                });
+            }
+            _ => {
+                return Ok(ElementVisibilityResponse {
+                    found: false,
+                    is_offscreen: None,
+                    visibility: "unknown".to_string(),
+                    position: "unknown".to_string(),
+                    element_rect: None,
+                    viewport_rect: None,
+                    overflow: None,
+                    scroll_direction: None,
+                    error: Some("校验状态未知".to_string()),
+                });
+            }
+        };
+
+        let elem_rect = match &element_rect {
+            Some(r) => r,
+            None => {
+                return Ok(ElementVisibilityResponse {
+                    found: true,
+                    is_offscreen,
+                    visibility: "unknown".to_string(),
+                    position: "unknown".to_string(),
+                    element_rect: None,
+                    viewport_rect: None,
+                    overflow: None,
+                    scroll_direction: None,
+                    error: Some("元素坐标获取失败".to_string()),
+                });
+            }
+        };
+
+        // 2. 获取窗口矩形作为视口
+        let window_rect = crate::core::uia::get_window_rect_by_selector(window_selector);
+        let viewport_rect = match &window_rect {
+            Some(r) => r,
+            None => {
+                // 无法获取窗口矩形，仍然返回元素信息
+                return Ok(ElementVisibilityResponse {
+                    found: true,
+                    is_offscreen,
+                    visibility: if is_offscreen.unwrap_or(false) { "offscreen".to_string() } else { "visible".to_string() },
+                    position: "unknown".to_string(),
+                    element_rect: Some(Rect {
+                        x: elem_rect.x,
+                        y: elem_rect.y,
+                        width: elem_rect.width,
+                        height: elem_rect.height,
+                    }),
+                    viewport_rect: None,
+                    overflow: None,
+                    scroll_direction: None,
+                    error: Some("窗口矩形获取失败".to_string()),
+                });
+            }
+        };
+
+        // 3. 计算元素与视口的位置关系
+        let elem_api_rect = Rect {
+            x: elem_rect.x,
+            y: elem_rect.y,
+            width: elem_rect.width,
+            height: elem_rect.height,
+        };
+        let vp_api_rect = Rect {
+            x: viewport_rect.x,
+            y: viewport_rect.y,
+            width: viewport_rect.width,
+            height: viewport_rect.height,
+        };
+
+        // 计算各方向溢出像素
+        let overflow_top = (vp_api_rect.y - elem_api_rect.y).max(0);
+        let overflow_bottom = ((elem_api_rect.y + elem_api_rect.height) - (vp_api_rect.y + vp_api_rect.height)).max(0);
+        let overflow_left = (vp_api_rect.x - elem_api_rect.x).max(0);
+        let overflow_right = ((elem_api_rect.x + elem_api_rect.width) - (vp_api_rect.x + vp_api_rect.width)).max(0);
+
+        let has_overflow = overflow_top > 0 || overflow_bottom > 0 || overflow_left > 0 || overflow_right > 0;
+
+        // 判断可视性
+        let visibility = if !has_overflow {
+            "fully_visible".to_string()
+        } else if overflow_top > 0 && overflow_bottom > 0
+            || overflow_left > 0 && overflow_right > 0
+        {
+            // 元素同时跨越视口上下（或左右），说明元素比视口大或完全在视口外
+            "offscreen".to_string()
+        } else {
+            "partially_visible".to_string()
+        };
+
+        // 判断主位置方向
+        let position = if !has_overflow {
+            "inside".to_string()
+        } else if overflow_top >= overflow_bottom && overflow_top >= overflow_left && overflow_top >= overflow_right {
+            "above".to_string()
+        } else if overflow_bottom >= overflow_top && overflow_bottom >= overflow_left && overflow_bottom >= overflow_right {
+            "below".to_string()
+        } else if overflow_left >= overflow_right {
+            "left".to_string()
+        } else {
+            "right".to_string()
+        };
+
+        // 建议滚动方向
+        let scroll_direction = if !has_overflow {
+            None
+        } else if overflow_top > overflow_bottom {
+            Some("down".to_string()) // 元素在上方，需要向下滚
+        } else if overflow_bottom > overflow_top {
+            Some("up".to_string())   // 元素在下方，需要向上滚
+        } else if overflow_left > overflow_right {
+            Some("right".to_string())
+        } else {
+            Some("left".to_string())
+        };
+
+        Ok(ElementVisibilityResponse {
+            found: true,
+            is_offscreen,
+            visibility,
+            position,
+            element_rect: Some(elem_api_rect),
+            viewport_rect: Some(vp_api_rect),
+            overflow: Some(OverflowInfo {
+                top: overflow_top,
+                bottom: overflow_bottom,
+                left: overflow_left,
+                right: overflow_right,
+            }),
+            scroll_direction,
+            error: None,
+        })
     }
 
     /// 发送捕获请求
@@ -622,6 +819,29 @@ impl ComWorker {
         }
     }
 
+    /// 获取元素可视区域位置
+    pub fn get_element_visibility(
+        &self,
+        window_selector: String,
+        element_xpath: String,
+    ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::GetElementVisibility {
+                window_selector,
+                element_xpath,
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker get_element_visibility timeout after 10s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 优雅关闭工作线程
     pub fn shutdown(&mut self) {
         if let Some(ref sender) = self.sender {
@@ -761,6 +981,19 @@ pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInf
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.list_windows()
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程获取元素可视区域位置
+pub fn global_get_element_visibility(
+    window_selector: String,
+    element_xpath: String,
+) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.get_element_visibility(window_selector, element_xpath)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }

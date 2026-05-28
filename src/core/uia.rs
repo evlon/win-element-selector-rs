@@ -71,107 +71,107 @@ pub mod windows_impl {
         Mta,
     }
 
-    /// COM 管理器 - 统一的 COM 生命周期管理
-    pub struct ComManager;
+    // /// COM 管理器 - 统一的 COM 生命周期管理
+    // pub struct ComManager;
 
-    impl ComManager {
-        /// 检查当前线程的 COM 状态
-        pub fn check_current_apartment() -> ComApartmentType {
-            use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+    // impl ComManager {
+    //     /// 检查当前线程的 COM 状态
+    //     pub fn check_current_apartment() -> ComApartmentType {
+    //         use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
             
-            let mut apt_type = APTTYPE::default();
-            let mut qualifier = APTTYPEQUALIFIER::default();
+    //         let mut apt_type = APTTYPE::default();
+    //         let mut qualifier = APTTYPEQUALIFIER::default();
             
-            match unsafe { CoGetApartmentType(&mut apt_type, &mut qualifier) } {
-                Ok(_) => {
-                    match apt_type {
-                        APTTYPE(0) => ComApartmentType::Sta,  // APTTYPE_STA
-                        APTTYPE(1) => ComApartmentType::Mta,  // APTTYPE_MTA
-                        _ => ComApartmentType::Uninitialized,
-                    }
-                }
-                Err(_) => ComApartmentType::Uninitialized,
-            }
-        }
+    //         match unsafe { CoGetApartmentType(&mut apt_type, &mut qualifier) } {
+    //             Ok(_) => {
+    //                 match apt_type {
+    //                     APTTYPE(0) => ComApartmentType::Sta,  // APTTYPE_STA
+    //                     APTTYPE(1) => ComApartmentType::Mta,  // APTTYPE_MTA
+    //                     _ => ComApartmentType::Uninitialized,
+    //                 }
+    //             }
+    //             Err(_) => ComApartmentType::Uninitialized,
+    //         }
+    //     }
         
-        /// 确保当前线程处于 STA 模式
-        /// 
-        /// 返回结果：
-        /// - Ok(true): 成功初始化或已是 STA
-        /// - Ok(false): 已在 MTA 模式，无法切换（需要警告）
-        /// - Err: 初始化失败
-        pub fn ensure_sta() -> anyhow::Result<bool> {
-            let current = Self::check_current_apartment();
+    //     /// 确保当前线程处于 STA 模式
+    //     /// 
+    //     /// 返回结果：
+    //     /// - Ok(true): 成功初始化或已是 STA
+    //     /// - Ok(false): 已在 MTA 模式，无法切换（需要警告）
+    //     /// - Err: 初始化失败
+    //     pub fn ensure_sta() -> anyhow::Result<bool> {
+    //         let current = Self::check_current_apartment();
             
-            match current {
-                ComApartmentType::Sta => {
-                    log::debug!("COM already in STA mode");
-                    Ok(true)
-                }
-                ComApartmentType::Mta => {
-                    log::warn!("Thread is in MTA mode, UIA operations may fail!");
-                    log::warn!("Consider using a dedicated STA thread for UI Automation");
-                    Ok(false)
-                }
-                ComApartmentType::Uninitialized => {
-                    Self::init_sta()
-                }
-            }
-        }
+    //         match current {
+    //             ComApartmentType::Sta => {
+    //                 log::debug!("COM already in STA mode");
+    //                 Ok(true)
+    //             }
+    //             ComApartmentType::Mta => {
+    //                 log::warn!("Thread is in MTA mode, UIA operations may fail!");
+    //                 log::warn!("Consider using a dedicated STA thread for UI Automation");
+    //                 Ok(false)
+    //             }
+    //             ComApartmentType::Uninitialized => {
+    //                 Self::init_sta()
+    //             }
+    //         }
+    //     }
         
-        /// 初始化 COM STA 模式
-        fn init_sta() -> anyhow::Result<bool> {
-            use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    //     /// 初始化 COM STA 模式
+    //     fn init_sta() -> anyhow::Result<bool> {
+    //         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
             
-            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    //         let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
             
-            // HRESULT 值：
-            // S_OK (0x00000000) = 首次初始化成功
-            // S_FALSE (0x00000001) = 已经初始化
-            // RPC_E_CHANGED_MODE (0x80010106) = 已在 MTA 模式
+    //         // HRESULT 值：
+    //         // S_OK (0x00000000) = 首次初始化成功
+    //         // S_FALSE (0x00000001) = 已经初始化
+    //         // RPC_E_CHANGED_MODE (0x80010106) = 已在 MTA 模式
             
-            if hr == windows::core::HRESULT(0) {
-                log::debug!("COM STA initialized successfully");
-                Ok(true)
-            } else if hr == windows::core::HRESULT(1) {
-                log::debug!("COM already initialized (S_FALSE)");
-                Ok(true)
-            } else if hr == windows::core::HRESULT(0x80010106u32 as i32) {
-                log::error!("Cannot switch from MTA to STA! Thread already in MTA mode.");
-                Ok(false)
-            } else {
-                Err(anyhow::anyhow!(
-                    "CoInitializeEx failed with HRESULT={:#010x}", 
-                    hr.0 as u32
-                ))
-            }
-        }
+    //         if hr == windows::core::HRESULT(0) {
+    //             log::debug!("COM STA initialized successfully");
+    //             Ok(true)
+    //         } else if hr == windows::core::HRESULT(1) {
+    //             log::debug!("COM already initialized (S_FALSE)");
+    //             Ok(true)
+    //         } else if hr == windows::core::HRESULT(0x80010106u32 as i32) {
+    //             log::error!("Cannot switch from MTA to STA! Thread already in MTA mode.");
+    //             Ok(false)
+    //         } else {
+    //             Err(anyhow::anyhow!(
+    //                 "CoInitializeEx failed with HRESULT={:#010x}", 
+    //                 hr.0 as u32
+    //             ))
+    //         }
+    //     }
         
-        /// 安全地重新初始化 COM（用于检测到状态失效时）
-        pub fn safe_reinitialize() -> anyhow::Result<()> {
-            use windows::Win32::System::Com::{CoUninitialize, CoInitializeEx, COINIT_APARTMENTTHREADED};
+    //     /// 安全地重新初始化 COM（用于检测到状态失效时）
+    //     pub fn safe_reinitialize() -> anyhow::Result<()> {
+    //         use windows::Win32::System::Com::{CoUninitialize, CoInitializeEx, COINIT_APARTMENTTHREADED};
             
-            // 先卸载
-            unsafe { CoUninitialize() };
-            log::debug!("COM uninitialized for reinitialization");
+    //         // 先卸载
+    //         unsafe { CoUninitialize() };
+    //         log::debug!("COM uninitialized for reinitialization");
             
-            // 短暂等待，确保清理完成
-            std::thread::sleep(std::time::Duration::from_millis(10));
+    //         // 短暂等待，确保清理完成
+    //         std::thread::sleep(std::time::Duration::from_millis(10));
             
-            // 重新初始化
-            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    //         // 重新初始化
+    //         let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
             
-            if hr == windows::core::HRESULT(0) || hr == windows::core::HRESULT(1) {
-                log::info!("COM reinitialized successfully");
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "COM reinitialization failed: HRESULT={:#010x}", 
-                    hr.0 as u32
-                ))
-            }
-        }
-    }
+    //         if hr == windows::core::HRESULT(0) || hr == windows::core::HRESULT(1) {
+    //             log::info!("COM reinitialized successfully");
+    //             Ok(())
+    //         } else {
+    //             Err(anyhow::anyhow!(
+    //                 "COM reinitialization failed: HRESULT={:#010x}", 
+    //                 hr.0 as u32
+    //             ))
+    //         }
+    //     }
+    // }
 
     /// 带有健康检查的 IUIAutomation 提供者
     pub struct AutomationProvider;
@@ -256,9 +256,9 @@ pub mod windows_impl {
     /// Must be called on each `spawn_blocking` thread before any UIA operation.
     /// 
     /// Deprecated: Use ComManager::ensure_sta() instead
-    pub fn ensure_com_sta() -> anyhow::Result<()> {
-        ComManager::ensure_sta().map(|_| ())
-    }
+    // pub fn ensure_com_sta() -> anyhow::Result<()> {
+    //     ComManager::ensure_sta().map(|_| ())
+    // }
 
     /// Capture the element under the mouse cursor.
     #[allow(dead_code)]
@@ -1266,6 +1266,31 @@ pub mod windows_impl {
         }
         
         false
+    }
+
+    /// 获取窗口的 BoundingRectangle
+    /// 根据窗口选择器查找窗口，返回其边界矩形
+    pub fn get_window_rect_by_selector(window_selector: &str) -> Option<crate::core::model::ElementRect> {
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return None,
+        };
+
+        let windows = find_window_by_selector(&auto, window_selector);
+        let window_element = windows.first()?;
+
+        let rect = unsafe {
+            window_element.CurrentBoundingRectangle()
+                .map(|r| crate::core::model::ElementRect {
+                    x: r.left,
+                    y: r.top,
+                    width: r.right - r.left,
+                    height: r.bottom - r.top,
+                })
+                .ok()
+        };
+
+        rect
     }
 
 

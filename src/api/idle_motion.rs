@@ -539,10 +539,6 @@ pub async fn start_idle_motion(body: web::Json<IdleMotionStartRequest>) -> impl 
     let window_selector_clone = window_selector.clone();
     let xpath_clone = xpath.clone();
     let rect_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = crate::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-        
         crate::capture::validate_selector_and_xpath_detailed(&window_selector_clone, &xpath_clone, &[])  // API层无 hierarchy 数据，layers 为空
     })
     .await;

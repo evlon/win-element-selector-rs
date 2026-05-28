@@ -110,6 +110,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element", web::post().to(element::get_element))
             .route("/api/element/all", web::get().to(element::get_all_elements))
             .route("/api/element/all", web::post().to(element::get_all_elements))
+            // 元素可视区域位置
+            .route("/api/element/visibility", web::post().to(element::get_element_visibility))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

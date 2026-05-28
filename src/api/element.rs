@@ -6,7 +6,7 @@ use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use super::types::{ElementQuery, ElementResponse};
+use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -196,6 +196,63 @@ pub async fn get_all_elements(
                 found: false,
                 elements: vec![],
                 total: 0,
+                error: Some(format!("线程错误: {}", e)),
+            })
+        }
+    }
+}
+
+/// POST /api/element/visibility
+/// 获取元素在可视区域的位置信息
+pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -> impl Responder {
+    let request = body.into_inner();
+
+    info!(
+        "API: /api/element/visibility window='{}' element='{}'",
+        request.window, request.element
+    );
+
+    let window = request.window.clone();
+    let element = request.element.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_get_element_visibility(window, element)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response)) => {
+            info!(
+                "Element visibility: found={} visibility={} position={} scroll_direction={:?}",
+                response.found, response.visibility, response.position, response.scroll_direction
+            );
+            HttpResponse::Ok().json(response)
+        }
+        Ok(Err(e)) => {
+            warn!("Element visibility check failed: {}", e);
+            HttpResponse::Ok().json(ElementVisibilityResponse {
+                found: false,
+                is_offscreen: None,
+                visibility: "error".to_string(),
+                position: "unknown".to_string(),
+                element_rect: None,
+                viewport_rect: None,
+                overflow: None,
+                scroll_direction: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+        Err(e) => {
+            warn!("Element visibility spawn error: {}", e);
+            HttpResponse::InternalServerError().json(ElementVisibilityResponse {
+                found: false,
+                is_offscreen: None,
+                visibility: "error".to_string(),
+                position: "unknown".to_string(),
+                element_rect: None,
+                viewport_rect: None,
+                overflow: None,
+                scroll_direction: None,
                 error: Some(format!("线程错误: {}", e)),
             })
         }

@@ -439,6 +439,59 @@ pub struct MouseDragResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 元素可视区域位置 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 元素可视区域位置查询请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct ElementVisibilityRequest {
+    /// 窗口选择器
+    pub window: String,
+    /// 元素 XPath
+    pub element: String,
+}
+
+/// 元素可视区域位置响应
+#[derive(Debug, Clone, Serialize)]
+pub struct ElementVisibilityResponse {
+    /// 是否找到元素
+    pub found: bool,
+    /// UIA 的 IsOffscreen 属性
+    #[serde(rename = "isOffscreen")]
+    pub is_offscreen: Option<bool>,
+    /// 可视性：fully_visible / partially_visible / offscreen
+    pub visibility: String,
+    /// 相对位置：above / below / left / right / inside / partial
+    pub position: String,
+    /// 元素的边界矩形
+    #[serde(rename = "elementRect", skip_serializing_if = "Option::is_none")]
+    pub element_rect: Option<Rect>,
+    /// 窗口（视口）的边界矩形
+    #[serde(rename = "viewportRect", skip_serializing_if = "Option::is_none")]
+    pub viewport_rect: Option<Rect>,
+    /// 元素在各方向超出视口的像素数（正值=超出，0=在视口内）
+    #[serde(rename = "overflow", skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<OverflowInfo>,
+    /// 建议滚动方向：up / down / left / right / null
+    #[serde(rename = "scrollDirection", skip_serializing_if = "Option::is_none")]
+    pub scroll_direction: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 各方向超出视口的像素数
+#[derive(Debug, Clone, Serialize)]
+pub struct OverflowInfo {
+    /// 元素顶部超出视口顶部的像素（正值=元素在视口上方）
+    pub top: i32,
+    /// 元素底部超出视口底部的像素（正值=元素在视口下方）
+    pub bottom: i32,
+    /// 元素左侧超出视口左侧的像素（正值=元素在视口左边）
+    pub left: i32,
+    /// 元素右侧超出视口右侧的像素（正值=元素在视口右边）
+    pub right: i32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════════════════════════════════════
 

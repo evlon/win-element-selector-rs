@@ -94,10 +94,6 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     // Step 2: 获取元素坐标
     let element = request.element.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-
         super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector,
             &element,
@@ -355,10 +351,6 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let element_for_query = request.element.clone();
     let window_selector_for_element = window_selector.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
-
         super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector_for_element,
             &element_for_query,
@@ -460,9 +452,6 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 let wait_xpath_clone = wait_xpath.clone();
                 let win_sel = window_selector_for_wait.clone();
                 let wait_result = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-                        log::error!("COM STA init failed: {}", e);
-                    }
                     super::super::capture::validate_selector_and_xpath_detailed(
                         &win_sel,
                         &wait_xpath_clone,
@@ -577,9 +566,6 @@ pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
     let element = request.element.clone();
 
     let element_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
         super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector,
             &element,
@@ -689,9 +675,6 @@ pub async fn drag_mouse(body: web::Json<MouseDragRequest>) -> impl Responder {
 
     // 查询源元素和目标元素坐标
     let element_result = tokio::task::spawn_blocking(move || {
-        if let Err(e) = super::super::core::uia::windows_impl::ensure_com_sta() {
-            log::error!("COM STA init failed: {}", e);
-        }
         let source_result = super::super::capture::validate_selector_and_xpath_detailed(
             &window_selector, &source_xpath, &[],
         );
