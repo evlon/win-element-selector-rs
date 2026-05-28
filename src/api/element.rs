@@ -15,7 +15,7 @@ use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, Elem
 /// 元素信息附带其选择器
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElementWithSelector {
-    #[serde(rename = "elementSelector")]
+    #[serde(rename = "findSelector")]
     pub element_selector: String,
     pub info: super::types::ElementInfo,
 }

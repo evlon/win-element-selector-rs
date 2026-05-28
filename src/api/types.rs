@@ -199,7 +199,7 @@ pub struct ElementInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct ElementResponse {
     pub found: bool,
-    #[serde(rename = "elementSelector")]
+    #[serde(rename = "findSelector")]
     pub element_selector: String,
     pub element: Option<ElementInfo>,
     /// 匹配到的元素总数（findOne 返回第一个但告知总共有多少个匹配）
