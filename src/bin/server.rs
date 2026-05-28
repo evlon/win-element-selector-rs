@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
             // 窗口 API
             .route("/api/window/list", web::post().to(window::list_windows))
             .route("/api/window/activate", web::post().to(window::activate_window))
+            .route("/api/window/exists", web::post().to(window::exists_window))
             .route("/api/window/focus-element", web::post().to(window::focus_element))
             // 元素查找（支持 GET 和 POST）
             .route("/api/element", web::get().to(element::get_element))
@@ -112,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element/all", web::post().to(element::get_all_elements))
             // 元素可视区域位置
             .route("/api/element/visibility", web::post().to(element::get_element_visibility))
+            // 元素高亮闪烁
+            .route("/api/element/flash", web::post().to(element::flash_element))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

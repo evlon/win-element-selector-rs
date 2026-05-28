@@ -28,6 +28,50 @@ pub async fn list_windows() -> impl Responder {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 检查窗口是否存在 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ExistsWindowRequest {
+    /// 窗口选择器 XPath
+    #[serde(rename = "windowSelector")]
+    pub window_selector: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ExistsWindowResponse {
+    pub exists: bool,
+}
+
+/// POST /api/window/exists
+/// 检查指定窗口是否存在（不激活窗口，无副作用）
+pub async fn exists_window(req: web::Json<ExistsWindowRequest>) -> impl Responder {
+    info!("API: /api/window/exists - selector: {}", req.window_selector);
+
+    let window_selector = req.window_selector.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_exists_window(window_selector)
+    })
+    .await;
+
+    let exists = match result {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) => {
+            log::error!("exists_window COM worker error: {}", e);
+            false
+        }
+        Err(e) => {
+            log::error!("exists_window spawn_blocking error: {}", e);
+            false
+        }
+    };
+
+    info!("Window exists: {}", exists);
+    HttpResponse::Ok().json(ExistsWindowResponse { exists })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 激活窗口 API
 // ═══════════════════════════════════════════════════════════════════════════════
 

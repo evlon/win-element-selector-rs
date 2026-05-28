@@ -181,6 +181,17 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                             match click_result {
                                 Ok(_) => {
                                     info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
+
+                                    // 点击留痕：在点击位置显示红色圆点标记
+                                    if options_copy.mark_click {
+                                        let mark_timeout = options_copy.mark_timeout;
+                                        crate::highlight::flash_point(
+                                            click_point_copy.x,
+                                            click_point_copy.y,
+                                            mark_timeout,
+                                        );
+                                    }
+
                                     HttpResponse::Ok().json(MouseClickResponse {
                                         success: true,
                                         click_point: click_point_copy,
@@ -451,6 +462,59 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let container_height_for_auto = container_rect.as_ref().map(|r| r.height);
     // 容器视口高度，用于百分比计算（threshold、delta 缩放等都基于此）
     let container_height = container_rect.as_ref().map(|r| r.height as f32).unwrap_or(600.0);
+
+    // Step 1.5: 预检查 wait 元素是否已完全可见（在容器视口内且非 offscreen）
+    // 如果已可见，直接返回，避免无意义的滚动和鼠标移动
+    if let Some(ref wait_xpath) = options.wait {
+        if wait_visible {
+            let precheck_xpath = wait_xpath.clone();
+            let precheck_window = window_selector.clone();
+            let precheck_container_rect = container_rect.clone();
+            let precheck_result = tokio::task::spawn_blocking(move || {
+                super::super::capture::validate_selector_and_xpath_detailed(
+                    &precheck_window,
+                    &precheck_xpath,
+                    &[],
+                )
+            })
+            .await;
+
+            if let Ok(pr) = precheck_result {
+                if matches!(pr.overall, ValidationResult::Found { .. }) {
+                    let cur_offscreen = pr.is_offscreen.unwrap_or(false);
+                    if !cur_offscreen {
+                        // 检查元素 rect 是否完全在容器 rect 内
+                        let fully_visible = match (&precheck_container_rect, &pr.overall) {
+                            (Some(vp), ValidationResult::Found { first_rect: Some(er), .. }) => {
+                                let er_api: super::types::Rect = er.clone().into();
+                                er_api.x >= vp.x
+                                    && er_api.y >= vp.y
+                                    && (er_api.x + er_api.width) <= (vp.x + vp.width)
+                                    && (er_api.y + er_api.height) <= (vp.y + vp.height)
+                            }
+                            _ => false,
+                        };
+
+                        if fully_visible {
+                            info!("Wait element already fully visible, skipping scroll");
+                            let target_rect: Option<super::types::Rect> = if let ValidationResult::Found { first_rect, .. } = &pr.overall {
+                                first_rect.as_ref().map(|r| r.clone().into())
+                            } else {
+                                None
+                            };
+                            return HttpResponse::Ok().json(MouseScrollResponse {
+                                success: true,
+                                scrolled: 0,
+                                target_found: true,
+                                target_rect,
+                                error: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Step 2: 移动到元素中心
     with_auto_pause(|| async {

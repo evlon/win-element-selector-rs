@@ -270,6 +270,12 @@ pub struct MouseClickOptions {
     /// 点击区域限制（按比例缩小可点击范围）
     #[serde(rename = "clickArea", default)]
     pub click_area: Option<ClickArea>,
+    /// 是否在点击位置留痕（红色圆点标记）
+    #[serde(rename = "markClick", default)]
+    pub mark_click: bool,
+    /// 留痕超时时间（毫秒），默认 3000
+    #[serde(rename = "markTimeout", default = "default_mark_timeout")]
+    pub mark_timeout: u64,
 }
 
 /// 点击区域限制（按比例）
@@ -286,6 +292,7 @@ pub struct ClickArea {
 }
 
 fn default_button() -> String { "left".to_string() }
+fn default_mark_timeout() -> u64 { 3000 }
 
 /// 鼠标点击请求
 #[derive(Debug, Clone, Deserialize)]
@@ -498,6 +505,33 @@ pub struct OverflowInfo {
     pub left: i32,
     /// 元素右侧超出视口右侧的像素（正值=元素在视口右边）
     pub right: i32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 元素高亮闪烁 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 元素高亮闪烁请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct ElementFlashRequest {
+    /// 窗口选择器
+    pub window: String,
+    /// 元素 XPath
+    pub element: String,
+    /// 闪烁持续时间（毫秒），默认 1000
+    #[serde(default = "default_flash_timeout")]
+    pub timeout: u64,
+}
+
+fn default_flash_timeout() -> u64 { 1000 }
+
+/// 元素高亮闪烁响应
+#[derive(Debug, Clone, Serialize)]
+pub struct ElementFlashResponse {
+    pub success: bool,
+    #[serde(rename = "elementRect", skip_serializing_if = "Option::is_none")]
+    pub element_rect: Option<Rect>,
+    pub error: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

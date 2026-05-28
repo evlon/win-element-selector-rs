@@ -16,3 +16,6 @@ pub mod capture;
 
 // 鼠标控制（GUI + HTTP 共享）
 pub mod mouse_control;
+
+// 高亮显示（GUI + HTTP 共享）
+pub mod highlight;

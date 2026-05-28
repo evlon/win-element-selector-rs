@@ -1199,6 +1199,21 @@ pub mod windows_impl {
         window_list
     }
 
+    /// Check if a window matching the selector exists.
+    /// Returns true if at least one matching window is found.
+    /// Reuses find_window_by_selector for the search logic.
+    pub fn exists_window_by_selector(window_selector: &str) -> bool {
+        debug!("Checking window existence: {}", window_selector);
+        
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+
+        let windows = find_window_by_selector(&auto, window_selector);
+        !windows.is_empty()
+    }
+
     /// Activate (bring to front) a window by selector.
     /// Returns true if successful, false if window not found or activation failed.
     /// 
@@ -1964,14 +1979,16 @@ pub mod windows_impl {
                     
                     let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
 
-                    let (rect_opt, center_opt, cr_opt) = if is_offscreen {
-                        (None, None, None)
+                    // rect 始终保留：即使元素标记为 offscreen，坐标仍有效（如副屏负坐标场景）
+                    // center / center_random 仅在非 offscreen 时提供，避免误点击不可见元素
+                    let (center_opt, cr_opt) = if is_offscreen {
+                        (None, None)
                     } else {
-                        (Some(api_rect), Some(center), Some(center_random))
+                        (Some(center), Some(center_random))
                     };
 
                     Some(ElementInfo {
-                        rect: rect_opt,
+                        rect: Some(api_rect),
                         center: center_opt,
                         center_random: cr_opt,
                         control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },

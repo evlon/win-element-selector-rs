@@ -6,7 +6,7 @@ use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse};
+use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -253,6 +253,89 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
                 viewport_rect: None,
                 overflow: None,
                 scroll_direction: None,
+                error: Some(format!("线程错误: {}", e)),
+            })
+        }
+    }
+}
+
+/// POST /api/element/flash
+/// 在元素位置显示高亮闪烁，指定时间后自动消失
+pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Responder {
+    let request = body.into_inner();
+
+    info!(
+        "API: /api/element/flash window='{}' element='{}' timeout={}ms",
+        request.window, request.element, request.timeout
+    );
+
+    let window = request.window.clone();
+    let element = request.element.clone();
+    let timeout = request.timeout;
+
+    // 查找元素获取其矩形区域
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_find_element(window, element, None)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(elements)) => {
+            if let Some(element_info) = elements.into_iter().next() {
+                if let Some(rect) = &element_info.rect {
+                    let model_rect = crate::core::model::ElementRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    };
+                    let info = crate::core::model::HighlightInfo::new(
+                        model_rect,
+                        &element_info.control_type,
+                    );
+                    // 在独立线程中执行高亮闪烁
+                    crate::highlight::flash_with_info(&info, timeout);
+
+                    let api_rect: Rect = crate::core::model::ElementRect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    }.into();
+
+                    HttpResponse::Ok().json(ElementFlashResponse {
+                        success: true,
+                        element_rect: Some(api_rect),
+                        error: None,
+                    })
+                } else {
+                    HttpResponse::Ok().json(ElementFlashResponse {
+                        success: false,
+                        element_rect: None,
+                        error: Some("元素无矩形区域信息".to_string()),
+                    })
+                }
+            } else {
+                HttpResponse::Ok().json(ElementFlashResponse {
+                    success: false,
+                    element_rect: None,
+                    error: Some("未找到匹配元素".to_string()),
+                })
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("Flash element COM worker error: {}", e);
+            HttpResponse::InternalServerError().json(ElementFlashResponse {
+                success: false,
+                element_rect: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+        Err(e) => {
+            warn!("Flash element spawn error: {}", e);
+            HttpResponse::InternalServerError().json(ElementFlashResponse {
+                success: false,
+                element_rect: None,
                 error: Some(format!("线程错误: {}", e)),
             })
         }

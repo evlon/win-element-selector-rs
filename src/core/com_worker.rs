@@ -62,6 +62,12 @@ pub enum UiaRequest {
         response: Sender<anyhow::Result<Vec<crate::api::types::ElementInfo>>>,
     },
 
+    /// 检查窗口是否存在
+    ExistsWindow {
+        window_selector: String,
+        response: Sender<anyhow::Result<bool>>,
+    },
+
     /// 激活窗口
     ActivateWindow {
         window_selector: String,
@@ -234,6 +240,13 @@ impl ComWorker {
                 let result = Self::do_find_common_elements(automation, &window_selector, &xpath);
                 log::info!("[PERF] find_common_elements completed in {}ms, found {} elements",
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                let _ = response.send(result);
+            }
+            UiaRequest::ExistsWindow { window_selector, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] exists_window started for {}", window_selector);
+                let result = Self::do_exists_window(automation, &window_selector);
+                log::debug!("[PERF] exists_window completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::ActivateWindow { window_selector, response } => {
@@ -429,6 +442,14 @@ impl ComWorker {
     }
 
     /// 激活窗口
+    /// 检查窗口是否存在
+    fn do_exists_window(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(crate::core::uia::exists_window_by_selector(window_selector))
+    }
+
     fn do_activate_window(
         _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
         window_selector: &str,
@@ -765,6 +786,24 @@ impl ComWorker {
         }
     }
 
+    /// 检查窗口是否存在
+    pub fn exists_window(&self, window_selector: String) -> anyhow::Result<bool> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::ExistsWindow {
+                window_selector,
+                response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| anyhow::anyhow!("COM worker exists_window timeout after 10s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 激活窗口
     pub fn activate_window(&self, window_selector: String) -> anyhow::Result<bool> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -951,6 +990,16 @@ pub fn global_find_common_elements(
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.find_common_elements(window_selector, xpath)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程检查窗口是否存在
+pub fn global_exists_window(window_selector: String) -> anyhow::Result<bool> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.exists_window(window_selector)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }
