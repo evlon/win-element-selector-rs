@@ -9,6 +9,5 @@ diagnostic-tool/
 .codebuddy/
 .vscode/
 .claude/worktrees/
-.codebuddy/memory/MEMORY.md
 *.log
 check-output.txt
