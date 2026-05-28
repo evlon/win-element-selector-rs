@@ -6,6 +6,6 @@ screenshots/
 dist/
 *.code-workspace
 diagnostic-tool/
-
+.codebuddy/
 .vscode/
 .claude/worktrees/
