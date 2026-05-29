@@ -121,6 +121,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/mouse/click", web::post().to(mouse::click_mouse))
             // 鼠标滚动
             .route("/api/mouse/scroll", web::post().to(mouse::scroll_mouse))
+            // 滚动边界检测
+            .route("/api/mouse/scroll-detect", web::post().to(mouse::scroll_detect))
             // 鼠标悬停
             .route("/api/mouse/hover", web::post().to(mouse::hover_mouse))
             // 鼠标拖拽

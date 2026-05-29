@@ -214,9 +214,10 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
 
     let window = request.window.clone();
     let element = request.element.clone();
+    let container = request.container.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_get_element_visibility(window, element)
+        crate::core::com_worker::global_get_element_visibility(window, element, container)
     })
     .await;
 
@@ -236,6 +237,7 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
                 visibility: "error".to_string(),
                 position: "unknown".to_string(),
                 element_rect: None,
+                visible_rect: None,
                 viewport_rect: None,
                 overflow: None,
                 scroll_direction: None,
@@ -250,6 +252,7 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
                 visibility: "error".to_string(),
                 position: "unknown".to_string(),
                 element_rect: None,
+                visible_rect: None,
                 viewport_rect: None,
                 overflow: None,
                 scroll_direction: None,

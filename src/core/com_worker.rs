@@ -15,6 +15,24 @@ use std::time::Duration;
 use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
 
+/// 计算两个 Rect 的交集，无交集返回 None
+fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> Option<crate::api::types::Rect> {
+    let left = a.x.max(b.x);
+    let top = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    if right > left && bottom > top {
+        Some(crate::api::types::Rect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        })
+    } else {
+        None
+    }
+}
+
 /// UIA 操作请求类型
 #[derive(Debug)]
 pub enum UiaRequest {
@@ -90,7 +108,15 @@ pub enum UiaRequest {
     GetElementVisibility {
         window_selector: String,
         element_xpath: String,
+        container_xpath: Option<String>,
         response: Sender<anyhow::Result<crate::api::types::ElementVisibilityResponse>>,
+    },
+
+    /// 获取指定坐标处元素的边界矩形（轻量级，仅返回 rect）
+    GetElementRectAtPoint {
+        x: i32,
+        y: i32,
+        response: Sender<anyhow::Result<Option<crate::core::model::ElementRect>>>,
     },
 
     /// 关闭工作线程
@@ -271,11 +297,18 @@ impl ComWorker {
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
                 let _ = response.send(result);
             }
-            UiaRequest::GetElementVisibility { window_selector, element_xpath, response } => {
+            UiaRequest::GetElementVisibility { window_selector, element_xpath, container_xpath, response } => {
                 let start = std::time::Instant::now();
                 log::info!("[PERF] get_element_visibility started for {}", element_xpath);
-                let result = Self::do_get_element_visibility(automation, &window_selector, &element_xpath);
+                let result = Self::do_get_element_visibility(automation, &window_selector, &element_xpath, container_xpath.as_deref());
                 log::info!("[PERF] get_element_visibility completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
+            UiaRequest::GetElementRectAtPoint { x, y, response } => {
+                let start = std::time::Instant::now();
+                log::debug!("[PERF] get_element_rect_at_point started for ({}, {})", x, y);
+                let result = Self::do_get_element_rect_at_point(automation, x, y);
+                log::debug!("[PERF] get_element_rect_at_point completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -476,6 +509,7 @@ impl ComWorker {
         _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
         window_selector: &str,
         element_xpath: &str,
+        container_xpath: Option<&str>,
     ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
         use crate::api::types::{ElementVisibilityResponse, OverflowInfo, Rect};
         use crate::core::model::ValidationResult;
@@ -500,6 +534,7 @@ impl ComWorker {
                     visibility: "not_found".to_string(),
                     position: "unknown".to_string(),
                     element_rect: None,
+                    visible_rect: None,
                     viewport_rect: None,
                     overflow: None,
                     scroll_direction: None,
@@ -513,6 +548,7 @@ impl ComWorker {
                     visibility: "error".to_string(),
                     position: "unknown".to_string(),
                     element_rect: None,
+                    visible_rect: None,
                     viewport_rect: None,
                     overflow: None,
                     scroll_direction: None,
@@ -526,6 +562,7 @@ impl ComWorker {
                     visibility: "unknown".to_string(),
                     position: "unknown".to_string(),
                     element_rect: None,
+                    visible_rect: None,
                     viewport_rect: None,
                     overflow: None,
                     scroll_direction: None,
@@ -543,6 +580,7 @@ impl ComWorker {
                     visibility: "unknown".to_string(),
                     position: "unknown".to_string(),
                     element_rect: None,
+                    visible_rect: None,
                     viewport_rect: None,
                     overflow: None,
                     scroll_direction: None,
@@ -568,6 +606,7 @@ impl ComWorker {
                         width: elem_rect.width,
                         height: elem_rect.height,
                     }),
+                    visible_rect: None,
                     viewport_rect: None,
                     overflow: None,
                     scroll_direction: None,
@@ -588,6 +627,34 @@ impl ComWorker {
             y: viewport_rect.y,
             width: viewport_rect.width,
             height: viewport_rect.height,
+        };
+
+        // 3.5 计算可见矩形 = 元素矩形 ∩ 容器矩形(可选) ∩ 窗口视口
+        let clip_rect = if let Some(cxpath) = container_xpath {
+            // 获取容器元素矩形
+            let container_detailed = crate::core::uia::validate_selector_and_xpath_detailed(
+                window_selector, cxpath, &[],
+            );
+            match &container_detailed.overall {
+                ValidationResult::Found { first_rect: Some(cr), .. } => {
+                    // 容器可见矩形 = 容器矩形 ∩ 视口矩形
+                    let container_api_rect = Rect {
+                        x: cr.x, y: cr.y, width: cr.width, height: cr.height,
+                    };
+                    intersect_rects(&container_api_rect, &vp_api_rect)
+                }
+                _ => {
+                    // 容器查找失败，仅用视口
+                    Some(vp_api_rect.clone())
+                }
+            }
+        } else {
+            Some(vp_api_rect.clone())
+        };
+
+        let visible_rect = match &clip_rect {
+            Some(clip) => intersect_rects(&elem_api_rect, clip),
+            None => None,
         };
 
         // 计算各方向溢出像素
@@ -642,6 +709,7 @@ impl ComWorker {
             visibility,
             position,
             element_rect: Some(elem_api_rect),
+            visible_rect,
             viewport_rect: Some(vp_api_rect),
             overflow: Some(OverflowInfo {
                 top: overflow_top,
@@ -652,6 +720,35 @@ impl ComWorker {
             scroll_direction,
             error: None,
         })
+    }
+
+    /// 获取指定坐标处元素的边界矩形（轻量级）
+    fn do_get_element_rect_at_point(
+        automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        x: i32,
+        y: i32,
+    ) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
+        let pt = windows::Win32::Foundation::POINT { x, y };
+
+        let element: windows::Win32::UI::Accessibility::IUIAutomationElement = unsafe {
+            match automation.ElementFromPoint(pt) {
+                Ok(e) => e,
+                Err(e) => {
+                    log::debug!("ElementFromPoint({}, {}) failed: {:?}", x, y, e);
+                    return Ok(None);
+                }
+            }
+        };
+
+        match unsafe { element.CurrentBoundingRectangle() } {
+            Ok(r) => Ok(Some(crate::core::model::ElementRect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            })),
+            Err(_) => Ok(None),
+        }
     }
 
     /// 发送捕获请求
@@ -863,6 +960,7 @@ impl ComWorker {
         &self,
         window_selector: String,
         element_xpath: String,
+        container_xpath: Option<String>,
     ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
         let (response_sender, response_receiver) = mpsc::channel();
 
@@ -870,12 +968,34 @@ impl ComWorker {
             sender.send(UiaRequest::GetElementVisibility {
                 window_selector,
                 element_xpath,
+                container_xpath,
                 response: response_sender,
             })?;
 
             response_receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .map_err(|e| anyhow::anyhow!("COM worker get_element_visibility timeout after 10s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
+    /// 获取指定坐标处元素的边界矩形
+    pub fn get_element_rect_at_point(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::GetElementRectAtPoint {
+                x, y, response: response_sender,
+            })?;
+
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|e| anyhow::anyhow!("COM worker get_element_rect_at_point timeout after 5s: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -1039,10 +1159,21 @@ pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInf
 pub fn global_get_element_visibility(
     window_selector: String,
     element_xpath: String,
+    container_xpath: Option<String>,
 ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
-        worker.get_element_visibility(window_selector, element_xpath)
+        worker.get_element_visibility(window_selector, element_xpath, container_xpath)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程获取指定坐标处元素的边界矩形
+pub fn global_get_element_rect_at_point(x: i32, y: i32) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.get_element_rect_at_point(x, y)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }

@@ -10,7 +10,7 @@
 
 use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
-use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name};
+use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Windows implementation
@@ -2206,6 +2206,233 @@ pub mod windows_impl {
         }
         
         features
+    }
+
+    /// 使用 UIA 原生 PropertyCondition 查询指定容器内可见的元素。
+    ///
+    /// 相比 XPath 全量查询 + 逐个过滤，此方法在系统层面直接跳过 offscreen 子树，
+    /// 避免实例化不可见元素的 COM 对象，性能显著提升（尤其是虚拟化列表场景）。
+    ///
+    /// # Arguments
+    /// * `window_selector` - 窗口选择器，用于定位容器所在窗口
+    /// * `container_xpath` - 滚动容器的 XPath（查询范围限定在容器内）
+    /// * `control_types` - 要查询的 ControlType 名称列表，如 `["Text"]`、`["Text", "Image"]`
+    ///   传空则查询所有可见元素（不按 ControlType 过滤）
+    ///
+    /// # Returns
+    /// 匹配的元素信息列表（仅可见元素，isOffscreen=false）
+    pub fn find_visible_elements(
+        window_selector: &str,
+        container_xpath: &str,
+        control_types: &[&str],
+    ) -> Vec<crate::api::types::ElementInfo> {
+        use crate::api::types::{ElementInfo, Rect};
+        use windows::Win32::UI::Accessibility::*;
+        use windows::Win32::System::Variant::*;
+
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+
+        // 1. 定位容器元素
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            log::warn!("[find_visible_elements] No window found for selector: {}", window_selector);
+            return vec![];
+        }
+
+        let mut container_elem: Option<IUIAutomationElement> = None;
+        for win in &windows {
+            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, win, container_xpath) {
+                if let Some(first) = elements.first() {
+                    container_elem = Some(first.clone());
+                    break;
+                }
+            }
+        }
+
+        let container = match container_elem {
+            Some(e) => e,
+            None => {
+                log::warn!("[find_visible_elements] Container not found: {}", container_xpath);
+                return vec![];
+            }
+        };
+
+        // 2. 构建 IsOffscreen = FALSE 条件
+        let offscreen_false = {
+            let mut variant = VARIANT::default();
+            unsafe {
+                let var_ptr = &mut variant as *mut VARIANT;
+                // VT_BOOL = 11
+                let vt_ptr = var_ptr as *mut VARENUM;
+                std::ptr::write(vt_ptr, VT_BOOL);
+                // VARIANT_BOOL: VARIANT_TRUE = -1 (0xFFFF), VARIANT_FALSE = 0
+                // The boolVal field is at offset 8 in the union (same as bstrVal)
+                let bool_ptr = (var_ptr as *mut u8).add(8) as *mut i16;
+                std::ptr::write(bool_ptr, 0); // VARIANT_FALSE = IsOffscreen = false
+            }
+            match unsafe { auto.CreatePropertyCondition(UIA_IsOffscreenPropertyId, &variant) } {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("[find_visible_elements] CreatePropertyCondition(IsOffscreen=false) failed: {}", e);
+                    return vec![];
+                }
+            }
+        };
+
+        // 3. 构建 ControlType 条件（如果指定了 control_types）
+        let condition = if control_types.is_empty() {
+            // 不按 ControlType 过滤，只用 IsOffscreen=false
+            offscreen_false
+        } else if control_types.len() == 1 {
+            // 单个 ControlType → 直接与 IsOffscreen AND
+            let ct_id = match control_type_name_to_id(control_types[0]) {
+                Some(id) => id,
+                None => {
+                    log::warn!("[find_visible_elements] Unknown control type: {}", control_types[0]);
+                    return vec![];
+                }
+            };
+
+            let ct_condition = {
+                let mut variant = VARIANT::default();
+                unsafe {
+                    let var_ptr = &mut variant as *mut VARIANT;
+                    let vt_ptr = var_ptr as *mut VARENUM;
+                    std::ptr::write(vt_ptr, VT_I4);
+                    let i4_ptr = (var_ptr as *mut u8).add(8) as *mut i32;
+                    std::ptr::write(i4_ptr, ct_id);
+                }
+                match unsafe { auto.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant) } {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[find_visible_elements] CreatePropertyCondition(ControlType) failed: {}", e);
+                        return vec![];
+                    }
+                }
+            };
+
+            match unsafe { auto.CreateAndCondition(&offscreen_false, &ct_condition) } {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("[find_visible_elements] CreateAndCondition failed: {}", e);
+                    offscreen_false // fallback: 只用 offscreen 条件
+                }
+            }
+        } else {
+            // 多个 ControlType → 先用 OrCondition 合并，再与 IsOffscreen AND
+            let ct_conditions: Vec<Option<IUIAutomationCondition>> = control_types.iter()
+                .filter_map(|ct_name| {
+                    let ct_id = control_type_name_to_id(ct_name)?;
+                    let mut variant = VARIANT::default();
+                    unsafe {
+                        let var_ptr = &mut variant as *mut VARIANT;
+                        let vt_ptr = var_ptr as *mut VARENUM;
+                        std::ptr::write(vt_ptr, VT_I4);
+                        let i4_ptr = (var_ptr as *mut u8).add(8) as *mut i32;
+                        std::ptr::write(i4_ptr, ct_id);
+                    }
+                    unsafe { auto.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant) }.ok()
+                })
+                .map(Some)
+                .collect();
+
+            if ct_conditions.is_empty() {
+                offscreen_false
+            } else if ct_conditions.len() == 1 {
+                let ct_cond = ct_conditions[0].clone().unwrap();
+                match unsafe { auto.CreateAndCondition(&offscreen_false, &ct_cond) } {
+                    Ok(c) => c,
+                    Err(_) => offscreen_false,
+                }
+            } else {
+                // OrCondition 合并多个 ControlType
+                let ct_or = match unsafe { auto.CreateOrConditionFromNativeArray(&ct_conditions) } {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[find_visible_elements] CreateOrCondition failed: {}", e);
+                        return vec![];
+                    }
+                };
+                match unsafe { auto.CreateAndCondition(&offscreen_false, &ct_or) } {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[find_visible_elements] CreateAndCondition(Offscreen, CT_OR) failed: {}", e);
+                        offscreen_false
+                    }
+                }
+            }
+        };
+
+        // 4. FindAll(TreeScope_Descendants) 执行查询
+        let raw_elements = match unsafe { container.FindAll(TreeScope_Descendants, &condition) } {
+            Ok(arr) => arr,
+            Err(e) => {
+                log::error!("[find_visible_elements] FindAll failed: {}", e);
+                return vec![];
+            }
+        };
+
+        let count = match unsafe { raw_elements.Length() } {
+            Ok(c) => c,
+            Err(_) => 0,
+        };
+
+        log::info!("[find_visible_elements] Found {} visible elements (types={:?})", count, control_types);
+
+        // 5. 转换为 ElementInfo
+        (0..count).filter_map(|i| {
+            let elem = match unsafe { raw_elements.GetElement(i) } {
+                Ok(e) => e,
+                Err(_) => return None,
+            };
+
+            let r = match unsafe { elem.CurrentBoundingRectangle() } {
+                Ok(r) => r,
+                Err(_) => return None,
+            };
+            let api_rect = Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            };
+            let center = api_rect.center();
+            let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
+            let (center_opt, cr_opt) = if is_offscreen {
+                (None, None)
+            } else {
+                (Some(center), Some(center)) // 不需要随机偏移，center_random = center
+            };
+
+            Some(ElementInfo {
+                rect: Some(api_rect),
+                center: center_opt,
+                center_random: cr_opt,
+                control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                name: get_bstr(unsafe { elem.CurrentName() }),
+                automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
+                class_name: get_bstr(unsafe { elem.CurrentClassName() }),
+                framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
+                localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
+                is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+                is_offscreen,
+                is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
+                accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
+                access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
+                item_type: get_bstr(unsafe { elem.CurrentItemType() }),
+                item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
+                process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+                is_checkable: None,
+                is_checked: None,
+                is_clickable: None,
+                is_scrollable: None,
+                is_selected: None,
+            })
+        }).collect()
     }
 }
 

@@ -11,3 +11,4 @@ diagnostic-tool/
 .claude/worktrees/
 *.log
 check-output.txt
+

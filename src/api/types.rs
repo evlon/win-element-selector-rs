@@ -352,13 +352,28 @@ pub struct MouseScrollOptions {
     /// scrollToCenter 模式下，元素可见后继续调整到视口中心的最大滚动次数，避免死循环，默认 5
     #[serde(rename = "scrollToCenterAdjustTimes", default = "default_scroll_to_center_adjust_times")]
     pub scroll_to_center_adjust_times: Option<u32>,
+    /// 滚动间隔（每次滚动后等待 UI 响应时间，毫秒），默认 1000
+    #[serde(rename = "scrollIntervalMs", default = "default_scroll_interval_ms")]
+    pub scroll_interval_ms: Option<u64>,
+    /// autoDelta 首次滚动后延迟（等待 UI 重新计算布局，毫秒），默认 1000
+    #[serde(rename = "autoDeltaInitialDelayMs", default = "default_auto_delta_initial_delay_ms")]
+    pub auto_delta_initial_delay_ms: Option<u64>,
+    /// 最小 delta 比例（调整滚动时的最小 delta 占原始 delta 的比例），默认 0.1
+    #[serde(rename = "minDeltaRatio", default = "default_min_delta_ratio")]
+    pub min_delta_ratio: Option<f32>,
+    /// 滚动居中阈值（元素中心与目标中心距离小于此阈值时认为已居中，单位：视口高度比例），默认 0.10
+    #[serde(rename = "scrollToCenterThreshold", default = "default_scroll_to_center_threshold")]
+    pub scroll_to_center_threshold: Option<f32>,
 }
 
 fn default_scroll_to_center() -> Option<bool> { Some(true) }
 fn default_scroll_to_center_adjust_times() -> Option<u32> { Some(5) }
-
-fn default_scroll_times() -> Option<u32> { Some(30) }
+fn default_scroll_times() -> Option<u32> { Some(100) }
 fn default_delta_factor() -> Option<f32> { Some(0.8) }
+fn default_scroll_interval_ms() -> Option<u64> { Some(1000) }
+fn default_auto_delta_initial_delay_ms() -> Option<u64> { Some(1000) }
+fn default_min_delta_ratio() -> Option<f32> { Some(0.1) }
+fn default_scroll_to_center_threshold() -> Option<f32> { Some(0.10) }
 
 /// 滚动请求
 #[derive(Debug, Clone, Deserialize)]
@@ -381,7 +396,88 @@ pub struct MouseScrollResponse {
     /// 目标元素的矩形区域（仅当 target_found=true 时有值）
     #[serde(rename = "targetRect", skip_serializing_if = "Option::is_none")]
     pub target_rect: Option<Rect>,
+    /// 是否滚动到了边界（内容不再移动）
+    #[serde(rename = "scrolledToEnd")]
+    pub scrolled_to_end: bool,
     pub error: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 滚动边界检测 API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 滚动边界检测请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct MouseScrollDetectRequest {
+    /// 窗口选择器（用于限定搜索范围）
+    pub window: Option<String>,
+    /// 滚动容器的元素 XPath（鼠标移动到此元素上执行滚动）
+    pub container: String,
+    /// 要监控的元素 ControlType 名称列表，默认 ["Text"]
+    /// 支持: "Text", "Image", "ListItem", "Button", "DataItem" 等
+    /// 传空则查询所有可见元素（不按 ControlType 过滤）
+    #[serde(default = "default_control_types")]
+    pub control_types: Vec<String>,
+    /// 滚动方向："down"=向下滚（检测到底），"up"=向上滚（检测到顶），默认 "down"
+    #[serde(default = "default_detect_direction")]
+    pub direction: String,
+    /// 排除的元素标识列表（XPath），这些元素的位置变化不计入判定
+    /// 适用于悬浮工具栏等随滚动自动移位的元素
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// 滚动后等待 UI 响应的时间（毫秒），默认 500
+    /// 某些应用（WPF/UWP/Electron）有滚动动画，需要等待 BoundingRectangle 更新到最终位置
+    #[serde(default = "default_scroll_delay_ms")]
+    pub scroll_delay_ms: u64,
+    /// 检测后是否反向滚动抵消（默认 false）
+    /// true: 检测完后往反方向滚一次，恢复原始位置
+    #[serde(default)]
+    pub rollback: bool,
+}
+
+fn default_control_types() -> Vec<String> { vec!["Text".to_string()] }
+fn default_detect_direction() -> String { "down".to_string() }
+fn default_scroll_delay_ms() -> u64 { 500 }
+
+/// 滚动边界检测响应
+#[derive(Debug, Clone, Serialize)]
+pub struct MouseScrollDetectResponse {
+    pub success: bool,
+    /// 是否到达边界（排除exclude后，所有监控元素位置均未变化）
+    #[serde(rename = "atEnd")]
+    pub at_end: bool,
+    /// 监控的元素总数（排除后）
+    #[serde(rename = "watchedCount")]
+    pub watched_count: usize,
+    /// 发生位置变化的元素数
+    #[serde(rename = "changedCount")]
+    pub changed_count: usize,
+    /// 变化元素的详情列表
+    #[serde(rename = "details", skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ElementChangeDetail>,
+    /// 是否执行了反向回滚
+    #[serde(rename = "rolledBack")]
+    pub rolled_back: bool,
+    pub error: Option<String>,
+}
+
+/// 元素变化详情（滚动前后对比）
+#[derive(Debug, Clone, Serialize)]
+pub struct ElementChangeDetail {
+    /// 元素标识（automationId / name / className 组合）
+    pub identifier: String,
+    /// 滚动前 bound.top
+    #[serde(rename = "beforeTop", skip_serializing_if = "Option::is_none")]
+    pub before_top: Option<i32>,
+    /// 滚动后 bound.top
+    #[serde(rename = "afterTop", skip_serializing_if = "Option::is_none")]
+    pub after_top: Option<i32>,
+    /// bound.top 变化量
+    #[serde(rename = "deltaTop", skip_serializing_if = "Option::is_none")]
+    pub delta_top: Option<i32>,
+    /// isOffscreen 是否变化
+    #[serde(rename = "offscreenChanged")]
+    pub offscreen_changed: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -465,6 +561,10 @@ pub struct ElementVisibilityRequest {
     pub window: String,
     /// 元素 XPath
     pub element: String,
+    /// 可选的滚动容器 XPath，用于计算元素在容器内的可见矩形
+    /// 若提供，可见区域 = 元素矩形 ∩ 容器可见矩形 ∩ 窗口视口
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 /// 元素可视区域位置响应
@@ -482,6 +582,9 @@ pub struct ElementVisibilityResponse {
     /// 元素的边界矩形
     #[serde(rename = "elementRect", skip_serializing_if = "Option::is_none")]
     pub element_rect: Option<Rect>,
+    /// 元素真正可见、可点击的矩形区域（元素矩形 ∩ 视口矩形 ∩ 容器矩形）
+    #[serde(rename = "visibleRect", skip_serializing_if = "Option::is_none")]
+    pub visible_rect: Option<Rect>,
     /// 窗口（视口）的边界矩形
     #[serde(rename = "viewportRect", skip_serializing_if = "Option::is_none")]
     pub viewport_rect: Option<Rect>,
