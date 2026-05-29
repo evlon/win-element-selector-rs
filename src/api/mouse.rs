@@ -12,14 +12,47 @@ use super::types::{
     MouseHoverRequest, MouseHoverResponse, MouseHoverOptions,
     MouseDragRequest, MouseDragResponse, MouseDragOptions,
     MouseScrollDetectRequest, MouseScrollDetectResponse,
+    ViewportInset,
     Point,
 };
 use super::super::mouse_control;
 use super::idle_motion::with_auto_pause;
 
+/// 将 viewportInset 应用到容器 rect 上，返回扣减后的有效视口 rect
+/// 如果 inset 导致 width 或 height <= 0，返回 None（完全被遮挡）
+fn apply_viewport_inset(container_rect: &Option<super::types::Rect>, inset: &Option<ViewportInset>) -> Option<super::types::Rect> {
+    match (container_rect, inset) {
+        (Some(vp), Some(ins)) => {
+            // 解析各方向值，将百分比转换为像素
+            let left_px = ins.left.as_ref().map(|v| v.resolve(vp.width)).unwrap_or(0).max(0);
+            let top_px = ins.top.as_ref().map(|v| v.resolve(vp.height)).unwrap_or(0).max(0);
+            let right_px = ins.right.as_ref().map(|v| v.resolve(vp.width)).unwrap_or(0).max(0);
+            let bottom_px = ins.bottom.as_ref().map(|v| v.resolve(vp.height)).unwrap_or(0).max(0);
+
+            let new_x = vp.x + left_px;
+            let new_y = vp.y + top_px;
+            let new_width = vp.width.saturating_sub(left_px + right_px);
+            let new_height = vp.height.saturating_sub(top_px + bottom_px);
+
+            if new_width > 0 && new_height > 0 {
+                Some(super::types::Rect { x: new_x, y: new_y, width: new_width, height: new_height })
+            } else {
+                None // 完全被遮挡
+            }
+        }
+        _ => container_rect.clone(), // 无 inset → 原样返回
+    }
+}
+
 /// 计算元素 rect 与容器视口 rect 的交集（visible_rect）
-fn compute_visible_rect(element_rect: &Option<super::types::Rect>, container_rect: &Option<super::types::Rect>) -> Option<super::types::Rect> {
-    match (element_rect, container_rect) {
+/// inset 会先对 container_rect 做向内裁剪，排除固定遮挡区域
+fn compute_visible_rect(
+    element_rect: &Option<super::types::Rect>,
+    container_rect: &Option<super::types::Rect>,
+    viewport_inset: &Option<ViewportInset>,
+) -> Option<super::types::Rect> {
+    let effective_container = apply_viewport_inset(container_rect, viewport_inset);
+    match (element_rect, effective_container) {
         (Some(er), Some(vp)) => {
             let left = er.x.max(vp.x);
             let top = er.y.max(vp.y);
@@ -396,6 +429,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let wait_visible = options.wait_mode.as_deref() == Some("visible");
     let scroll_to_center = options.scroll_to_center.unwrap_or(true);
     let scroll_to_center_adjust_times = options.scroll_to_center_adjust_times.unwrap_or(5);
+    let viewport_inset = options.viewport_inset.clone();
     // 优先使用传入的窗口选择器，否则回退到通用 "Window"
     let window_selector = request.window.as_deref().unwrap_or("Window").to_string();
     let window_selector_for_wait = window_selector.clone();
@@ -538,8 +572,9 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 if matches!(pr.overall, ValidationResult::Found { .. }) {
                     let cur_offscreen = pr.is_offscreen.unwrap_or(false);
                     if !cur_offscreen {
-                        // 检查元素 rect 是否完全在容器 rect 内
-                        let fully_visible = match (&precheck_container_rect, &pr.overall) {
+                        // 检查元素 rect 是否完全在容器 rect 内（考虑 viewportInset）
+                        let effective_precheck_container = apply_viewport_inset(&precheck_container_rect, &viewport_inset);
+                        let fully_visible = match (&effective_precheck_container, &pr.overall) {
                             (Some(vp), ValidationResult::Found { first_rect: Some(er), .. }) => {
                                 let er_api: super::types::Rect = er.clone().into();
                                 er_api.x >= vp.x
@@ -557,7 +592,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                             } else {
                                 None
                             };
-                            let visible_rect = compute_visible_rect(&target_rect, &precheck_container_rect);
+                            let visible_rect = compute_visible_rect(&target_rect, &precheck_container_rect, &viewport_inset);
                             return HttpResponse::Ok().json(MouseScrollResponse {
                                 success: true,
                                 scrolled: 0,
@@ -679,9 +714,10 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                             if effectively_visible {
                                 // 判断元素是否充分可见（不仅仅是重叠，而是满足可见性标准）
-                                // 1) 元素能完全放入视口 → 要求 top/bottom 都在视口内
-                                // 2) 元素太大放不进视口 → visible_rect.height ≥ 视口高度 * 80%
-                                let sufficiently_visible = match (&target_rect, &container_rect) {
+                                // 1) 元素能完全放入视口 → 要求 top/bottom 都在有效视口内
+                                // 2) 元素太大放不进视口 → visible_rect.height ≥ 有效视口高度 * 80%
+                                let effective_container_for_sv = apply_viewport_inset(&container_rect, &viewport_inset);
+                                let sufficiently_visible = match (&target_rect, &effective_container_for_sv) {
                                     (Some(er), Some(vp)) => {
                                         let fits_in_viewport = er.height <= vp.height;
                                         if fits_in_viewport {
@@ -716,7 +752,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                 };
 
                                 if sufficiently_visible {
-                                    let visible_rect = compute_visible_rect(&target_rect, &container_rect);
+                                    let visible_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
                                     info!("Wait xpath sufficiently visible after {} scrolls, target_rect={:?}, visible_rect={:?}", scrolled, target_rect, visible_rect);
                                     return HttpResponse::Ok().json(MouseScrollResponse {
                                         success: true,
@@ -736,7 +772,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                     if scroll_to_center_adjust_count > scroll_to_center_adjust_times {
                                         info!("Wait xpath visible, scrollToCenter adjust limit reached (adjust_count={}, max={}), stopping after {} scrolls",
                                             scroll_to_center_adjust_count, scroll_to_center_adjust_times, scrolled);
-                                        let vis_rect = compute_visible_rect(&target_rect, &container_rect);
+                                        let vis_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
                                         return HttpResponse::Ok().json(MouseScrollResponse {
                                             success: true,
                                             scrolled,
@@ -772,7 +808,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                         } else {
                             // exist 模式：找到即可
                             info!("Wait xpath found after {} scrolls", scrolled);
-                            let vis_rect = compute_visible_rect(&target_rect, &container_rect);
+                            let vis_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
                             return HttpResponse::Ok().json(MouseScrollResponse {
                                 success: true,
                                 scrolled,

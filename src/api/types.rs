@@ -291,6 +291,118 @@ pub struct ClickArea {
     pub bottom: Option<f32>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 视口内边距（排除固定遮挡区域）
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 内边距值：支持像素（i32）或百分比字符串（如 "5%"）
+#[derive(Debug, Clone)]
+pub enum InsetValue {
+    /// 像素值，如 50 表示 50px
+    Pixels(i32),
+    /// 百分比值，如 0.05 表示 5%
+    Percent(f32),
+}
+
+impl<'de> serde::Deserialize<'de> for InsetValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct InsetVisitor;
+
+        impl<'de> Visitor<'de> for InsetVisitor {
+            type Value = InsetValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an integer (pixels) or a string percentage (e.g. '5%')")
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(InsetValue::Pixels(v as i32))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(InsetValue::Pixels(v as i32))
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(InsetValue::Pixels(v as i32))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v.ends_with('%') {
+                    let num = v[..v.len() - 1].trim();
+                    num.parse::<f32>()
+                        .map(|p| InsetValue::Percent(p / 100.0))
+                        .map_err(|_| de::Error::custom(format!("invalid percent value: '{}'", v)))
+                } else {
+                    Err(de::Error::custom(format!("expected number or percent string like '5%', got: '{}'", v)))
+                }
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // 允许 null → 默认 0px
+                Ok(InsetValue::Pixels(0))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(InsetValue::Pixels(0))
+            }
+        }
+
+        deserializer.deserialize_any(InsetVisitor)
+    }
+}
+
+impl InsetValue {
+    /// 将百分比值根据容器尺寸转换为像素
+    pub fn resolve(&self, container_size: i32) -> i32 {
+        match self {
+            InsetValue::Pixels(px) => *px,
+            InsetValue::Percent(pct) => (*pct * container_size as f32).round() as i32,
+        }
+    }
+}
+
+/// 视口内边距（用于排除固定遮挡区域如悬浮底部栏、顶部导航等）
+/// 每个字段支持数字（像素）或字符串（百分比，如 "5%"）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ViewportInset {
+    /// 左侧排除（像素或百分比）
+    #[serde(default)]
+    pub left: Option<InsetValue>,
+    /// 顶部排除（像素或百分比）
+    #[serde(default)]
+    pub top: Option<InsetValue>,
+    /// 右侧排除（像素或百分比）
+    #[serde(default)]
+    pub right: Option<InsetValue>,
+    /// 底部排除（像素或百分比）
+    #[serde(default)]
+    pub bottom: Option<InsetValue>,
+}
+
 fn default_button() -> String { "left".to_string() }
 fn default_mark_timeout() -> u64 { 3000 }
 
@@ -364,6 +476,9 @@ pub struct MouseScrollOptions {
     /// 滚动居中阈值（元素中心与目标中心距离小于此阈值时认为已居中，单位：视口高度比例），默认 0.10
     #[serde(rename = "scrollToCenterThreshold", default = "default_scroll_to_center_threshold")]
     pub scroll_to_center_threshold: Option<f32>,
+    /// 视口内边距（从容器视口向内扣除固定遮挡区域，支持像素和百分比）
+    #[serde(rename = "viewportInset", default)]
+    pub viewport_inset: Option<ViewportInset>,
 }
 
 fn default_scroll_to_center() -> Option<bool> { Some(true) }
