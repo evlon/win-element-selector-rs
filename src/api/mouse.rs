@@ -17,6 +17,24 @@ use super::types::{
 use super::super::mouse_control;
 use super::idle_motion::with_auto_pause;
 
+/// 计算元素 rect 与容器视口 rect 的交集（visible_rect）
+fn compute_visible_rect(element_rect: &Option<super::types::Rect>, container_rect: &Option<super::types::Rect>) -> Option<super::types::Rect> {
+    match (element_rect, container_rect) {
+        (Some(er), Some(vp)) => {
+            let left = er.x.max(vp.x);
+            let top = er.y.max(vp.y);
+            let right = (er.x + er.width).min(vp.x + vp.width);
+            let bottom = (er.y + er.height).min(vp.y + vp.height);
+            if right > left && bottom > top {
+                Some(super::types::Rect { x: left, y: top, width: right - left, height: bottom - top })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// POST /api/mouse/move
 /// 拟人化移动鼠标到目标坐标
 pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
@@ -263,6 +281,32 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     }
 }
 
+/// 在 xpath 最后一个步骤中追加 @IsOffscreen!='true' 过滤条件
+/// 例如 /Document/Text[@Name='x'] → /Document/Text[@Name='x' and @IsOffscreen!='true']
+/// 用于强制 UIA 重新遍历树，避免 IsOffscreen 属性缓存延迟
+/// 注意：在 Chrome WebView 中此查询始终返回 0 且耗时 ~1.7s，scroll 循环中已不再使用
+#[allow(dead_code)]
+fn append_offscreen_filter(xpath: &str) -> String {
+    // 找到最后一个 '/' 分隔的步骤
+    let last_slash = xpath.rfind('/');
+    if let Some(pos) = last_slash {
+        let prefix = &xpath[..=pos]; // 包含 '/'
+        let last_step = &xpath[pos + 1..];
+
+        if last_step.contains('[') {
+            // 已有谓词，追加 and 条件
+            // 例如 Text[@Name='x'] → Text[@Name='x' and @IsOffscreen!='true']
+            format!("{}{} and @IsOffscreen!='true']", prefix, last_step.trim_end_matches(']'))
+        } else {
+            // 无谓词，添加新谓词
+            format!("{}{}[@IsOffscreen!='true']", prefix, last_step)
+        }
+    } else {
+        // 无 '/' 的简单 xpath
+        format!("{}[@IsOffscreen!='true']", xpath)
+    }
+}
+
 /// 构建窗口选择器字符串
 fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> String {
     match selector {
@@ -381,6 +425,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 scrolled: 0,
                 target_found: false,
                 target_rect: None,
+                visible_rect: None,
                 scrolled_to_end: false,
                 error: Some(format!("内部错误: {}", e)),
             });
@@ -404,6 +449,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                     scrolled: 0,
                     target_found: false,
                     target_rect: None,
+                    visible_rect: None,
                     scrolled_to_end: false,
                     error: Some("元素坐标获取失败".to_string()),
                 });
@@ -415,6 +461,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 scrolled: 0,
                 target_found: false,
                 target_rect: None,
+                visible_rect: None,
                 scrolled_to_end: false,
                 error: Some(format!("未找到元素: {}", request.element)),
             });
@@ -425,6 +472,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 scrolled: 0,
                 target_found: false,
                 target_rect: None,
+                visible_rect: None,
                 scrolled_to_end: false,
                 error: Some(e.clone()),
             });
@@ -435,6 +483,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 scrolled: 0,
                 target_found: false,
                 target_rect: None,
+                visible_rect: None,
                 scrolled_to_end: false,
                 error: Some("校验状态未知".to_string()),
             });
@@ -508,11 +557,13 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                             } else {
                                 None
                             };
+                            let visible_rect = compute_visible_rect(&target_rect, &precheck_container_rect);
                             return HttpResponse::Ok().json(MouseScrollResponse {
                                 success: true,
                                 scrolled: 0,
                                 target_found: true,
                                 target_rect,
+                                visible_rect,
                                 scrolled_to_end: false,
                                 error: None,
                             });
@@ -557,6 +608,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                         scrolled,
                         target_found: false,
                         target_rect: None,
+                        visible_rect: None,
                         scrolled_to_end: false,
                         error: Some(format!("超时 {}ms", timeout_ms)),
                     });
@@ -594,86 +646,139 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
                         if wait_visible {
                             // visible 模式：还需检查元素不在屏幕外
-                            if cur_offscreen {
-                                // 阶段1：元素在屏幕外，继续同方向滚动
-                                info!("Wait xpath found but offscreen, continue scrolling (delta={})", current_delta);
-                            } else if !scroll_to_center {
-                                // 不需要居中，元素可见即返回
-                                info!("Wait xpath found and visible after {} scrolls", scrolled);
-                                return HttpResponse::Ok().json(MouseScrollResponse {
-                                    success: true,
-                                    scrolled,
-                                    target_found: true,
-                                    target_rect,
-                                    scrolled_to_end: false,
-                                    error: None,
-                                });
+                            // 判断元素是否实际可见（处理 UIA 缓存延迟导致的 IsOffscreen=true）
+                            let effectively_visible = if cur_offscreen {
+                                // IsOffscreen=true → 可能是 UIA 缓存延迟
+                                // 不再使用 append_offscreen_filter 二次查询（在 Chrome WebView 中始终返回 0 且耗时 ~1.7s）
+                                // 改用 rect 与容器视口重叠判断：
+                                //   - rect 有效且与容器重叠 → UIA 缓存延迟，视为可见
+                                //   - rect 为 (0,0,0,0) → Chrome WebView offscreen 元素特征，确实不可见
+                                //   - rect 有效但不重叠 → 确实 offscreen
+                                let rect_valid = target_rect.as_ref().map_or(false, |r| r.width > 0 && r.height > 0);
+                                let overlaps = if rect_valid {
+                                    match (&container_rect, &target_rect) {
+                                        (Some(vp), Some(er)) => {
+                                            // 标准 AABB 重叠判断
+                                            er.x < vp.x + vp.width && er.x + er.width > vp.x &&
+                                            er.y < vp.y + vp.height && er.y + er.height > vp.y
+                                        }
+                                        _ => false,
+                                    }
+                                } else {
+                                    false // rect 为 (0,0,0,0) 或 None → Chrome WebView offscreen 特征
+                                };
+                                if overlaps {
+                                    info!("Element offscreen but rect overlaps container, treating as visible (UIA cache delay) after {} scrolls", scrolled);
+                                } else {
+                                    info!("Wait xpath found but offscreen, rect={:?}, continue scrolling (delta={})", target_rect, current_delta);
+                                }
+                                overlaps
                             } else {
-                                // 阶段2：元素已可见，scrollToCenter 调整到视口中心
-                                scroll_to_center_adjust_count += 1;
-                                if scroll_to_center_adjust_count > scroll_to_center_adjust_times {
-                                    // 已达最大调整次数，停止滚动避免死循环
-                                    info!("Wait xpath visible, scrollToCenter adjust limit reached (adjust_count={}, max={}), stopping after {} scrolls", scroll_to_center_adjust_count, scroll_to_center_adjust_times, scrolled);
+                                true // IsOffscreen=false，元素可见
+                            };
+
+                            if effectively_visible {
+                                // 判断元素是否充分可见（不仅仅是重叠，而是满足可见性标准）
+                                // 1) 元素能完全放入视口 → 要求 top/bottom 都在视口内
+                                // 2) 元素太大放不进视口 → visible_rect.height ≥ 视口高度 * 80%
+                                let sufficiently_visible = match (&target_rect, &container_rect) {
+                                    (Some(er), Some(vp)) => {
+                                        let fits_in_viewport = er.height <= vp.height;
+                                        if fits_in_viewport {
+                                            // 元素能完全放入视口，要求完全包含
+                                            let fully_contained = er.y >= vp.y && er.y + er.height <= vp.y + vp.height;
+                                            if fully_contained {
+                                                true
+                                            } else {
+                                                info!("Element fits in viewport but not fully contained: element_y={}, element_bottom={}, viewport_y={}, viewport_bottom={}",
+                                                    er.y, er.y + er.height, vp.y, vp.y + vp.height);
+                                                false
+                                            }
+                                        } else {
+                                            // 元素太大，要求 visible_rect 高度 ≥ 视口高度 * 80%
+                                            let vis_top = er.y.max(vp.y);
+                                            let vis_bottom = (er.y + er.height).min(vp.y + vp.height);
+                                            let vis_height = vis_bottom.saturating_sub(vis_top);
+                                            let min_required = (vp.height as f32 * 0.8) as i32;
+                                            if vis_height >= min_required {
+                                                true
+                                            } else {
+                                                info!("Element too large for viewport, visible_height={} < min_required={} (80% of vp_height={})",
+                                                    vis_height, min_required, vp.height);
+                                                false
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // 无 container_rect 数据时，降级为 effectively_visible 即返回
+                                        true
+                                    }
+                                };
+
+                                if sufficiently_visible {
+                                    let visible_rect = compute_visible_rect(&target_rect, &container_rect);
+                                    info!("Wait xpath sufficiently visible after {} scrolls, target_rect={:?}, visible_rect={:?}", scrolled, target_rect, visible_rect);
                                     return HttpResponse::Ok().json(MouseScrollResponse {
                                         success: true,
                                         scrolled,
                                         target_found: true,
                                         target_rect,
+                                        visible_rect,
                                         scrolled_to_end: false,
-                                        error: Some(format!("scrollToCenter 调整次数已达上限 {}", scroll_to_center_adjust_times)),
+                                        error: None,
                                     });
-                                }
-
-                                match (cur_element_center_y, viewport_center_y) {
-                                    (Some(ey), Some(vy)) => {
-                                        let distance = (ey - vy).abs();
-                                        // 居中阈值：视口高度的比例（元素中心距目标中心在此范围内即认为居中）
-                                        let threshold = (container_height * options.scroll_to_center_threshold.unwrap_or(0.10)) as i32;
-                                        if distance <= threshold {
-                                            info!("Wait xpath centered (element_y={}, viewport_y={}, distance={}, threshold={}) after {} scrolls (adjust_count={})", ey, vy, distance, threshold, scrolled, scroll_to_center_adjust_count);
-                                            return HttpResponse::Ok().json(MouseScrollResponse {
-                                                success: true,
-                                                scrolled,
-                                                target_found: true,
-                                                target_rect,
-                                                scrolled_to_end: false,
-                                                error: None,
-                                            });
-                                        } else {
-                                            // 同方向渐进缩小策略：
-                                            // 始终保持原始滚动方向，只缩小 delta 量级
-                                            // 这样不会反向滚动导致过冲，更像人的操作
-                                            //
-                                            // 距离越大用较大 delta，距离越小用较小 delta
-                                            // 使用原始 delta 的绝对值作为基准，按距离占视口高度的比例缩放
-                                            let base_abs_delta = delta.abs().max(120);
-                                            let distance_ratio = (distance as f32 / container_height).min(1.0);
-                                            let scaled = (base_abs_delta as f32 * distance_ratio) as i32;
-                                            // 最小 delta 为原始 delta 的 minDeltaRatio 比例，且不低于一个滚轮刻度(120)
-                                            let min_delta = (base_abs_delta as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
-                                            let adjust_delta = scaled.max(min_delta) * original_delta_sign;
-                                            current_delta = adjust_delta;
-                                            info!("Same-direction adjust: element_y={}, viewport_y={}, distance={}, threshold={}, distance_ratio={:.2}, base_abs_delta={}, min_delta={}, adjust_delta={} (adjust_count={}/{})",
-                                                ey, vy, distance, threshold, distance_ratio, base_abs_delta, min_delta, adjust_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
-                                        }
+                                } else if !scroll_to_center {
+                                    // 不居中模式 + 不够可见 → 继续滚动
+                                    info!("Wait xpath not sufficiently visible after {} scrolls, continuing", scrolled);
+                                } else {
+                                    // scrollToCenter 模式 + 不够可见 → 按动态方向调整
+                                    scroll_to_center_adjust_count += 1;
+                                    if scroll_to_center_adjust_count > scroll_to_center_adjust_times {
+                                        info!("Wait xpath visible, scrollToCenter adjust limit reached (adjust_count={}, max={}), stopping after {} scrolls",
+                                            scroll_to_center_adjust_count, scroll_to_center_adjust_times, scrolled);
+                                        let vis_rect = compute_visible_rect(&target_rect, &container_rect);
+                                        return HttpResponse::Ok().json(MouseScrollResponse {
+                                            success: true,
+                                            scrolled,
+                                            target_found: true,
+                                            target_rect,
+                                            visible_rect: vis_rect,
+                                            scrolled_to_end: false,
+                                            error: Some(format!("scrollToCenter 调整次数已达上限 {}", scroll_to_center_adjust_times)),
+                                        });
                                     }
-                                    _ => {
-                                        // 中心数据不可用，继续同方向滚动（不放弃，受 adjust 次数限制）
-                                        // 每次缩减到原来的一半，最小为原始 delta 的 minDeltaRatio 比例
-                                        let min_delta = (delta.abs() as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
-                                        current_delta = (current_delta.abs() / 2).max(min_delta) * original_delta_sign;
-                                        info!("Wait xpath visible, scrollToCenter no center data, reduced delta={} (adjust_count={}/{})", current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
+
+                                    match (cur_element_center_y, viewport_center_y) {
+                                        (Some(ey), Some(vy)) => {
+                                            let direction_sign: i32 = if ey > vy { -1 } else { 1 };
+                                            let base_abs_delta = delta.abs().max(120);
+                                            let distance_ratio = ((ey - vy).abs() as f32 / container_height).min(1.0);
+                                            let scaled = (base_abs_delta as f32 * distance_ratio) as i32;
+                                            let min_delta = (base_abs_delta as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
+                                            current_delta = scaled.max(min_delta) * direction_sign;
+                                            info!("scrollToCenter adjust (not sufficiently visible): element_y={}, viewport_y={}, direction_sign={}, delta={} (adjust={}/{})",
+                                                ey, vy, direction_sign, current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
+                                        }
+                                        _ => {
+                                            let min_delta = (delta.abs() as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
+                                            current_delta = (current_delta.abs() / 2).max(min_delta) * original_delta_sign;
+                                            info!("Wait xpath visible, scrollToCenter no center data, reduced delta={} (adjust_count={}/{})",
+                                                current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
+                                        }
                                     }
                                 }
                             }
+                            // else: effectively_visible=false → 继续滚动
                         } else {
                             // exist 模式：找到即可
                             info!("Wait xpath found after {} scrolls", scrolled);
+                            let vis_rect = compute_visible_rect(&target_rect, &container_rect);
                             return HttpResponse::Ok().json(MouseScrollResponse {
                                 success: true,
                                 scrolled,
                                 target_found: true,
                                 target_rect,
+                                visible_rect: vis_rect,
                                 scrolled_to_end: false,
                                 error: None,
                             });
@@ -731,6 +836,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                                     scrolled,
                                     target_found: false,
                                     target_rect: None,
+                                    visible_rect: None,
                                     scrolled_to_end: true,
                                     error: None,
                                 });
@@ -755,6 +861,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
             scrolled,
             target_found: options.wait.is_none(),
             target_rect: None,
+            visible_rect: None,
             scrolled_to_end: false,
             error: None,
         })

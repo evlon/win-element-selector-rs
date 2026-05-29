@@ -396,6 +396,9 @@ pub struct MouseScrollResponse {
     /// 目标元素的矩形区域（仅当 target_found=true 时有值）
     #[serde(rename = "targetRect", skip_serializing_if = "Option::is_none")]
     pub target_rect: Option<Rect>,
+    /// 目标元素在容器视口内可见的矩形区域（target_rect ∩ container_rect）
+    #[serde(rename = "visibleRect", skip_serializing_if = "Option::is_none")]
+    pub visible_rect: Option<Rect>,
     /// 是否滚动到了边界（内容不再移动）
     #[serde(rename = "scrolledToEnd")]
     pub scrolled_to_end: bool,
