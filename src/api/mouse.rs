@@ -164,14 +164,44 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         let rect_api: super::types::Rect = rect.clone().into();
                         let _center = rect_api.center();
 
-                        // 计算随机点击点
-                        let click_point = calculate_random_click_point(&rect_api, options.random_range, &options.click_area);
+                        // 获取窗口矩形用于计算 visibleRect
+                        let window_rect = super::super::core::uia::get_window_rect_by_selector(&window_selector_for_click);
+                        
+                        // 计算 visibleRect（元素矩形 ∩ 窗口矩形）
+                        let visible_rect = if let Some(win_rect) = window_rect {
+                            let win_rect_api = super::types::Rect {
+                                x: win_rect.x,
+                                y: win_rect.y,
+                                width: win_rect.width,
+                                height: win_rect.height,
+                            };
+                            // 求交集
+                            let left = rect_api.x.max(win_rect_api.x);
+                            let top = rect_api.y.max(win_rect_api.y);
+                            let right = (rect_api.x + rect_api.width).min(win_rect_api.x + win_rect_api.width);
+                            let bottom = (rect_api.y + rect_api.height).min(win_rect_api.y + win_rect_api.height);
+                            if right > left && bottom > top {
+                                Some(super::types::Rect {
+                                    x: left,
+                                    y: top,
+                                    width: right - left,
+                                    height: bottom - top,
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
 
-                        // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
-                        let click_point_copy = click_point;
-                        let options_copy = options.clone();
+                        // 计算随机点击点（传入 visibleRect 进行二次校验）
+                        match calculate_offset_click_point(&rect_api, &visible_rect, &options) {
+                            Ok(click_point) => {
+                                // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
+                                let click_point_copy = click_point;
+                                let options_copy = options.clone();
 
-                        with_auto_pause(|| async {
+                                with_auto_pause(|| async {
                             // 确保窗口在前台
                             info!("Activating window before click: {}", window_selector_for_click);
                             let activated = super::super::core::uia::activate_window_by_selector(&window_selector_for_click);
@@ -265,6 +295,17 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                                 }
                             }
                         }).await
+                            },
+                            Err(e) => {
+                                warn!("计算点击坐标失败: {}", e);
+                                HttpResponse::Ok().json(MouseClickResponse {
+                                    success: false,
+                                    click_point: Point::new(0, 0),
+                                    element: None,
+                                    error: Some(format!("计算点击坐标失败: {}", e)),
+                                })
+                            }
+                        }
                     } else {
                         HttpResponse::Ok().json(MouseClickResponse {
                             success: false,
@@ -366,50 +407,147 @@ fn build_window_selector(selector: &super::types::WindowSelectorOrString) -> Str
     }
 }
 
-/// 计算随机点击点
-fn calculate_random_click_point(rect: &super::types::Rect, range_percent: f32, click_area: &Option<super::types::ClickArea>) -> Point {
+/// 计算带偏移的随机点击点（与 visibleRect 二次校验）
+/// 
+/// 流程：
+/// 1. 根据 offset/clickArea/randomRange 计算基准区域
+/// 2. 与 visibleRect 求交集，得到最终可点击区域
+/// 3. 在最终区域内完全随机选择坐标
+/// 
+/// 优先级：offset > clickArea > randomRange
+fn calculate_offset_click_point(
+    rect: &super::types::Rect,
+    visible_rect: &Option<super::types::Rect>,
+    options: &super::types::MouseClickOptions
+) -> Result<Point, String> {
     use rand::Rng;
-
-    // 计算有效区域边界
-    let (eff_left, eff_right, eff_top, eff_bottom) = if let Some(ref area) = click_area {
-        let left = area.left.unwrap_or(0.0);
-        let right = area.right.unwrap_or(0.0);
-        let top = area.top.unwrap_or(0.0);
-        let bottom = area.bottom.unwrap_or(0.0);
-
-        let eff_left = rect.x as f32 + rect.width as f32 * left;
-        let eff_right = rect.x as f32 + rect.width as f32 * (1.0 - right);
-        let eff_top = rect.y as f32 + rect.height as f32 * top;
-        let eff_bottom = rect.y as f32 + rect.height as f32 * (1.0 - bottom);
-        (eff_left, eff_right, eff_top, eff_bottom)
+    use super::types::{ClickOffset, PresetOffset};
+    
+    // Step 1: 确定基准区域（基于 offset/clickArea/randomRange）
+    let (base_left, base_right, base_top, base_bottom) = if let Some(ref offset) = options.offset {
+        // 使用 offset 配置
+        match offset {
+            ClickOffset::Preset(preset) => {
+                // 预设位置：基于边界附近的小区域
+                match preset {
+                    PresetOffset::Top => {
+                        let margin = 10.0;
+                        (rect.x as f32, (rect.x + rect.width) as f32, 
+                         rect.y as f32, (rect.y as f32 + margin))
+                    },
+                    PresetOffset::Bottom => {
+                        let margin = 10.0;
+                        (rect.x as f32, (rect.x + rect.width) as f32, 
+                         (rect.y + rect.height) as f32 - margin, (rect.y + rect.height) as f32)
+                    },
+                    PresetOffset::Left => {
+                        let margin = 10.0;
+                        (rect.x as f32, rect.x as f32 + margin,
+                         rect.y as f32, (rect.y + rect.height) as f32)
+                    },
+                    PresetOffset::Right => {
+                        let margin = 10.0;
+                        ((rect.x + rect.width) as f32 - margin, (rect.x + rect.width) as f32,
+                         rect.y as f32, (rect.y + rect.height) as f32)
+                    },
+                    PresetOffset::Center => {
+                        // center 时使用 clickArea 或 randomRange
+                        if let Some(ref area) = options.click_area {
+                            calculate_effective_bounds(rect, area)
+                        } else {
+                            let range = options.random_range;
+                            let cx = rect.center().x as f32;
+                            let cy = rect.center().y as f32;
+                            let hw = rect.width as f32 * range / 2.0;
+                            let hh = rect.height as f32 * range / 2.0;
+                            (cx - hw, cx + hw, cy - hh, cy + hh)
+                        }
+                    }
+                }
+            },
+            ClickOffset::Expression(expr) => {
+                // 解析表达式得到偏移量
+                match crate::api::offset_parser::parse_offset_expression(expr, rect) {
+                    Ok((offset_x, offset_y)) => {
+                        // 以元素左上角为基准，应用偏移
+                        let base_x = rect.x as f32 + offset_x;
+                        let base_y = rect.y as f32 + offset_y;
+                        // 在偏移点周围创建小范围随机区域（±10px）
+                        (base_x - 10.0, base_x + 10.0, base_y - 10.0, base_y + 10.0)
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to parse offset expression '{}': {}, fallback to center", expr, e);
+                        // 降级到 center 行为
+                        let range = options.random_range;
+                        let cx = rect.center().x as f32;
+                        let cy = rect.center().y as f32;
+                        let hw = rect.width as f32 * range / 2.0;
+                        let hh = rect.height as f32 * range / 2.0;
+                        (cx - hw, cx + hw, cy - hh, cy + hh)
+                    }
+                }
+            }
+        }
+    } else if let Some(ref area) = options.click_area {
+        // 使用 clickArea
+        calculate_effective_bounds(rect, area)
     } else {
-        // 无 clickArea 时以中心为基准，保持原有行为
+        // 使用 randomRange（旧行为）
+        let range = options.random_range;
         let cx = rect.center().x as f32;
         let cy = rect.center().y as f32;
-        let hw = rect.width as f32 * range_percent / 2.0;
-        let hh = rect.height as f32 * range_percent / 2.0;
+        let hw = rect.width as f32 * range / 2.0;
+        let hh = rect.height as f32 * range / 2.0;
         (cx - hw, cx + hw, cy - hh, cy + hh)
     };
-
-    let center_x = (eff_left + eff_right) / 2.0;
-    let center_y = (eff_top + eff_bottom) / 2.0;
-    let half_range_w = (eff_right - eff_left) * range_percent / 2.0;
-    let half_range_h = (eff_bottom - eff_top) * range_percent / 2.0;
-
+    
+    // Step 2: 与 visibleRect 求交集（二次校验）
+    let (final_left, final_right, final_top, final_bottom) = if let Some(ref vr) = visible_rect {
+        let vr_left = vr.x as f32;
+        let vr_right = (vr.x + vr.width) as f32;
+        let vr_top = vr.y as f32;
+        let vr_bottom = (vr.y + vr.height) as f32;
+        
+        // 求交集
+        let intersect_left = base_left.max(vr_left);
+        let intersect_right = base_right.min(vr_right);
+        let intersect_top = base_top.max(vr_top);
+        let intersect_bottom = base_bottom.min(vr_bottom);
+        
+        // 检查交集是否有效
+        if intersect_right > intersect_left && intersect_bottom > intersect_top {
+            (intersect_left, intersect_right, intersect_top, intersect_bottom)
+        } else {
+            // 交集为空，说明 offset 指定的区域完全不可见
+            log::warn!("Offset region has no intersection with visibleRect, using visibleRect as fallback");
+            // 降级：直接在 visibleRect 内随机
+            (vr_left, vr_right, vr_top, vr_bottom)
+        }
+    } else {
+        // 无 visibleRect 信息，直接使用基准区域
+        (base_left, base_right, base_top, base_bottom)
+    };
+    
+    // Step 3: 在最终区域内完全随机选择坐标
     let mut rng = rand::thread_rng();
+    let x = rng.gen_range(final_left..final_right) as i32;
+    let y = rng.gen_range(final_top..final_bottom) as i32;
+    
+    Ok(Point::new(x, y))
+}
 
-    let offset_x = if half_range_w > 0.0 {
-        rng.gen_range(-half_range_w..half_range_w) as i32
-    } else {
-        0
-    };
-    let offset_y = if half_range_h > 0.0 {
-        rng.gen_range(-half_range_h..half_range_h) as i32
-    } else {
-        0
-    };
+/// 辅助函数：计算 clickArea 的有效边界
+fn calculate_effective_bounds(rect: &super::types::Rect, area: &super::types::ClickArea) -> (f32, f32, f32, f32) {
+    let left = area.left.unwrap_or(0.0);
+    let right = area.right.unwrap_or(0.0);
+    let top = area.top.unwrap_or(0.0);
+    let bottom = area.bottom.unwrap_or(0.0);
 
-    Point::new(center_x as i32 + offset_x, center_y as i32 + offset_y)
+    let eff_left = rect.x as f32 + rect.width as f32 * left;
+    let eff_right = rect.x as f32 + rect.width as f32 * (1.0 - right);
+    let eff_top = rect.y as f32 + rect.height as f32 * top;
+    let eff_bottom = rect.y as f32 + rect.height as f32 * (1.0 - bottom);
+    (eff_left, eff_right, eff_top, eff_bottom)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

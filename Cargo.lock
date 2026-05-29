@@ -1440,6 +1440,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "rand 0.8.6",
  "rdev",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -43,6 +43,39 @@ pub mod windows_impl {
         x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
     }
 
+    /// 计算元素的 visibleRect（元素矩形 ∩ 窗口视口矩形）
+    /// 
+    /// # Arguments
+    /// * `element_rect` - 元素的边界矩形
+    /// * `window_rect` - 窗口（视口）的边界矩形，如果为 None 则认为整个元素可见
+    /// 
+    /// # Returns
+    /// 可见的矩形区域，如果完全不可见则返回 None
+    fn compute_element_visible_rect(
+        element_rect: &crate::api::types::Rect,
+        window_rect: Option<&crate::api::types::Rect>,
+    ) -> Option<crate::api::types::Rect> {
+        match window_rect {
+            Some(vp) => {
+                let left = element_rect.x.max(vp.x);
+                let top = element_rect.y.max(vp.y);
+                let right = (element_rect.x + element_rect.width).min(vp.x + vp.width);
+                let bottom = (element_rect.y + element_rect.height).min(vp.y + vp.height);
+                if right > left && bottom > top {
+                    Some(crate::api::types::Rect { 
+                        x: left, 
+                        y: top, 
+                        width: right - left, 
+                        height: bottom - top 
+                    })
+                } else {
+                    None  // 完全不可见
+                }
+            },
+            None => Some(element_rect.clone()),  // 无窗口信息时，认为整个元素可见
+        }
+    }
+
     /// Build a dedup key from an element's RuntimeId.
     fn runtime_id_key(elem: &IUIAutomationElement) -> Option<Vec<i32>> {
         unsafe {
@@ -1939,6 +1972,18 @@ pub mod windows_impl {
         
         // Try each matching window until we find elements
         for window in &windows {
+            // 获取窗口矩形用于计算 visibleRect
+            let window_rect = unsafe {
+                window.CurrentBoundingRectangle().ok().map(|r| {
+                    crate::api::types::Rect {
+                        x: r.left,
+                        y: r.top,
+                        width: r.right - r.left,
+                        height: r.bottom - r.top,
+                    }
+                })
+            };
+            
             let (elements, _) = match find_by_xpath_with_fallback(&auto, window, element_xpath) {
                 Ok(result) => result,
                 Err(_) => continue,
@@ -1959,6 +2004,9 @@ pub mod windows_impl {
                         height: r.bottom - r.top,
                     };
                     let center = api_rect.center();
+                    
+                    // 计算 visibleRect
+                    let visible_rect = compute_element_visible_rect(&api_rect, window_rect.as_ref());
                     
                     // Calculate random center
                     let half_range_w = api_rect.width as f32 * random_range / 2.0;
@@ -1989,6 +2037,7 @@ pub mod windows_impl {
 
                     Some(ElementInfo {
                         rect: Some(api_rect),
+                        visible_rect,
                         center: center_opt,
                         center_random: cr_opt,
                         control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
@@ -2058,6 +2107,18 @@ pub mod windows_impl {
 
         log::info!("[find_from_root] Found {} elements", elements.len());
 
+        // 获取 Desktop 矩形用于计算 visibleRect（Desktop 通常覆盖整个屏幕）
+        let desktop_rect = unsafe {
+            desktop.CurrentBoundingRectangle().ok().map(|r| {
+                crate::api::types::Rect {
+                    x: r.left,
+                    y: r.top,
+                    width: r.right - r.left,
+                    height: r.bottom - r.top,
+                }
+            })
+        };
+
         let mut rng = rand::thread_rng();
         elements.iter().filter_map(|elem| {
             let r = match unsafe { elem.CurrentBoundingRectangle() } {
@@ -2071,6 +2132,9 @@ pub mod windows_impl {
                 height: r.bottom - r.top,
             };
             let center = api_rect.center();
+
+            // 计算 visibleRect
+            let visible_rect = compute_element_visible_rect(&api_rect, desktop_rect.as_ref());
 
             let half_range_w = api_rect.width as f32 * random_range / 2.0;
             let half_range_h = api_rect.height as f32 * random_range / 2.0;
@@ -2097,6 +2161,7 @@ pub mod windows_impl {
 
             Some(ElementInfo {
                 rect: rect_opt,
+                visible_rect,
                 center: center_opt,
                 center_random: cr_opt,
                 control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
@@ -2382,6 +2447,18 @@ pub mod windows_impl {
 
         log::info!("[find_visible_elements] Found {} visible elements (types={:?})", count, control_types);
 
+        // 获取容器矩形用于计算 visibleRect
+        let container_rect = unsafe {
+            container.CurrentBoundingRectangle().ok().map(|r| {
+                Rect {
+                    x: r.left,
+                    y: r.top,
+                    width: r.right - r.left,
+                    height: r.bottom - r.top,
+                }
+            })
+        };
+
         // 5. 转换为 ElementInfo
         (0..count).filter_map(|i| {
             let elem = match unsafe { raw_elements.GetElement(i) } {
@@ -2400,6 +2477,9 @@ pub mod windows_impl {
                 height: r.bottom - r.top,
             };
             let center = api_rect.center();
+            
+            // 计算 visibleRect
+            let visible_rect = compute_element_visible_rect(&api_rect, container_rect.as_ref());
             let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
             let (center_opt, cr_opt) = if is_offscreen {
                 (None, None)
@@ -2409,6 +2489,7 @@ pub mod windows_impl {
 
             Some(ElementInfo {
                 rect: Some(api_rect),
+                visible_rect,
                 center: center_opt,
                 center_random: cr_opt,
                 control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },

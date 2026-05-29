@@ -149,6 +149,9 @@ fn default_random_range() -> f32 {
 pub struct ElementInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rect: Option<Rect>,
+    /// 元素真正可见、可点击的矩形区域（元素矩形 ∩ 窗口视口矩形）
+    #[serde(rename = "visibleRect", skip_serializing_if = "Option::is_none")]
+    pub visible_rect: Option<Rect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub center: Option<Point>,
     #[serde(rename = "centerRandom", skip_serializing_if = "Option::is_none")]
@@ -250,7 +253,7 @@ pub struct MouseMoveResponse {
 }
 
 /// 鼠标点击选项
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MouseClickOptions {
     /// 是否启用拟人化移动
     #[serde(default = "default_humanize")]
@@ -270,12 +273,31 @@ pub struct MouseClickOptions {
     /// 点击区域限制（按比例缩小可点击范围）
     #[serde(rename = "clickArea", default)]
     pub click_area: Option<ClickArea>,
+    /// 点击偏移配置（优先级高于 click_area）
+    #[serde(default)]
+    pub offset: Option<ClickOffset>,
     /// 是否在点击位置留痕（红色圆点标记）
     #[serde(rename = "markClick", default)]
     pub mark_click: bool,
     /// 留痕超时时间（毫秒），默认 3000
     #[serde(rename = "markTimeout", default = "default_mark_timeout")]
     pub mark_timeout: u64,
+}
+
+impl Default for MouseClickOptions {
+    fn default() -> Self {
+        Self {
+            humanize: default_humanize(),
+            random_range: default_random_range(),
+            pause_before: 0,
+            pause_after: 0,
+            button: default_button(),
+            click_area: None,
+            offset: None,
+            mark_click: false,
+            mark_timeout: default_mark_timeout(),
+        }
+    }
 }
 
 /// 点击区域限制（按比例）
@@ -289,6 +311,41 @@ pub struct ClickArea {
     pub top: Option<f32>,
     /// 底部排除比例（0-1）
     pub bottom: Option<f32>,
+}
+
+/// 点击偏移配置
+/// 
+/// 支持两种形式：
+/// 1. 预设位置：'top' | 'bottom' | 'left' | 'right' | 'center'
+/// 2. 自定义表达式字符串：如 'left+20%', 'top-10px', 'right-5%', 'bottom+15px'
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ClickOffset {
+    /// 预设位置
+    Preset(PresetOffset),
+    /// 自定义表达式字符串
+    Expression(String),
+}
+
+/// 预设偏移位置
+#[derive(Debug, Clone, Deserialize)]
+pub enum PresetOffset {
+    #[serde(rename = "top")]
+    Top,
+    #[serde(rename = "bottom")]
+    Bottom,
+    #[serde(rename = "left")]
+    Left,
+    #[serde(rename = "right")]
+    Right,
+    #[serde(rename = "center")]
+    Center,
+}
+
+impl Default for ClickOffset {
+    fn default() -> Self {
+        ClickOffset::Preset(PresetOffset::Center)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

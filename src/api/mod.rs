@@ -8,6 +8,7 @@ pub mod element;
 pub mod mouse;
 pub mod idle_motion;
 pub mod keyboard;
+pub mod offset_parser;
 
 // 重新导出类型
 pub use types::*;
