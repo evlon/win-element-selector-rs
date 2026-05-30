@@ -8,7 +8,7 @@
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
-use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
+use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
 
@@ -30,7 +30,7 @@ pub mod windows_impl {
                     TreeScope_Subtree,
                 },
                 WindowsAndMessaging::{
-                    GetCursorPos, EnumWindows, GetWindowThreadProcessId,
+                    GetCursorPos, EnumChildWindows, EnumWindows, GetWindowThreadProcessId,
                     IsWindowVisible,
                 },
             },
@@ -1664,9 +1664,12 @@ pub mod windows_impl {
         const WEBVIEW_CLASS_PREFIXES: &[&str] = &[
             "WRY_WEBVIEW",           // Tauri/WRY apps
             "Chrome_WidgetWin",      // Chromium-based (Electron, Edge, etc.)
+            "Chrome_Widget",         // Shorter prefix for Chrome_WidgetWin_1, etc.
             "Intermediate D3D",      // D3D intermediate window (some WRY versions)
             "WebView2",              // WebView2 apps
             "CefBrowserWindow",      // CEF-based apps
+            "QtWebEngine",           // Qt's WebEngine
+            "QWebEngine",            // Qt WebEngine variant
         ];
         
         let mut child = unsafe { walker.GetFirstChildElement(window).ok() };
@@ -1700,8 +1703,8 @@ pub mod windows_impl {
                 return Some(c);
             }
             
-            // Deep search: check if any descendant (up to 5 levels) has different FrameworkId
-            if has_framework_transition(&walker, &c, &window_fwid, 5) {
+            // Deep search: check if any descendant (up to 6 levels) has different FrameworkId
+            if has_framework_transition(&walker, &c, &window_fwid, 6) {
                 log::info!("[Content Root] Found deep framework transition under child[{}]: class='{}'", 
                     idx, class);
                 return Some(c);
@@ -1718,6 +1721,7 @@ pub mod windows_impl {
 
     /// Recursively check if any descendant of `elem` has a different FrameworkId.
     /// Uses iterative BFS to avoid stack overflow on deep UI trees.
+    /// Optimized with early pruning and dynamic breadth limiting.
     fn has_framework_transition(
         walker: &IUIAutomationTreeWalker,
         elem: &IUIAutomationElement,
@@ -1738,12 +1742,12 @@ pub mod windows_impl {
         }
         
         let mut visited_count = 0;
-        const MAX_NODES: usize = 100; // Limit total nodes to visit
+        const MAX_NODES: usize = 150; // Increased from 100 for better coverage
         
         while let Some((node, depth)) = queue.pop_front() {
             visited_count += 1;
             if visited_count > MAX_NODES {
-                log::info!("[Content Root] BFS limit reached ({} nodes), stopping", MAX_NODES);
+                log::debug!("[Content Root] BFS limit reached ({} nodes), stopping", MAX_NODES);
                 return false;
             }
             
@@ -1752,6 +1756,12 @@ pub mod windows_impl {
             }
             
             let sub_fwid = get_bstr(unsafe { node.CurrentFrameworkId() });
+            let sub_ct = unsafe { node.CurrentControlType().map(control_type_name).unwrap_or_default() };
+            
+            // Early pruning: skip non-container types at deeper levels
+            if depth > 2 && sub_ct != "Pane" && sub_ct != "Window" && sub_ct != "Group" && sub_ct != "Document" {
+                continue;
+            }
             
             // Found a different FrameworkId → transition detected
             if !sub_fwid.is_empty() && sub_fwid != parent_fwid {
@@ -1759,21 +1769,181 @@ pub mod windows_impl {
                 return true;
             }
             
-            // Add children to queue for next level
+            // Add children to queue for next level (with dynamic breadth limiting)
             if depth < max_depth {
                 let mut sub_child = unsafe { walker.GetFirstChildElement(&node).ok() };
                 let mut sub_count = 0;
+                // Dynamic breadth: more children at shallow levels, fewer at deep levels
+                let max_children = if depth <= 2 { 15 } else { 8 };
                 while let Some(sc) = sub_child {
                     let next_sc = unsafe { walker.GetNextSiblingElement(&sc).ok() };
                     queue.push_back((sc, depth + 1));
                     sub_child = next_sc;
                     sub_count += 1;
-                    if sub_count > 10 { break; } // Limit breadth per node
+                    if sub_count > max_children { break; }
                 }
             }
         }
         
         false
+    }
+
+    /// Find all top-level windows belonging to the same process as the given window
+    /// This is much faster than searching from Desktop root and handles multi-window scenarios
+    fn find_sibling_windows_same_process(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+    ) -> anyhow::Result<Vec<IUIAutomationElement>> {
+        use windows::Win32::UI::Accessibility::{TreeScope_Children, UIA_ProcessIdPropertyId};
+        use windows::Win32::System::Variant::VARIANT;
+        
+        // Get the process ID of the reference window
+        let process_id = unsafe { window.CurrentProcessId() }?;
+        log::debug!("[Sibling Search] Looking for windows with process ID: {}", process_id);
+        
+        // Create condition to match the same process ID
+        let mut variant = VARIANT::default();
+        unsafe {
+            use windows::Win32::System::Variant::VARENUM;
+            use std::mem::ManuallyDrop;
+            
+            let var_ptr = &mut variant as *mut VARIANT;
+            let vt_ptr = var_ptr as *mut VARENUM;
+            std::ptr::write(vt_ptr, windows::Win32::System::Variant::VT_I4);
+            
+            let int_ptr = (var_ptr as *mut u8).add(8) as *mut ManuallyDrop<i32>;
+            std::ptr::write(int_ptr, ManuallyDrop::new(process_id as i32));
+        }
+        
+        let condition = unsafe {
+            auto.CreatePropertyCondition(
+                UIA_ProcessIdPropertyId,
+                &variant
+            )
+        }?;
+        
+        // Find all elements with this process ID from Desktop root
+        // TreeScope_Children only searches immediate children (top-level windows)
+        let desktop = unsafe { auto.GetRootElement() }?;
+        let elements = unsafe {
+            desktop.FindAll(
+                TreeScope_Children,
+                &condition
+            )
+        }?;
+        
+        let count = unsafe { elements.Length() }?;
+        log::debug!("[Sibling Search] Found {} windows with same process ID", count);
+        
+        // Get the HWND of the original window for comparison
+        let original_hwnd = unsafe { window.CurrentNativeWindowHandle() }?;
+        
+        let mut siblings = Vec::new();
+        for i in 0..count {
+            let elem = unsafe { elements.GetElement(i as i32) }?;
+            
+            // Skip the original window itself by comparing HWND
+            let elem_hwnd = unsafe { elem.CurrentNativeWindowHandle() }?;
+            if elem_hwnd.0 == original_hwnd.0 {
+                continue;
+            }
+            
+            siblings.push(elem);
+        }
+        
+        log::debug!("[Sibling Search] Returning {} sibling windows (excluding original)", siblings.len());
+        Ok(siblings)
+    }
+
+    /// Find windows that might contain Chrome WebView content
+    /// This handles multi-process applications like WeChat where WebView runs in a separate process
+    fn find_child_process_windows(
+        auto: &IUIAutomation,
+        parent_window: &IUIAutomationElement,
+    ) -> anyhow::Result<Vec<IUIAutomationElement>> {
+        use std::collections::HashSet;
+        
+        // Get parent process info
+        let parent_pid = unsafe { parent_window.CurrentProcessId() }?;
+        let parent_process_name = get_process_name_by_id(parent_pid as u32);
+        log::info!("[Child Process Search] Parent PID={}, ProcessName='{}'", parent_pid, parent_process_name);
+        
+        // Enumerate all windows and filter by process name
+        let mut candidate_windows = Vec::new();
+        let mut related_pids: HashSet<u32> = HashSet::new();
+        
+        // Use EnumWindows to efficiently get all top-level windows
+        let windows_list = crate::core::enum_windows::enumerate_windows_fast();
+        log::info!("[Child Process Search] Found {} total windows via EnumWindows", windows_list.len());
+        
+        for win_info in windows_list.iter() {
+            // Skip the parent process itself
+            if win_info.process_id as i32 == parent_pid {
+                continue;
+            }
+            
+            // Skip if we've already seen this PID
+            if !related_pids.contains(&win_info.process_id) {
+                // Check if this process name is related to the parent
+                let proc_name_lower = win_info.process_name.to_lowercase();
+                let parent_name_lower = parent_process_name.to_lowercase();
+                
+                // Only match if process names are genuinely related:
+                // 1. Exact match (e.g., "Weixin" == "Weixin")
+                // 2. One starts with the other (e.g., "WeixinApp" starts with "Weixin")
+                // 3. Known aliases (weixin <-> wechat)
+                let is_related = (!proc_name_lower.is_empty() && !parent_name_lower.is_empty()) && (
+                    proc_name_lower == parent_name_lower
+                    || proc_name_lower.starts_with(&parent_name_lower)
+                    || parent_name_lower.starts_with(&proc_name_lower)
+                    || (parent_name_lower.contains("weixin") && proc_name_lower.contains("wechat"))
+                    || (parent_name_lower.contains("wechat") && proc_name_lower.contains("weixin"))
+                );
+                
+                if is_related {
+                    related_pids.insert(win_info.process_id);
+                    log::info!("[Child Process Search] Found related process: PID={}, Name='{}', Title='{}'", 
+                        win_info.process_id, win_info.process_name, win_info.title);
+                }
+            }
+        }
+        
+        // For matched PIDs, find UIA elements via desktop search
+        if !related_pids.is_empty() {
+            use windows::Win32::UI::Accessibility::TreeScope_Children;
+            let desktop = unsafe { auto.GetRootElement() }?;
+            let true_cond = unsafe { auto.CreateTrueCondition() }?;
+            let all_windows = unsafe {
+                desktop.FindAll(TreeScope_Children, &true_cond)
+            }?;
+            
+            let count = unsafe { all_windows.Length() }?;
+            for i in 0..count {
+                if let Ok(elem) = unsafe { all_windows.GetElement(i as i32) } {
+                    if let Ok(elem_pid) = unsafe { elem.CurrentProcessId() } {
+                        if related_pids.contains(&(elem_pid as u32)) {
+                            let class_name = get_bstr(unsafe { elem.CurrentClassName() });
+                            let hwnd = unsafe { elem.CurrentNativeWindowHandle() }.ok();
+                            let is_visible = hwnd.map(|h| check_window_visibility(h).unwrap_or(false)).unwrap_or(false);
+                            if is_visible {
+                                log::info!("[Child Process Search] Adding UIA window: PID={}, Class='{}'", 
+                                    elem_pid, class_name);
+                                candidate_windows.push(elem);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        log::info!("[Child Process Search] Found {} candidate windows from related processes", candidate_windows.len());
+        Ok(candidate_windows)
+    }
+    
+    /// Helper function to check if a window is visible
+    fn check_window_visibility(hwnd: windows::Win32::Foundation::HWND) -> anyhow::Result<bool> {
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        Ok(unsafe { IsWindowVisible(hwnd).as_bool() })
     }
 
     /// Find elements by XPath with automatic fallback for intermediate layers.
@@ -1829,57 +1999,651 @@ pub mod windows_impl {
                 fallback_start.elapsed().as_millis());
             Ok((results, segments))
         } else {
-            // ── Absolute XPath (/...): try window root first ──
+            // ── Absolute XPath (/...): optimized multi-strategy approach ──
             
-            // Step 1: Try from window root (exact path)
+            // Strategy 1: Try from window root first (most common case, fastest)
+            log::info!("[XPath Fallback] /XPath — Strategy 1: window root (primary)");
             let (results, segments) = find_by_xpath_detailed(auto, window, xpath)?;
             if !results.is_empty() {
-                log::info!("[XPath Fallback] /XPath — Step 1: Found {} results from window root ({}ms)", 
+                log::info!("[XPath Fallback] ✓ Strategy 1: Found {} from window root ({}ms)", 
                     results.len(), fallback_start.elapsed().as_millis());
                 return Ok((results, segments));
             }
             
-            log::info!("[XPath Fallback] /XPath — window root returned 0, trying content root...");
-            
-            // Step 2: Try content root
+            // Strategy 2: Try content root if available (handles embedded WebView)
+            log::info!("[XPath Fallback] /XPath — Strategy 2: trying content root...");
             if let Some(content_root) = find_content_root(auto, window) {
-                // Step 2a: Try /XPath from content root (direct)
-                log::info!("[XPath Fallback] /XPath — Step 2a: content root (direct)");
+                // Try direct path from content root
                 if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath) {
                     if !r2.is_empty() {
-                        log::info!("[XPath Fallback] ✓ Step 2a: Found {} from content root ({}ms)", 
+                        log::info!("[XPath Fallback] ✓ Strategy 2a: Found {} from content root ({}ms)", 
                             r2.len(), fallback_start.elapsed().as_millis());
                         return Ok((r2, s2));
                     }
                 }
                 
-                // Step 2b: Try //XPath from content root (descendant within content)
-                let desc_xpath = format!("/{}", xpath);
-                log::info!("[XPath Fallback] /XPath — Step 2b: content root (descendant)");
+                // Try as descendant from content root
+                let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                log::info!("[XPath Fallback] /XPath — Strategy 2b: content root descendant");
                 if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, &desc_xpath) {
                     if !r3.is_empty() {
-                        log::info!("[XPath Fallback] ✓ Step 2b: Found {} from content root desc ({}ms)", 
+                        log::info!("[XPath Fallback] ✓ Strategy 2b: Found {} from content root desc ({}ms)", 
                             r3.len(), fallback_start.elapsed().as_millis());
                         return Ok((r3, s3));
                     }
                 }
             }
             
-            // Step 3: Last resort — //XPath from window root
-            let desc_xpath = format!("/{}", xpath);
-            log::info!("[XPath Fallback] /XPath — Step 3: window root descendant (last resort)");
-            if let Ok((r4, s4)) = find_by_xpath_detailed(auto, window, &desc_xpath) {
-                if !r4.is_empty() {
-                    log::info!("[XPath Fallback] ✓ Step 3: Found {} from window root desc ({}ms)", 
-                        r4.len(), fallback_start.elapsed().as_millis());
-                    return Ok((r4, s4));
+            // Strategy 2.5: Use FindAll(TreeScope_Descendants) on the window to search the RAW tree.
+            // This is critical for apps like WeChat where Chrome_Widget Pane exists in the raw tree
+            // but is filtered out by ControlViewWalker (used by uiauto-xpath's children() method).
+            // The capture uses RawViewWalker/FindAll(Subtree), so the XPath was generated against the raw tree,
+            // but validation uses ControlViewWalker which can't see these elements.
+            log::info!("[XPath Fallback] /XPath — Strategy 2.5: FindAll(Descendants) raw tree search");
+            {
+                let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                if let Ok((r25, s25)) = find_by_xpath_raw_descendants(auto, window, &desc_xpath) {
+                    if !r25.is_empty() {
+                        log::info!("[XPath Fallback] ✓ Strategy 2.5: Found {} via raw descendant search ({}ms)", 
+                            r25.len(), fallback_start.elapsed().as_millis());
+                        return Ok((r25, s25));
+                    }
                 }
             }
             
-            log::info!("[XPath Fallback] All /XPath fallbacks exhausted ({}ms)", 
+            // Strategy 2.7: Search child HWNDs via EnumChildWindows.
+            // Critical for apps like WeChat where Chrome_Widget Pane is under a child HWND
+            // that's not visible as a direct child in the UIA tree from the main window.
+            // The UIA tree can have an asymmetry: GetParentElement(child) → Window works,
+            // but GetFirstChildElement(Window) → child doesn't return it.
+            // EnumChildWindows bypasses this by enumerating Win32 child HWNDs directly.
+            log::info!("[XPath Fallback] /XPath — Strategy 2.7: child HWND search via EnumChildWindows");
+            if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
+                let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+                log::info!("[Strategy 2.7] Found {} child HWNDs under window", child_hwnds.len());
+                
+                let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                let xpath_parts: Vec<&str> = desc_xpath.split('/').filter(|s| !s.is_empty()).collect();
+                
+                for (idx, child_hwnd) in child_hwnds.iter().enumerate() {
+                    if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+                        let child_ct = unsafe { child_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                        let child_pid = unsafe { child_elem.CurrentProcessId().unwrap_or(0) };
+                        log::info!("[Strategy 2.7]   child_hwnd[{}]: hwnd=0x{:X} type='{}' class='{}' pid={}",
+                            idx, child_hwnd.0 as usize, child_ct, child_class, child_pid);
+                        
+                        // Try: if this child element itself matches the first step, search from it
+                        if !xpath_parts.is_empty() {
+                            let first_parsed = parse_xpath_step(xpath_parts[0]);
+                            if element_matches_parsed_step(&child_elem, &first_parsed) {
+                                log::info!("[Strategy 2.7]   ✓ child HWND matches first step!");
+                                // Build remaining XPath after the first step
+                                let remaining = if xpath_parts.len() > 1 {
+                                    format!("/{}", xpath_parts[1..].join("/"))
+                                } else {
+                                    String::new()
+                                };
+                                
+                                if remaining.is_empty() {
+                                    // First step is the only step — the child element IS the match
+                                    let duration_ms = fallback_start.elapsed().as_millis() as u64;
+                                    log::info!("[XPath Fallback] ✓ Strategy 2.7: Found element via child HWND ({}ms)", duration_ms);
+                                    return Ok((vec![child_elem], vec![SegmentValidationResult {
+                                        segment_index: 0,
+                                        segment_text: desc_xpath,
+                                        matched: true,
+                                        match_count: 1,
+                                        duration_ms,
+                                        predicate_failures: Vec::new(),
+                                    }]));
+                                }
+                                
+                                // Try uiauto-xpath from this element for the remaining path
+                                if let Ok((matches, segments)) = find_by_xpath_detailed(auto, &child_elem, &remaining) {
+                                    if !matches.is_empty() {
+                                        log::info!("[XPath Fallback] ✓ Strategy 2.7: Found {} from child HWND subtree ({}ms)",
+                                            matches.len(), fallback_start.elapsed().as_millis());
+                                        let mut all_segments = vec![SegmentValidationResult {
+                                            segment_index: 0,
+                                            segment_text: xpath_parts[0].to_string(),
+                                            matched: true,
+                                            match_count: 1,
+                                            duration_ms: 0,
+                                            predicate_failures: Vec::new(),
+                                        }];
+                                        for mut s in segments {
+                                            s.segment_index += 1;
+                                            all_segments.push(s);
+                                        }
+                                        return Ok((matches, all_segments));
+                                    }
+                                }
+                                
+                                // Also try raw tree walk from this child
+                                if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+                                    let remaining_parts = &xpath_parts[1..];
+                                    if let Ok(matches) = walk_raw_tree_steps(auto, &raw_walker, &child_elem, remaining_parts) {
+                                        if !matches.is_empty() {
+                                            log::info!("[XPath Fallback] ✓ Strategy 2.7: Found {} via child HWND raw walk ({}ms)",
+                                                matches.len(), fallback_start.elapsed().as_millis());
+                                            let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
+                                                SegmentValidationResult {
+                                                    segment_index: i,
+                                                    segment_text: step.to_string(),
+                                                    matched: i < xpath_parts.len() - 1 || !matches.is_empty(),
+                                                    match_count: if i == xpath_parts.len() - 1 { matches.len() } else { 0 },
+                                                    duration_ms: 0,
+                                                    predicate_failures: Vec::new(),
+                                                }
+                                            }).collect();
+                                            return Ok((matches, segments));
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Also try: search inside this child HWND's subtree for the first step
+                            if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+                                let first_parsed = parse_xpath_step(xpath_parts[0]);
+                                let mut sub_match = unsafe { raw_walker.GetFirstChildElement(&child_elem).ok() };
+                                while let Some(sub) = sub_match {
+                                    if element_matches_parsed_step(&sub, &first_parsed) {
+                                        log::info!("[Strategy 2.7]   ✓ Found first-step match inside child HWND!");
+                                        // Try remaining from this sub-match
+                                        let remaining_parts = &xpath_parts[1..];
+                                        if remaining_parts.is_empty() {
+                                            let duration_ms = fallback_start.elapsed().as_millis() as u64;
+                                            return Ok((vec![sub], vec![SegmentValidationResult {
+                                                segment_index: 0,
+                                                segment_text: desc_xpath,
+                                                matched: true,
+                                                match_count: 1,
+                                                duration_ms,
+                                                predicate_failures: Vec::new(),
+                                            }]));
+                                        }
+                                        // Try uiauto-xpath then raw walk
+                                        let remaining_xpath = format!("/{}", remaining_parts.join("/"));
+                                        if let Ok((m, _)) = find_by_xpath_detailed(auto, &sub, &remaining_xpath) {
+                                            if !m.is_empty() {
+                                                let match_count = m.len();
+                                                log::info!("[XPath Fallback] ✓ Strategy 2.7: Found {} inside child HWND via uiauto-xpath ({}ms)",
+                                                    match_count, fallback_start.elapsed().as_millis());
+                                                return Ok((m, vec![SegmentValidationResult {
+                                                    segment_index: 0,
+                                                    segment_text: desc_xpath,
+                                                    matched: true,
+                                                    match_count,
+                                                    duration_ms: fallback_start.elapsed().as_millis() as u64,
+                                                    predicate_failures: Vec::new(),
+                                                }]));
+                                            }
+                                        }
+                                        if let Ok(m) = walk_raw_tree_steps(auto, &raw_walker, &sub, remaining_parts) {
+                                            if !m.is_empty() {
+                                                let match_count = m.len();
+                                                log::info!("[XPath Fallback] ✓ Strategy 2.7: Found {} inside child HWND via raw walk ({}ms)",
+                                                    match_count, fallback_start.elapsed().as_millis());
+                                                return Ok((m, vec![SegmentValidationResult {
+                                                    segment_index: 0,
+                                                    segment_text: desc_xpath,
+                                                    matched: true,
+                                                    match_count,
+                                                    duration_ms: fallback_start.elapsed().as_millis() as u64,
+                                                    predicate_failures: Vec::new(),
+                                                }]));
+                                            }
+                                        }
+                                    }
+                                    sub_match = unsafe { raw_walker.GetNextSiblingElement(&sub).ok() };
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                log::info!("[Strategy 2.7] Could not get window HWND, skipping");
+            }
+            
+            // Strategy 3: Try sibling windows of the same process AND child processes (handles multi-process apps like WeChat)
+            log::info!("[XPath Fallback] /XPath — Strategy 3: searching sibling windows and child processes...");
+            if let Ok(siblings) = find_sibling_windows_same_process(auto, window) {
+                log::info!("[XPath Fallback] Found {} sibling windows, trying XPath on each", siblings.len());
+                for (idx, sibling) in siblings.iter().enumerate() {
+                    if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, xpath) {
+                        if !r.is_empty() {
+                            log::info!("[XPath Fallback] ✓ Strategy 3: Found {} from sibling window {} ({}ms)", 
+                                r.len(), idx + 1, fallback_start.elapsed().as_millis());
+                            return Ok((r, s));
+                        }
+                    }
+                }
+            }
+            
+            // Strategy 3b: Try to find child process windows (for apps like WeChat with separate WebView processes)
+            log::info!("[XPath Fallback] /XPath — Strategy 3b: searching child process windows...");
+            if let Ok(child_windows) = find_child_process_windows(auto, window) {
+                log::info!("[XPath Fallback] Found {} child process windows, trying XPath on each", child_windows.len());
+                
+                // Also try descendant search from child windows
+                let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                
+                for (idx, child_win) in child_windows.iter().enumerate() {
+                    // Get window info for debugging
+                    let child_pid = unsafe { child_win.CurrentProcessId().unwrap_or(0) };
+                    let child_name = get_bstr(unsafe { child_win.CurrentName() });
+                    let child_class = get_bstr(unsafe { child_win.CurrentClassName() });
+                    log::info!("[Strategy 3b] Trying window {}: PID={}, Class='{}', Name='{}'", 
+                        idx + 1, child_pid, child_class, child_name);
+                    
+                    // Try to inspect the window's children structure
+                    if let Ok(walker) = unsafe { auto.ControlViewWalker() } {
+                        if let Some(first_child) = unsafe { walker.GetFirstChildElement(child_win).ok() } {
+                            let child_name_str = get_bstr(unsafe { first_child.CurrentName() });
+                            let child_class_inner = get_bstr(unsafe { first_child.CurrentClassName() });
+                            let child_fwid = get_bstr(unsafe { first_child.CurrentFrameworkId() });
+                            log::info!("  -> First child: class='{}', name='{}', frameworkId='{}'", 
+                                child_class_inner, child_name_str, child_fwid);
+                        } else {
+                            log::info!("  -> No children found (empty UIA tree)");
+                        }
+                    }
+                    
+                    // Try absolute path first
+                    if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, xpath) {
+                        if !r.is_empty() {
+                            log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (absolute path, {}ms)", 
+                                r.len(), idx + 1, fallback_start.elapsed().as_millis());
+                            return Ok((r, s));
+                        }
+                    }
+                    
+                    // Try descendant search as fallback
+                    if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, &desc_xpath) {
+                        if !r.is_empty() {
+                            log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (descendant path, {}ms)", 
+                                r.len(), idx + 1, fallback_start.elapsed().as_millis());
+                            return Ok((r, s));
+                        }
+                    }
+                }
+            }
+            
+            // Strategy 4: Last resort — Desktop root descendant search (for deeply nested content like WeChat WebView)
+            // This handles cases where content is embedded so deeply that window-level search fails
+            log::info!("[XPath Fallback] /XPath — Strategy 4: Desktop root descendant (last resort for deep nesting)");
+            let desktop_desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+            if let Ok(desktop) = unsafe { auto.GetRootElement() } {
+                // Use a timeout to prevent hanging on very large UI trees
+                let strategy4_start = std::time::Instant::now();
+                let timeout_ms = 2000; // 2 second timeout for Desktop search
+                
+                if let Ok((r4, s4)) = find_by_xpath_detailed(auto, &desktop, &desktop_desc_xpath) {
+                    let elapsed = strategy4_start.elapsed().as_millis();
+                    if !r4.is_empty() && elapsed < timeout_ms {
+                        log::info!("[XPath Fallback] ✓ Strategy 4: Found {} from Desktop root desc ({}ms)", 
+                            r4.len(), fallback_start.elapsed().as_millis());
+                        return Ok((r4, s4));
+                    } else if elapsed >= timeout_ms {
+                        log::warn!("[XPath Fallback] Strategy 4 timed out after {}ms, skipping result", elapsed);
+                    }
+                }
+            }
+            
+            log::info!("[XPath Fallback] All /XPath strategies exhausted ({}ms)", 
                 fallback_start.elapsed().as_millis());
             Ok((results, segments))
         }
+    }
+
+    /// Parsed representation of a single XPath step (e.g., "Pane[starts-with(@ClassName, 'Chrome_Widget') and @FrameworkId='Win32']")
+    struct ParsedXPathStep {
+        type_name: Option<String>,
+        required_props: Vec<(String, String)>,
+        require_starts_with: Vec<(String, String)>,
+    }
+
+    /// Parse an XPath step string into its components
+    fn parse_xpath_step(step: &str) -> ParsedXPathStep {
+        let (type_name, predicates_str): (Option<String>, &str) = if step.starts_with('[') {
+            (None, step)
+        } else if let Some(bracket_pos) = step.find('[') {
+            (Some(step[..bracket_pos].to_string()), &step[bracket_pos..])
+        } else {
+            (Some(step.to_string()), "")
+        };
+
+        let mut required_props: Vec<(String, String)> = Vec::new();
+        let mut require_starts_with: Vec<(String, String)> = Vec::new();
+
+        if let Ok(re) = regex::Regex::new(r#"@(\w+)='([^']*)'"#) {
+            for cap in re.captures_iter(predicates_str) {
+                if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
+                    required_props.push((key.as_str().to_string(), val.as_str().to_string()));
+                }
+            }
+        }
+        if let Ok(re) = regex::Regex::new(r#"starts-with\(@(\w+),\s*'([^']*)'\)"#) {
+            for cap in re.captures_iter(predicates_str) {
+                if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
+                    require_starts_with.push((key.as_str().to_string(), val.as_str().to_string()));
+                }
+            }
+        }
+
+        ParsedXPathStep { type_name, required_props, require_starts_with }
+    }
+
+    /// Check if an IUIAutomationElement matches a parsed XPath step
+    fn element_matches_parsed_step(elem: &IUIAutomationElement, step: &ParsedXPathStep) -> bool {
+        // Check control type
+        if let Some(ref type_name) = step.type_name {
+            let elem_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+            if elem_ct != *type_name {
+                return false;
+            }
+        }
+
+        // Check exact property matches
+        for (key, val) in &step.required_props {
+            let actual = match key.as_str() {
+                "Name" => get_bstr(unsafe { elem.CurrentName() }),
+                "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
+                "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                "FrameworkId" => get_bstr(unsafe { elem.CurrentFrameworkId() }),
+                _ => String::new(),
+            };
+            if actual != *val {
+                return false;
+            }
+        }
+
+        // Check starts-with predicates
+        for (key, prefix) in &step.require_starts_with {
+            let actual = match key.as_str() {
+                "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
+                "Name" => get_bstr(unsafe { elem.CurrentName() }),
+                "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
+                _ => String::new(),
+            };
+            if !actual.starts_with(prefix) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Walk the raw tree step-by-step to find elements matching the given XPath steps.
+    /// Each step in `steps` must be a direct child of the previous match.
+    fn walk_raw_tree_steps(
+        auto: &IUIAutomation,
+        raw_walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+        root: &IUIAutomationElement,
+        steps: &[&str],
+    ) -> anyhow::Result<Vec<IUIAutomationElement>> {
+        if steps.is_empty() {
+            return Ok(vec![root.clone()]);
+        }
+
+        let first_parsed = parse_xpath_step(steps[0]);
+
+        // Find children of root matching the first step
+        let mut current_matches: Vec<IUIAutomationElement> = Vec::new();
+        let mut child = unsafe { raw_walker.GetFirstChildElement(root).ok() };
+        while let Some(c) = child {
+            if element_matches_parsed_step(&c, &first_parsed) {
+                current_matches.push(c.clone());
+            }
+            child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+        }
+
+        if current_matches.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // If this is the last step, return the matches
+        if steps.len() == 1 {
+            return Ok(current_matches);
+        }
+
+        // Recurse for remaining steps
+        let remaining = &steps[1..];
+        let mut all_matches = Vec::new();
+        for candidate in &current_matches {
+            if let Ok(sub_matches) = walk_raw_tree_steps(auto, raw_walker, candidate, remaining) {
+                all_matches.extend(sub_matches);
+            }
+        }
+
+        Ok(all_matches)
+    }
+
+    /// Enumerate all child HWNDs of a given parent HWND using Win32 EnumChildWindows.
+    /// This bypasses the UIA tree structure, which may not list child HWND elements
+    /// as children of the parent window element.
+    fn enum_child_hwnds(parent: HWND) -> Vec<HWND> {
+        let hwnds: std::cell::RefCell<Vec<HWND>> = std::cell::RefCell::new(Vec::new());
+        
+        unsafe extern "system" fn enum_callback(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
+            let hwnds = &*(lparam.0 as *const std::cell::RefCell<Vec<HWND>>);
+            hwnds.borrow_mut().push(child);
+            windows::core::BOOL(1) // Continue enumeration
+        }
+        
+        let hwnds_ptr = &hwnds as *const _ as isize;
+        unsafe {
+            let _ = EnumChildWindows(
+                Some(parent),
+                Some(enum_callback),
+                LPARAM(hwnds_ptr),
+            );
+        }
+        
+        hwnds.into_inner()
+    }
+
+    /// Find elements using RawViewWalker to traverse the RAW UIA tree,
+    /// then step-by-step match the XPath path. This bypasses ControlViewWalker which
+    /// filters out WebView elements (e.g., Chrome_Widget Pane in WeChat).
+    ///
+    /// KEY INSIGHT: FindAll(TreeScope_Descendants) ALSO uses the control view filter,
+    /// so it can't see Chrome_Widget Pane either. Only RawViewWalker sees everything.
+    ///
+    /// Strategy:
+    /// 1. Use RawViewWalker to find the first element matching the first XPath step
+    /// 2. Try uiauto-xpath on the remaining XPath from that element
+    /// 3. If uiauto-xpath fails (ControlViewWalker can't navigate inside Chrome fragment),
+    ///    fall back to walking the raw tree for ALL remaining steps manually
+    fn find_by_xpath_raw_descendants(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        // Parse XPath steps (skip leading // or /)
+        let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+        if xpath_parts.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+
+        // Get the first step to match
+        let first_step = xpath_parts[0];
+
+        // Parse the first step into (control_type, predicates)
+        let first_step_parsed = parse_xpath_step(first_step);
+        log::info!("[Raw Desc] First step: type={:?}, exact={:?}, starts_with={:?}",
+            first_step_parsed.type_name, first_step_parsed.required_props, first_step_parsed.require_starts_with);
+
+        // Use RawViewWalker to find elements matching the first step
+        let raw_walker = match unsafe { auto.RawViewWalker() } {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("[Raw Desc] Failed to get RawViewWalker: {}", e);
+                return Ok((vec![], vec![]));
+            }
+        };
+
+        // ── Diagnostic: print raw tree children at depth 1 and 2 ──
+        {
+            let mut diag_count = 0u32;
+            let mut d1_child = unsafe { raw_walker.GetFirstChildElement(window).ok() };
+            while let Some(c) = d1_child {
+                let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                let cn = get_bstr(unsafe { c.CurrentClassName() });
+                let nm = get_bstr(unsafe { c.CurrentName() });
+                let fw = get_bstr(unsafe { c.CurrentFrameworkId() });
+                let pid = unsafe { c.CurrentProcessId().unwrap_or(0) };
+                log::info!("[Raw Desc]   raw_depth1[{}]: {} class='{}' name='{}' fw='{}' pid={}",
+                    diag_count, ct, cn, nm, fw, pid);
+                // Print depth-2 children of the first 3 depth-1 elements
+                if diag_count < 3 {
+                    let mut d2_idx = 0u32;
+                    let mut d2_child = unsafe { raw_walker.GetFirstChildElement(&c).ok() };
+                    while let Some(c2) = d2_child {
+                        if d2_idx < 5 {
+                            let ct2 = unsafe { c2.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                            let cn2 = get_bstr(unsafe { c2.CurrentClassName() });
+                            let fw2 = get_bstr(unsafe { c2.CurrentFrameworkId() });
+                            log::info!("[Raw Desc]     raw_depth2[{}]: {} class='{}' fw='{}'", d2_idx, ct2, cn2, fw2);
+                        }
+                        d2_idx += 1;
+                        d2_child = unsafe { raw_walker.GetNextSiblingElement(&c2).ok() };
+                    }
+                    if d2_idx > 5 {
+                        log::info!("[Raw Desc]     ... and {} more depth-2 children", d2_idx - 5);
+                    }
+                }
+                diag_count += 1;
+                d1_child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            }
+            log::info!("[Raw Desc] Window has {} raw children at depth 1", diag_count);
+        }
+
+        // Collect raw tree children of the window, then search deeper if needed
+        let mut first_step_matches: Vec<IUIAutomationElement> = Vec::new();
+
+        // BFS: search for first-step matches in the raw tree (up to depth 3 to avoid slowness)
+        let mut queue: Vec<(IUIAutomationElement, u32)> = vec![(window.clone(), 0)];
+        let max_depth = 3u32;
+
+        while let Some((elem, depth)) = queue.pop() {
+            let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
+            while let Some(c) = child {
+                // Check if this child matches the first step
+                if element_matches_parsed_step(&c, &first_step_parsed) {
+                    first_step_matches.push(c.clone());
+                }
+                // Add to queue for deeper search if within depth limit
+                if depth + 1 < max_depth {
+                    queue.push((c.clone(), depth + 1));
+                }
+                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            }
+        }
+
+        log::info!("[Raw Desc] Found {} elements matching first step via RawViewWalker ({}ms)",
+            first_step_matches.len(), start.elapsed().as_millis());
+
+        if first_step_matches.is_empty() {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return Ok((vec![], vec![SegmentValidationResult {
+                segment_index: 0,
+                segment_text: first_step.to_string(),
+                matched: false,
+                match_count: 0,
+                duration_ms,
+                predicate_failures: vec![super::PredicateFailure {
+                    attr_name: "RawTree".to_string(),
+                    expected_value: first_step.to_string(),
+                    actual_value: None,
+                    reason: "No raw tree element matches this step".to_string(),
+                }],
+            }]));
+        }
+
+        // Build remaining XPath (steps after the first)
+        let remaining_parts = &xpath_parts[1..];
+        let remaining_xpath = if remaining_parts.is_empty() {
+            String::new()
+        } else {
+            format!("/{}", remaining_parts.join("/"))
+        };
+
+        // If no remaining steps, the first-step matches ARE the result
+        if remaining_parts.is_empty() {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let match_count = first_step_matches.len();
+            log::info!("[Raw Desc] First step is the last step, returning {} matches ({}ms)",
+                match_count, duration_ms);
+            return Ok((first_step_matches, vec![SegmentValidationResult {
+                segment_index: 0,
+                segment_text: xpath.to_string(),
+                matched: true,
+                match_count,
+                duration_ms,
+                predicate_failures: Vec::new(),
+            }]));
+        }
+
+        // Strategy A: Try uiauto-xpath from each first-step match for the remaining XPath
+        // This works if ControlViewWalker CAN navigate inside the Chrome fragment
+        // (e.g., Document is visible in the control view even though Pane is not)
+        for candidate in &first_step_matches {
+            if let Ok((matches, segments)) = find_by_xpath_detailed(auto, candidate, &remaining_xpath) {
+                if !matches.is_empty() {
+                    log::info!("[Raw Desc] ✓ uiauto-xpath found {} from raw candidate ({}ms)",
+                        matches.len(), start.elapsed().as_millis());
+                    // Prepend a segment for the first step
+                    let mut all_segments = vec![SegmentValidationResult {
+                        segment_index: 0,
+                        segment_text: first_step.to_string(),
+                        matched: true,
+                        match_count: 1,
+                        duration_ms: 0,
+                        predicate_failures: Vec::new(),
+                    }];
+                    for mut s in segments {
+                        s.segment_index += 1;
+                        all_segments.push(s);
+                    }
+                    return Ok((matches, all_segments));
+                }
+            }
+        }
+
+        log::info!("[Raw Desc] uiauto-xpath failed from raw candidates, falling back to full raw tree walk ({}ms)",
+            start.elapsed().as_millis());
+
+        // Strategy B: Walk the raw tree manually for ALL remaining steps
+        // This handles the case where ControlViewWalker can't navigate inside the Chrome fragment
+        let mut all_matches = Vec::new();
+        for candidate in &first_step_matches {
+            if let Ok(matches) = walk_raw_tree_steps(auto, &raw_walker, candidate, remaining_parts) {
+                if !matches.is_empty() {
+                    all_matches.extend(matches);
+                }
+            }
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        log::info!("[Raw Desc] Full raw walk found {} matches ({}ms)", all_matches.len(), duration_ms);
+
+        let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
+            SegmentValidationResult {
+                segment_index: i,
+                segment_text: step.to_string(),
+                matched: i < xpath_parts.len() - 1 || !all_matches.is_empty(),
+                match_count: if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 },
+                duration_ms: 0,
+                predicate_failures: Vec::new(),
+            }
+        }).collect();
+
+        Ok((all_matches, segments))
     }
 
     /// Find elements by XPath with detailed per-segment validation results.
