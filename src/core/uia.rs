@@ -1999,6 +1999,38 @@ pub mod windows_impl {
                 return Ok((results, segments));
             }
             
+            // Step 3: EnumChildWindows + raw tree walk.
+            // For apps like WeChat, the Chrome child HWND is not visible as a UIA
+            // descendant of the window, so //Document[…] searches from window root
+            // will miss it.  find_by_xpath_detailed (uiauto-xpath) also fails because
+            // it uses the control view tree.  We try both approaches:
+            //   3a. uiauto-xpath from each child HWND (works if control view can navigate)
+            //   3b. find_by_xpath_raw_descendants from each child HWND (raw tree BFS + walk)
+            if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
+                let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+                log::info!("[XPath Fallback] //XPath — Step 3: trying {} child HWNDs", child_hwnds.len());
+                for (idx, child_hwnd) in child_hwnds.iter().enumerate() {
+                    if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        // 3a: uiauto-xpath from child HWND
+                        if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath) {
+                            if !r.is_empty() {
+                                log::info!("[XPath Fallback] ✓ Step 3a: Found {} from child HWND[{}] via uiauto-xpath ({}ms)",
+                                    r.len(), idx, fallback_start.elapsed().as_millis());
+                                return Ok((r, s));
+                            }
+                        }
+                        // 3b: raw tree descendants from child HWND (critical for Chrome/WebView)
+                        if let Ok((r, s)) = find_by_xpath_raw_descendants(auto, &child_elem, xpath) {
+                            if !r.is_empty() {
+                                log::info!("[XPath Fallback] ✓ Step 3b: Found {} from child HWND[{}] via raw walk ({}ms)",
+                                    r.len(), idx, fallback_start.elapsed().as_millis());
+                                return Ok((r, s));
+                            }
+                        }
+                    }
+                }
+            }
+            
             log::info!("[XPath Fallback] All //XPath fallbacks exhausted ({}ms)", 
                 fallback_start.elapsed().as_millis());
             Ok((results, segments))
