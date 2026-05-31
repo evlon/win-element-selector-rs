@@ -464,6 +464,31 @@ pub mod windows_impl {
         // Chain is: [target, parent, grandparent, ..., root]
         chain.reverse(); // now: root → target
 
+        // Fallback: FindAll(Ancestors) uses the control view, which may return 0
+        // for elements inside WebView/Chrome (not visible in control view).
+        // Fall back to RawViewWalker to capture all intermediate layers, same as
+        // enhanced capture does.
+        if ancestor_count == 0 {
+            debug!("[Normal] FindAll(Ancestors) returned 0, falling back to RawViewWalker");
+            chain.clear();
+            let walker = unsafe { auto.RawViewWalker()? };
+            let desktop = unsafe { auto.GetRootElement()? };
+
+            let mut elements: Vec<IUIAutomationElement> = vec![target.clone()];
+            let mut current = unsafe { walker.GetParentElement(&target).ok() };
+            while let Some(elem) = current {
+                let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+                elements.push(elem.clone());
+                if is_desktop {
+                    break;
+                }
+                current = unsafe { walker.GetParentElement(&elem).ok() };
+            }
+            elements.reverse();
+            chain = elements;
+            debug!("[Normal] walker chain length = {}", chain.len());
+        }
+
         // 3. Build hierarchy (root → target order)
         let window_index = 1;
 
