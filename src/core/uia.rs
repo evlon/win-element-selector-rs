@@ -880,8 +880,9 @@ pub mod windows_impl {
             // Debug-only: print window's direct children tree for diagnostics
             #[cfg(debug_assertions)]
             if win_idx == 0 {
-                log::info!("[XPath Validation] Window's direct children:");
-                let walker = unsafe { auto.ControlViewWalker().ok() };
+                log::info!("[XPath Validation] Window's direct children (RawViewWalker):");
+                let walker = unsafe { auto.RawViewWalker().ok() }
+                    .or_else(|| unsafe { auto.ControlViewWalker().ok() });
                 if let Some(walker) = walker {
                     let mut child = unsafe { walker.GetFirstChildElement(search_root).ok() };
                     let mut idx = 0;
@@ -1815,7 +1816,8 @@ pub mod windows_impl {
     /// 1. Well-known WebView container class names (WRY_WEBVIEW, Chrome_WidgetWin_*, etc.)
     /// 2. Deep framework transition search (Win32 → Chrome at any depth)
     fn find_content_root(auto: &IUIAutomation, window: &IUIAutomationElement) -> Option<IUIAutomationElement> {
-        let walker = unsafe { auto.ControlViewWalker().ok() }?;
+        let walker = unsafe { auto.RawViewWalker().ok() }
+            .or_else(|| unsafe { auto.ControlViewWalker().ok() })?;
         let window_fwid = get_bstr(unsafe { window.CurrentFrameworkId() });
         
         log::info!("[Content Root] Window FrameworkId='{}', scanning children...", window_fwid);
@@ -2186,6 +2188,58 @@ pub mod windows_impl {
                 log::info!("[XPath Fallback] ✓ Strategy 1: Found {} from window root ({}ms)", 
                     results.len(), fallback_start.elapsed().as_millis());
                 return Ok((results, segments));
+            }
+            
+            // Strategy 1.5: RawViewWalker BFS from window root.
+            // ControlViewWalker (used by uiauto-xpath) cannot see elements filtered from
+            // the control view, such as Chrome_Widget Pane in WeChat. Use RawViewWalker
+            // to walk the raw tree, find elements matching the first XPath step, then
+            // try the remaining path from each match.
+            {
+                let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                if !xpath_parts.is_empty() {
+                    log::info!("[XPath Fallback] /XPath — Strategy 1.5: RawViewWalker BFS from window root");
+                    if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+                        let first_parsed = parse_xpath_step(xpath_parts[0]);
+                        let first_step_end = find_first_step_end(xpath);
+                        let remaining_after_first = &xpath[first_step_end..];
+                        
+                        // BFS from window root using RawViewWalker, max depth 8
+                        let mut queue: Vec<(IUIAutomationElement, u32)> = vec![(window.clone(), 0)];
+                        let mut visited: HashSet<Vec<i32>> = HashSet::new();
+                        if let Some(rid) = runtime_id_key(window) { visited.insert(rid); }
+                        
+                        while let Some((elem, depth)) = queue.pop() {
+                            if depth > 8 { continue; }
+                            
+                            // Check this element's children
+                            let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
+                            while let Some(c) = child {
+                                if let Some(rid) = runtime_id_key(&c) {
+                                    if !visited.insert(rid) {
+                                        child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                                        continue;
+                                    }
+                                }
+                                
+                                if element_matches_parsed_step(&c, &first_parsed) {
+                                    log::info!("[XPath Fallback] Strategy 1.5: found first-step match at depth {}", depth + 1);
+                                    if let Some(result) = try_remaining_from_match(
+                                        auto, &c, remaining_after_first, &xpath_parts,
+                                        &fallback_start, "1.5",
+                                    ) {
+                                        return Ok(result);
+                                    }
+                                }
+                                
+                                // Also enqueue for deeper BFS
+                                queue.push((c.clone(), depth + 1));
+                                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                            }
+                        }
+                        log::info!("[XPath Fallback] Strategy 1.5: no match found via RawViewWalker BFS");
+                    }
+                }
             }
             
             // Strategy 2: Try content root if available (handles embedded WebView)
