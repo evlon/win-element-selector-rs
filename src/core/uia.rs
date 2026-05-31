@@ -1067,18 +1067,156 @@ pub mod windows_impl {
         let true_cond = unsafe { auto.CreateTrueCondition()? };
 
         // Step 1: ElementFromPoint to get the top-level element at cursor
-        let hit_elem = unsafe {
+        let mut hit_elem = unsafe {
             auto.ElementFromPoint(pt)
                 .map_err(|e| anyhow::anyhow!("ElementFromPoint: {}", e))?
         };
-        let hit_name = get_bstr(unsafe { hit_elem.CurrentName() });
-        let hit_ct = unsafe { hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
-        debug!("[Enhanced] ElementFromPoint: type='{}' name='{}'", hit_ct, hit_name);
+        let mut hit_name = get_bstr(unsafe { hit_elem.CurrentName() });
+        let mut hit_ct = unsafe { hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        let mut hit_fwid = get_bstr(unsafe { hit_elem.CurrentFrameworkId() });
+        debug!("[Enhanced] ElementFromPoint: type='{}' name='{}' fwid='{}'", hit_ct, hit_name, hit_fwid);
+
+        let my_pid = std::process::id();
+
+        // Step 1.1: If ElementFromPoint hit our own process (highlight/overlay window),
+        // try to find the real target element beneath it by walking the Desktop children
+        // and finding the deepest non-self element whose BoundingRectangle contains the point.
+        if let Ok(pid) = unsafe { hit_elem.CurrentProcessId() } {
+            if pid as u32 == my_pid {
+                info!("[Enhanced] ElementFromPoint hit own process (type='{}' name='{}'), searching for real target",
+                    hit_ct, hit_name);
+                let desktop = unsafe { auto.GetRootElement()? };
+                let walker = match unsafe { auto.RawViewWalker().ok() }
+                    .or_else(|| unsafe { auto.ControlViewWalker().ok() }) {
+                    Some(w) => w,
+                    None => { info!("[Enhanced] No walker available, skipping self-process fix"); return Ok(CaptureResult { hierarchy: vec![], cursor_x: x, cursor_y: y, error: Some("无法获取 TreeWalker".into()), window_info: None }); }
+                };
+                // Enumerate Desktop children to find the topmost non-self window containing the point
+                let mut child = unsafe { walker.GetFirstChildElement(&desktop).ok() };
+                while let Some(c) = child {
+                    if let Ok(c_pid) = unsafe { c.CurrentProcessId() } {
+                        if c_pid as u32 == my_pid {
+                            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                            continue;
+                        }
+                    }
+                    if let Ok(c_rect) = unsafe { c.CurrentBoundingRectangle() } {
+                        let cw = c_rect.right - c_rect.left;
+                        let ch = c_rect.bottom - c_rect.top;
+                        if cw > 0 && ch > 0 && point_in_rect(x, y, &c_rect) {
+                            // Found a non-self window containing the point; use it
+                            // Try to get a deeper element at the same point via FindAll
+                            let c_name = get_bstr(unsafe { c.CurrentName() });
+                            let c_ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                            let c_fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+                            info!("[Enhanced] Found real target window: type='{}' name='{}' fwid='{}'",
+                                c_ct, c_name, c_fwid);
+                            hit_elem = c;
+                            hit_name = c_name;
+                            hit_ct = c_ct;
+                            hit_fwid = c_fwid;
+                            break;
+                        }
+                    }
+                    child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                }
+            }
+        }
+
+
+        // Save the original hit element for fallback (normal capture chain).
+        // Must be after Step 1.1 so we save the corrected element (not our own overlay).
+        let original_hit_elem = hit_elem.clone();
+
+        // Save pre-Step-1.5 element for FindAll retry.
+        // Step 1.5 may replace hit_elem with a cross-HWND element whose BoundingRectangle
+        // covers the cursor but whose subtree has no matching elements at that point
+        // (e.g., WeChat's Chrome HWND covers the entire window but cursor is in Qt area).
+        // In that case, we retry FindAll with the pre-Step-1.5 element.
+        let pre_cross_hwnd_elem = hit_elem.clone();
+        let pre_cross_hwnd_ct = hit_ct.clone();
+        let pre_cross_hwnd_name = hit_name.clone();
+
+        // Step 1.5: Cross-HWND probe
+        // In apps like WeChat, ElementFromPoint returns a Qt element, but the real
+        // target is inside a Chrome/WebView child HWND. The Chrome element is NOT a
+        // UIA descendant of the Qt element, so FindAll(Subtree) and RawViewWalker
+        // drill-down cannot reach it. We enumerate child HWNDs of the window,
+        // find ones from a different framework that contain the cursor point, and
+        // use their root element as the starting point instead.
+        let original_hit_fwid = hit_fwid.clone();
+
+        // Find the window HWND by walking up from hit_elem
+        let window_hwnd = (|| -> Option<HWND> {
+            // Try the hit element itself first
+            if let Ok(h) = unsafe { hit_elem.CurrentNativeWindowHandle() } {
+                return Some(HWND(h.0));
+            }
+            // Walk up ancestors to find one with a window handle
+            let walker = unsafe { auto.RawViewWalker().ok() }
+                .or_else(|| unsafe { auto.ControlViewWalker().ok() })?;
+            let mut cur = unsafe { walker.GetParentElement(&hit_elem).ok() };
+            while let Some(ancestor) = cur {
+                if let Ok(h) = unsafe { ancestor.CurrentNativeWindowHandle() } {
+                    return Some(HWND(h.0));
+                }
+                cur = unsafe { walker.GetParentElement(&ancestor).ok() };
+            }
+            None
+        })();
+
+        if let Some(hwnd) = window_hwnd {
+            let child_hwnds = enum_child_hwnds(hwnd);
+            if !child_hwnds.is_empty() {
+                debug!("[Enhanced] Found {} child HWNDs, probing for cross-framework element", child_hwnds.len());
+                for child_hwnd in &child_hwnds {
+                    if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        let c_fwid = get_bstr(unsafe { child_elem.CurrentFrameworkId() });
+                        let c_ct_local = unsafe { child_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                        // Skip same-framework children (Qt → Qt is not a cross-framework transition)
+                        if c_fwid == original_hit_fwid { continue; }
+                        // Check if this child element contains the cursor point
+                        if let Ok(rect) = unsafe { child_elem.CurrentBoundingRectangle() } {
+                            let w = rect.right - rect.left;
+                            let h = rect.bottom - rect.top;
+                            if w > 0 && h > 0 && point_in_rect(x, y, &rect) {
+                                let c_name = get_bstr(unsafe { child_elem.CurrentName() });
+                                debug!("[Enhanced] Cross-HWND: child type='{}' name='{}' fwid='{}' contains point — using as hit element",
+                                    c_ct_local, c_name, c_fwid);
+                                hit_elem = child_elem;
+                                hit_ct = c_ct_local;
+                                hit_name = c_name;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            debug!("[Enhanced] Step 1.5: no window handle found, skipping cross-HWND probe");
+        }
 
         // Step 2: FindAll(TreeScope_Subtree) on the hit element to get ALL descendants
-        let all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
-        let element_count = unsafe { all_elements.Length()? };
+        // If Step 1.5 replaced hit_elem with a cross-HWND element, we also try FindAll
+        // on the original element as a fallback (the cross-HWND element's subtree may
+        // not contain elements at the cursor point even though its BoundingRectangle does).
+        let mut all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
+        let mut element_count = unsafe { all_elements.Length()? };
         debug!("[Enhanced] FindAll(Subtree) returned {} elements", element_count);
+
+        // Step 2.5: Quick retry if FindAll returned 0 elements and Step 1.5 changed hit_elem.
+        // The more thorough retry (with point-in-rect filtering) happens in Step 3.1.
+        let cross_hwnd_changed = !unsafe { auto.CompareElements(&hit_elem, &pre_cross_hwnd_elem)
+            .unwrap_or(windows::core::BOOL(0)).as_bool() };
+        if element_count == 0 && cross_hwnd_changed {
+            debug!("[Enhanced] FindAll on cross-HWND element returned 0, retrying with pre-Step-1.5 element");
+            hit_elem = pre_cross_hwnd_elem.clone();
+            hit_ct = pre_cross_hwnd_ct.clone();
+            hit_name = pre_cross_hwnd_name.clone();
+            all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
+            element_count = unsafe { all_elements.Length()? };
+            debug!("[Enhanced] FindAll(Subtree) retry returned {} elements", element_count);
+        }
 
         // Step 3: Iterate, filter by point-in-rect + offscreen + RuntimeId dedup, pick innermost
         let mut best_elem: Option<IUIAutomationElement> = None;
@@ -1098,6 +1236,11 @@ pub mod windows_impl {
             let Some(rid) = runtime_id_key(&elem) else { continue };
             let rid_len = rid.len();
             if !seen_ids.insert(rid) { continue; }
+
+            // Skip elements from our own process (highlight/overlay windows)
+            if let Ok(pid) = unsafe { elem.CurrentProcessId() } {
+                if pid as u32 == my_pid { continue; }
+            }
 
             // IsOffscreen filter
             if let Ok(is_offscreen) = unsafe { elem.CurrentIsOffscreen() } {
@@ -1137,31 +1280,156 @@ pub mod windows_impl {
         debug!("[Enhanced] filtered — point_match={}, offscreen_skip={}",
             point_match_count, offscreen_skip_count);
 
-        let mut target_elem = best_elem
-            .ok_or_else(|| anyhow::anyhow!("没有找到包含光标位置的元素"))?;
-        debug!("[Enhanced] SELECTED: type='{}' name='{}' area={} rid_len={}", best_ct, best_name, best_area, best_rid_len);
-        debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
-            hit_ct, hit_name, best_ct, best_name);
+        // Step 3.1: If FindAll found no matching element AND Step 1.5 changed hit_elem,
+        // retry FindAll with the pre-Step-1.5 element. This handles the case where
+        // WeChat's Chrome HWND covers the entire window (including the Qt sidebar area)
+        // but Chrome elements at the cursor position don't match — the cursor is actually
+        // in the Qt area and the Qt element's subtree has the right elements.
+        if best_elem.is_none() && cross_hwnd_changed {
+            info!("[Enhanced] FindAll on cross-HWND element found no point matches, retrying with pre-Step-1.5 element");
+            hit_elem = pre_cross_hwnd_elem.clone();
+            hit_ct = pre_cross_hwnd_ct.clone();
+            hit_name = pre_cross_hwnd_name.clone();
+            all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
+            element_count = unsafe { all_elements.Length()? };
+            debug!("[Enhanced] FindAll(Subtree) retry on pre-Step-1.5 element returned {} elements", element_count);
+            // Re-run Step 3 filtering
+            seen_ids.clear();
+            point_match_count = 0;
+            offscreen_skip_count = 0;
+            for i in 0..element_count {
+                let elem = unsafe { all_elements.GetElement(i)? };
+                let Some(rid) = runtime_id_key(&elem) else { continue };
+                let rid_len = rid.len();
+                if !seen_ids.insert(rid) { continue };
+                if let Ok(pid) = unsafe { elem.CurrentProcessId() } {
+                    if pid as u32 == my_pid { continue; }
+                }
+                if let Ok(is_offscreen) = unsafe { elem.CurrentIsOffscreen() } {
+                    if is_offscreen.0 != 0 { offscreen_skip_count += 1; continue; }
+                }
+                let rect = match unsafe { elem.CurrentBoundingRectangle() } {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if w <= 0 || h <= 0 || !point_in_rect(x, y, &rect) { continue; }
+                point_match_count += 1;
+                let area = w as i64 * h as i64;
+                let e_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                let e_name = get_bstr(unsafe { elem.CurrentName() });
+                let dominated = rid_len > best_rid_len
+                    || (rid_len == best_rid_len && area < best_area)
+                    || (rid_len == best_rid_len && area == best_area && i > best_index);
+                if dominated {
+                    best_area = area;
+                    best_ct = e_ct;
+                    best_name = e_name;
+                    best_elem = Some(elem);
+                    best_rid_len = rid_len;
+                    best_index = i;
+                }
+            }
+            debug!("[Enhanced] retry filtered — point_match={}, offscreen_skip={}",
+                point_match_count, offscreen_skip_count);
+        }
+
+        // If no matching element found after all retries, fall back to original_hit_elem
+        // (the ElementFromPoint result) — equivalent to normal capture, which is always reliable.
+        let mut target_elem = match best_elem {
+            Some(e) => {
+                debug!("[Enhanced] SELECTED: type='{}' name='{}' area={} rid_len={}", best_ct, best_name, best_area, best_rid_len);
+                debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
+                    hit_ct, hit_name, best_ct, best_name);
+                e
+            }
+            None => {
+                info!("[Enhanced] No matching elements from FindAll, falling back to ElementFromPoint result");
+                hit_elem = original_hit_elem.clone();
+                // Skip drill-down for fallback — build chain directly
+                let raw_walker_fallback = unsafe { auto.RawViewWalker() }
+                    .or_else(|_| unsafe { auto.ControlViewWalker() })
+                    .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?;
+                let desktop = unsafe { auto.GetRootElement()? };
+                let mut ch: Vec<IUIAutomationElement> = vec![hit_elem.clone()];
+                let mut cur = unsafe { raw_walker_fallback.GetParentElement(&hit_elem).ok() };
+                while let Some(elem) = cur {
+                    let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+                    ch.push(elem.clone());
+                    if is_desktop { break; }
+                    cur = unsafe { raw_walker_fallback.GetParentElement(&elem).ok() };
+                }
+                ch.reverse();
+                let window_index = 1;
+                let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(ch.len());
+                for (chain_idx, elem) in ch.iter().enumerate() {
+                    if let Some(mut node) = element_to_node(elem, &auto) {
+                        node.depth_from_window = chain_idx.saturating_sub(window_index);
+                        hierarchy.push(node);
+                    }
+                }
+                if let Some(last) = hierarchy.last_mut() {
+                    last.is_target = true;
+                    last.index = sibling_index(&hit_elem, &raw_walker_fallback).unwrap_or(0);
+                    if last.index > 0 {
+                        if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
+                            f.value = last.index.to_string(); f.enabled = true;
+                        }
+                        last.sibling_count = count_siblings(&hit_elem, &raw_walker_fallback).unwrap_or(0);
+                    }
+                }
+                let window_info = extract_window_info(&hierarchy);
+                info!("[Enhanced] Fallback hierarchy depth={}", hierarchy.len());
+                return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info });
+            }
+        };
 
         // Step 3.5: Raw View drill-down
         // FindAll(Subtree) uses Control View, which filters Qt intermediate elements.
         // The "best" element from FindAll may be a shallow Group that has deeper
         // Raw View children containing the point. Walk the Raw View tree downward
         // from the selected element to find the truly innermost element.
+        //
+        // IMPORTANT: We must continue drilling down even when child area == parent area,
+        // because Qt/Chrome intermediate containers (Group/Pane) often have the same
+        // bounding rectangle as their parent. Only stopping when no child contains
+        // the point ensures we reach the truly deepest element.
         let raw_walker = unsafe { auto.RawViewWalker() }
             .or_else(|_| unsafe { auto.ControlViewWalker() })?;
+        let mut drill_down_depth: u32 = 0;
+        let mut visited_rids: HashSet<Vec<i32>> = HashSet::new();
+        if let Some(rid) = runtime_id_key(&target_elem) { visited_rids.insert(rid); }
         loop {
+            // Safety: prevent infinite drill-down
+            if drill_down_depth > 30 { break; }
+
             let rect = match unsafe { target_elem.CurrentBoundingRectangle() } {
                 Ok(r) => r,
                 Err(_) => break,
             };
             let parent_area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
 
-            // Scan Raw View children for a smaller element containing the point
+            // Scan Raw View children for a smaller OR equal-area element containing the point.
+            // Equal-area children are common in Qt/Chrome where intermediate Group/Pane
+            // containers share the same bounding rectangle as their parent. We must continue
+            // through them to reach the truly deepest element.
+            // deeper_area starts as parent_area+1 so equal-area children also qualify.
             let mut deeper: Option<IUIAutomationElement> = None;
-            let mut deeper_area = parent_area;
+            let mut deeper_area = parent_area + 1;
+            let mut deeper_rid_len: usize = 0;
+            let mut child_count = 0u32;
+            let mut point_match_count = 0u32;
             let mut child = unsafe { raw_walker.GetFirstChildElement(&target_elem).ok() };
             while let Some(c) = child {
+                child_count += 1;
+                // Skip elements from our own process (highlight/overlay windows)
+                if let Ok(pid) = unsafe { c.CurrentProcessId() } {
+                    if pid as u32 == my_pid {
+                        child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                        continue;
+                    }
+                }
                 if let Ok(c_rect) = unsafe { c.CurrentBoundingRectangle() } {
                     let cw = c_rect.right - c_rect.left;
                     let ch = c_rect.bottom - c_rect.top;
@@ -1173,23 +1441,45 @@ pub mod windows_impl {
                                 continue;
                             }
                         }
+                        // Skip already-visited elements (cycle detection)
+                        if let Some(rid) = runtime_id_key(&c) {
+                            if visited_rids.contains(&rid) {
+                                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                                continue;
+                            }
+                        }
+                        point_match_count += 1;
                         let c_area = cw as i64 * ch as i64;
-                        if c_area < deeper_area {
+                        let c_rid_len = runtime_id_key(&c).map(|r| r.len()).unwrap_or(0);
+                        // Prefer: smaller area first, then longer RuntimeId (deeper element)
+                        let dominated = c_area < deeper_area
+                            || (c_area == deeper_area && c_rid_len > deeper_rid_len);
+                        if dominated {
                             deeper = Some(c.clone());
                             deeper_area = c_area;
+                            deeper_rid_len = c_rid_len;
                         }
                     }
                 }
                 child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
             }
 
+            if drill_down_depth == 0 || point_match_count > 0 {
+                let t_ct = unsafe { target_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                let t_name = get_bstr(unsafe { target_elem.CurrentName() });
+                debug!("[Enhanced] drill-down[{}]: type='{}' name='{}' area={} children={} point_matches={}",
+                    drill_down_depth, t_ct, t_name, parent_area, child_count, point_match_count);
+            }
+
             match deeper {
                 Some(d) => {
+                    if let Some(rid) = runtime_id_key(&d) { visited_rids.insert(rid); }
                     let d_ct = unsafe { d.CurrentControlType().map(control_type_name).unwrap_or_default() };
                     let d_name = get_bstr(unsafe { d.CurrentName() });
-                    debug!("[Enhanced] drill-down: type='{}' name='{}' area={}",
-                        d_ct, d_name, deeper_area);
+                    debug!("[Enhanced] drill-down[{}] → type='{}' name='{}' area={}",
+                        drill_down_depth, d_ct, d_name, deeper_area);
                     target_elem = d;
+                    drill_down_depth += 1;
                 }
                 None => break,
             }
@@ -1201,18 +1491,44 @@ pub mod windows_impl {
         // This ensures the ancestor chain is complete and matches the XPath search side.
         let desktop = unsafe { auto.GetRootElement()? };
 
-        let mut chain: Vec<IUIAutomationElement> = vec![target_elem.clone()];
-        let mut current = unsafe { raw_walker.GetParentElement(&target_elem).ok() };
-        while let Some(elem) = current {
-            let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
-            chain.push(elem.clone());
-            if is_desktop {
-                break;
+        let build_chain = |target: &IUIAutomationElement| -> Vec<IUIAutomationElement> {
+            let mut ch: Vec<IUIAutomationElement> = vec![target.clone()];
+            let mut cur = unsafe { raw_walker.GetParentElement(target).ok() };
+            while let Some(elem) = cur {
+                let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+                ch.push(elem.clone());
+                if is_desktop {
+                    break;
+                }
+                cur = unsafe { raw_walker.GetParentElement(&elem).ok() };
             }
-                current = unsafe { raw_walker.GetParentElement(&elem).ok() };
-            }
-            chain.reverse();
+            ch.reverse();
+            ch
+        };
+
+        let mut chain = build_chain(&target_elem);
         debug!("[Enhanced] RawViewWalker chain length = {}", chain.len());
+
+        // Step 4.5: Log chain info for diagnostics.
+        // Previous PID-based validation was too strict and caused false fallbacks.
+        // The PID filtering in FindAll (Step 3) and drill-down (Step 3.5) already
+        // prevents selecting elements from our own process. If the chain is
+        // suspiciously short (< 3 = Desktop + Window + target), fall back.
+        if chain.len() < 3 {
+            info!("[Enhanced] Chain too short (len={}), falling back to normal capture chain", chain.len());
+            chain = build_chain(&original_hit_elem);
+            target_elem = original_hit_elem.clone();
+            info!("[Enhanced] Fallback chain length = {}", chain.len());
+        } else {
+            // Log chain[1] (the window element) for diagnostics
+            if let Some(win_elem) = chain.get(1) {
+                let win_ct = unsafe { win_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                let win_name = get_bstr(unsafe { win_elem.CurrentName() });
+                let win_pid = unsafe { win_elem.CurrentProcessId().unwrap_or(0) };
+                info!("[Enhanced] Chain OK (len={}): window type='{}' name='{}' pid={}",
+                    chain.len(), win_ct, win_name, win_pid);
+            }
+        }
 
         // Step 5: Build hierarchy (same structure as normal capture)
         let window_index = 1;
@@ -1238,10 +1554,14 @@ pub mod windows_impl {
         }
 
         let window_info = extract_window_info(&hierarchy);
-        info!("[Enhanced] hierarchy depth={} target='{}' vs normal type='{}' name='{}'",
-            hierarchy.len(),
-            hierarchy.last().map(|n| &n.control_type).unwrap_or(&String::new()),
-            hit_ct, hit_name);
+        let empty = String::new();
+        let empty2 = String::new();
+        let target_ct = hierarchy.last().map(|n| &n.control_type).unwrap_or(&empty);
+        let target_name = hierarchy.last().map(|n| &n.name).unwrap_or(&empty2);
+        let normal_ct = unsafe { original_hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        let normal_name = get_bstr(unsafe { original_hit_elem.CurrentName() });
+        info!("[Enhanced] hierarchy depth={} target='{}' name='{}' | ElementFromPoint type='{}' name='{}'",
+            hierarchy.len(), target_ct, target_name, normal_ct, normal_name);
 
         Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info })
     }
