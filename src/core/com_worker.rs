@@ -16,6 +16,22 @@ use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
 use crate::core::uia::InspectResult;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// COM Worker 超时常量
+// ═══════════════════════════════════════════════════════════════════════════════
+// 微信等应用的 Chrome 内嵌页面 UIA 树非常大，需要较长超时
+
+/// 快速操作：坐标查询、窗口存在检查（5s）
+const TIMEOUT_FAST: Duration = Duration::from_secs(5);
+/// 标准操作：元素查找、窗口激活、窗口列表、可视性查询（30s）
+const TIMEOUT_STANDARD: Duration = Duration::from_secs(30);
+/// 较慢操作：验证、公共元素查找、激活+聚焦（30s）
+const TIMEOUT_SLOW: Duration = Duration::from_secs(30);
+/// 大批量操作：增强捕获、相似元素搜索（60s）
+const TIMEOUT_BATCH: Duration = Duration::from_secs(60);
+/// Inspect 大子树遍历（120s）
+const TIMEOUT_INSPECT: Duration = Duration::from_secs(120);
+
 /// 计算两个 Rect 的交集，无交集返回 None
 fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> Option<crate::api::types::Rect> {
     let left = a.x.max(b.x);
@@ -796,8 +812,8 @@ impl ComWorker {
                 x, y, response: response_sender,
             })?;
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -811,9 +827,8 @@ impl ComWorker {
             sender.send(UiaRequest::CaptureEnhancedAt {
                 x, y, response: response_sender,
             })?;
-            // 增强捕获可能更耗时（全树枚举），给 30 秒超时
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(30))
+                .recv_timeout(TIMEOUT_BATCH)
                 .map_err(|e| anyhow::anyhow!("COM worker enhanced capture timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
@@ -837,10 +852,9 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            // 【关键修复】添加超时机制
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker find_element timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -863,10 +877,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            // 【关键修复】添加超时机制（校验可能更耗时，给 15 秒）
+            // 验证可能较耗时
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(15))
-                .map_err(|e| anyhow::anyhow!("COM worker validation timeout after 15s: {:?}", e))?
+                .recv_timeout(TIMEOUT_SLOW)
+                .map_err(|e| anyhow::anyhow!("COM worker validation timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -887,10 +901,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
             
-            // 【关键修复】添加超时机制（批量查找可能很耗时，给 30 秒）
+            // 批量查找可能很耗时
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .map_err(|e| anyhow::anyhow!("COM worker similar elements search timeout after 30s: {:?}", e))?
+                .recv_timeout(TIMEOUT_BATCH)
+                .map_err(|e| anyhow::anyhow!("COM worker similar elements search timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -912,8 +926,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(15))
-                .map_err(|e| anyhow::anyhow!("COM worker common elements search timeout after 15s: {:?}", e))?
+                .recv_timeout(TIMEOUT_SLOW)
+                .map_err(|e| anyhow::anyhow!("COM worker common elements search timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -930,8 +944,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker exists_window timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker exists_window timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -948,8 +962,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker activate_window timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker activate_window timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -967,8 +981,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(15))
-                .map_err(|e| anyhow::anyhow!("COM worker activate_and_focus_element timeout after 15s: {:?}", e))?
+                .recv_timeout(TIMEOUT_SLOW)
+                .map_err(|e| anyhow::anyhow!("COM worker activate_and_focus_element timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -984,8 +998,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker list_windows timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker list_windows timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -1009,8 +1023,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| anyhow::anyhow!("COM worker get_element_visibility timeout after 10s: {:?}", e))?
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker get_element_visibility timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -1030,8 +1044,8 @@ impl ComWorker {
             })?;
 
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .map_err(|e| anyhow::anyhow!("COM worker get_element_rect_at_point timeout after 5s: {:?}", e))?
+                .recv_timeout(TIMEOUT_FAST)
+                .map_err(|e| anyhow::anyhow!("COM worker get_element_rect_at_point timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
@@ -1058,10 +1072,10 @@ impl ComWorker {
                 response: response_sender,
             })?;
 
-            // Inspect 大子树可能很耗时，给 60 秒超时
+            // Inspect 大子树可能很耗时
             response_receiver
-                .recv_timeout(std::time::Duration::from_secs(60))
-                .map_err(|e| anyhow::anyhow!("COM worker inspect timeout after 60s: {:?}", e))?
+                .recv_timeout(TIMEOUT_INSPECT)
+                .map_err(|e| anyhow::anyhow!("COM worker inspect timeout: {:?}", e))?
         } else {
             Err(anyhow::anyhow!("COM worker not initialized"))
         }
