@@ -18,6 +18,7 @@ use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name,
 pub mod windows_impl {
     use super::*;
     use std::collections::HashSet;
+    use windows::core::Interface;
     use windows::{
         core::BSTR,
         Win32::{
@@ -718,8 +719,11 @@ pub mod windows_impl {
                 elem.GetCurrentPattern(UIA_TogglePatternId)
             } {
                 use windows::Win32::UI::Accessibility::IToggleProvider;
-                let toggle: IToggleProvider = unsafe {
-                    std::mem::transmute(pattern)
+                let toggle: IToggleProvider = {
+                    if let Err(e) = pattern.cast::<IToggleProvider>() {
+                        log::warn!("TogglePattern cast failed: {:?}", e);
+                    }
+                    pattern.cast().ok()?
                 };
                 if let Ok(state) = unsafe { toggle.ToggleState() } {
                     // ToggleState_Off = 0, ToggleState_On = 1, ToggleState_Indeterminate = 2
@@ -734,8 +738,11 @@ pub mod windows_impl {
                 elem.GetCurrentPattern(UIA_SelectionItemPatternId)
             } {
                 use windows::Win32::UI::Accessibility::ISelectionItemProvider;
-                let sel: ISelectionItemProvider = unsafe {
-                    std::mem::transmute(pattern)
+                let sel: ISelectionItemProvider = {
+                    if let Err(e) = pattern.cast::<ISelectionItemProvider>() {
+                        log::warn!("SelectionItemPattern cast failed: {:?}", e);
+                    }
+                    pattern.cast().ok()?
                 };
                 if let Ok(selected) = unsafe { sel.IsSelected() } {
                     node.is_selected = Some(selected.as_bool());
@@ -2763,10 +2770,10 @@ pub mod windows_impl {
         let mut first_step_matches: Vec<IUIAutomationElement> = Vec::new();
 
         // BFS: search for first-step matches in the raw tree (up to depth 3 to avoid slowness)
-        let mut queue: Vec<(IUIAutomationElement, u32)> = vec![(window.clone(), 0)];
+        let mut queue: std::collections::VecDeque<(IUIAutomationElement, u32)> = std::collections::VecDeque::from(vec![(window.clone(), 0)]);
         let max_depth = 3u32;
 
-        while let Some((elem, depth)) = queue.pop() {
+        while let Some((elem, depth)) = queue.pop_front() {
             let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
             while let Some(c) = child {
                 // Check if this child matches the first step
@@ -2775,7 +2782,7 @@ pub mod windows_impl {
                 }
                 // Add to queue for deeper search if within depth limit
                 if depth + 1 < max_depth {
-                    queue.push((c.clone(), depth + 1));
+                    queue.push_back((c.clone(), depth + 1));
                 }
                 child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
             }
@@ -3083,7 +3090,7 @@ pub mod windows_impl {
         }
 
         // 窗口 XPath 前缀，用于构造 findSelector
-        let window_prefix = window_selector.to_string();
+        let _window_prefix = window_selector.to_string();
 
         // Phase 1: Find base element (one XPath search)
         let mut base_elem: Option<IUIAutomationElement> = None;
@@ -3208,6 +3215,9 @@ pub mod windows_impl {
 
                 NavigateStep::SiblingRight { offset } => {
                     // following-sibling: go right by offset
+                    if *offset == 0 {
+                        log::warn!("[Compass] Step {}: sibling_right(0) is a no-op", i);
+                    }
                     for off in 1..=*offset {
                         match unsafe { walker.GetNextSiblingElement(&current) } {
                             Ok(next) => current = next,
@@ -3226,27 +3236,9 @@ pub mod windows_impl {
         let mut rng = rand::thread_rng();
         let info = element_info_from_uia(&current, window_rect.as_ref(), 5.0, &mut rng);
 
-        // 构造 findSelector: windowPrefix//ControlType[@Attr1='...' and @Attr2='...']
-        let find_selector = match &info {
-            Some(elem) => {
-                let mut preds: Vec<String> = Vec::new();
-                if !elem.automation_id.is_empty() {
-                    preds.push(format!("@AutomationId='{}'", elem.automation_id));
-                }
-                if !elem.name.is_empty() {
-                    preds.push(format!("@Name='{}'", elem.name.replace('\'', "&apos;")));
-                }
-                if !elem.class_name.is_empty() {
-                    preds.push(format!("@ClassName='{}'", elem.class_name.replace('\'', "&apos;")));
-                }
-                if !elem.framework_id.is_empty() {
-                    preds.push(format!("@FrameworkId='{}'", elem.framework_id));
-                }
-                let pred_str = if preds.is_empty() { String::new() } else { format!("[{}]", preds.join(" and ")) };
-                format!("{}//{}{}", window_prefix, elem.control_type, pred_str)
-            }
-            None => String::new(),
-        };
+        // findSelector 由 SDK 本地构造（buildCompassXpath 等），后端不再从属性构建，
+        // 因为属性构建的 XPath 无法定位 Chrome 内嵌元素等场景
+        let find_selector = String::new();
 
         Ok((info, find_selector))
     }
@@ -3951,6 +3943,9 @@ pub mod windows_impl {
                 while let Some(c) = child {
                     let last = c.clone();
                     kids.push(c);
+                    if kids.len() >= max_nodes {
+                        break;
+                    }
                     child = unsafe { walker.GetNextSiblingElement(&last).ok() };
                 }
                 kids
@@ -4025,7 +4020,7 @@ pub mod windows_impl {
         use windows::Win32::UI::Accessibility::{UIA_ValuePatternId, IValueProvider};
 
         let pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }.ok()?;
-        let value_provider: IValueProvider = unsafe { std::mem::transmute(pattern) };
+        let value_provider: IValueProvider = pattern.cast().ok()?;
         let value = unsafe { value_provider.Value() }.ok()?;
         let bstr: BSTR = value.into();
         let s = bstr.to_string();

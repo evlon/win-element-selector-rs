@@ -25,8 +25,8 @@ use crate::core::uia::InspectResult;
 const TIMEOUT_FAST: Duration = Duration::from_secs(5);
 /// 标准操作：元素查找、窗口激活、窗口列表、可视性查询（30s）
 const TIMEOUT_STANDARD: Duration = Duration::from_secs(30);
-/// 较慢操作：验证、公共元素查找、激活+聚焦（30s）
-const TIMEOUT_SLOW: Duration = Duration::from_secs(30);
+/// 较慢操作：验证、公共元素查找、激活+聚焦（60s）
+const TIMEOUT_SLOW: Duration = Duration::from_secs(60);
 /// 大批量操作：增强捕获、相似元素搜索（60s）
 const TIMEOUT_BATCH: Duration = Duration::from_secs(60);
 /// Inspect 大子树遍历（120s）
