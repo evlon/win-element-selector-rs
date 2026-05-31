@@ -1165,31 +1165,81 @@ pub mod windows_impl {
         debug!("[Enhanced] filtered — point_match={}, offscreen_skip={}",
             point_match_count, offscreen_skip_count);
 
-        let target_elem = best_elem
+        let mut target_elem = best_elem
             .ok_or_else(|| anyhow::anyhow!("没有找到包含光标位置的元素"))?;
         debug!("[Enhanced] SELECTED: type='{}' name='{}' area={} rid_len={}", best_ct, best_name, best_area, best_rid_len);
         debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
             hit_ct, hit_name, best_ct, best_name);
 
-        // Step 4: Build ancestor chain using RawViewWalker
+        // Step 3.5: Raw View drill-down
+        // FindAll(Subtree) uses Control View, which filters Qt intermediate elements.
+        // The "best" element from FindAll may be a shallow Group that has deeper
+        // Raw View children containing the point. Walk the Raw View tree downward
+        // from the selected element to find the truly innermost element.
+        let raw_walker = unsafe { auto.RawViewWalker() }
+            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
+        loop {
+            let rect = match unsafe { target_elem.CurrentBoundingRectangle() } {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            let parent_area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
+
+            // Scan Raw View children for a smaller element containing the point
+            let mut deeper: Option<IUIAutomationElement> = None;
+            let mut deeper_area = parent_area;
+            let mut child = unsafe { raw_walker.GetFirstChildElement(&target_elem).ok() };
+            while let Some(c) = child {
+                if let Ok(c_rect) = unsafe { c.CurrentBoundingRectangle() } {
+                    let cw = c_rect.right - c_rect.left;
+                    let ch = c_rect.bottom - c_rect.top;
+                    if cw > 0 && ch > 0 && point_in_rect(x, y, &c_rect) {
+                        // Skip offscreen elements
+                        if let Ok(offscreen) = unsafe { c.CurrentIsOffscreen() } {
+                            if offscreen.0 != 0 {
+                                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                                continue;
+                            }
+                        }
+                        let c_area = cw as i64 * ch as i64;
+                        if c_area < deeper_area {
+                            deeper = Some(c.clone());
+                            deeper_area = c_area;
+                        }
+                    }
+                }
+                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            }
+
+            match deeper {
+                Some(d) => {
+                    let d_ct = unsafe { d.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                    let d_name = get_bstr(unsafe { d.CurrentName() });
+                    debug!("[Enhanced] drill-down: type='{}' name='{}' area={}",
+                        d_ct, d_name, deeper_area);
+                    target_elem = d;
+                }
+                None => break,
+            }
+        }
+
+        // Step 4: Build ancestor chain using RawViewWalker (same walker from drill-down)
         // Always use RawViewWalker (not FindAll(Ancestors)) because FindAll uses
         // Control View which filters out intermediate elements (e.g. Qt Group nodes).
         // This ensures the ancestor chain is complete and matches the XPath search side.
-        let walker = unsafe { auto.RawViewWalker() }
-            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
         let desktop = unsafe { auto.GetRootElement()? };
 
         let mut chain: Vec<IUIAutomationElement> = vec![target_elem.clone()];
-        let mut current = unsafe { walker.GetParentElement(&target_elem).ok() };
+        let mut current = unsafe { raw_walker.GetParentElement(&target_elem).ok() };
         while let Some(elem) = current {
             let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
             chain.push(elem.clone());
             if is_desktop {
                 break;
             }
-            current = unsafe { walker.GetParentElement(&elem).ok() };
-        }
-        chain.reverse();
+                current = unsafe { raw_walker.GetParentElement(&elem).ok() };
+            }
+            chain.reverse();
         debug!("[Enhanced] RawViewWalker chain length = {}", chain.len());
 
         // Step 5: Build hierarchy (same structure as normal capture)
@@ -1204,16 +1254,14 @@ pub mod windows_impl {
             }
         }
 
-        let walker_raw = unsafe { auto.RawViewWalker() }
-            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
         if let Some(last) = hierarchy.last_mut() {
             last.is_target = true;
-            last.index = sibling_index(&target_elem, &walker_raw).unwrap_or(0);
+            last.index = sibling_index(&target_elem, &raw_walker).unwrap_or(0);
             if last.index > 0 {
                 if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
                     f.value = last.index.to_string(); f.enabled = true;
                 }
-                last.sibling_count = count_siblings(&target_elem, &walker_raw).unwrap_or(0);
+                last.sibling_count = count_siblings(&target_elem, &raw_walker).unwrap_or(0);
             }
         }
 
