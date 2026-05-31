@@ -2426,6 +2426,19 @@ pub mod windows_impl {
     /// 1. Try from content root first (fast — skips Win32 chrome/intermediate layers)
     /// 2. Fallback to window root if content root not found or yields no results
     /// 
+    /// Parse a positional predicate like `[1]` or `[3]` after a closing parenthesis.
+    /// Returns the position number (1-based) if the string matches `[N]` pattern.
+    /// E.g., "[1]" → Some(1), "[3]" → Some(3), "" → None, "[last()]" → None
+    fn parse_positional_predicate(s: &str) -> Option<usize> {
+        let s = s.trim();
+        if s.starts_with('[') && s.ends_with(']') && s.len() >= 3 {
+            let inner = &s[1..s.len()-1];
+            inner.parse::<usize>().ok()
+        } else {
+            None
+        }
+    }
+
     /// For /XPath (absolute path):
     /// 1. Try from window root first (most likely to match exact path)
     /// 2. Try from content root (direct path)
@@ -2439,7 +2452,50 @@ pub mod windows_impl {
         use std::time::Instant;
         let fallback_start = Instant::now();
         
+        // Handle parenthesized positional predicate: (xpath)[N]
+        // Strip the wrapper, search with the inner path, then select the Nth result.
+        // E.g., (/Pane[...]/Group[...])[1] → search /Pane[...]/Group[...] → return 1st match
+        let (inner_xpath, position_index) = if xpath.starts_with('(') {
+            if let Some(close) = xpath.rfind(')') {
+                let after_close = &xpath[close + 1..];
+                if let Some(pos) = parse_positional_predicate(after_close) {
+                    let inner = xpath[1..close].trim().to_string();
+                    log::info!("[XPath Fallback] Stripped positional wrapper: position={} inner='{}'", pos, inner);
+                    (inner, Some(pos))
+                } else {
+                    // Parentheses but no [N] after — just strip the parens
+                    let inner = xpath[1..close].trim().to_string();
+                    (inner, None)
+                }
+            } else {
+                (xpath.to_string(), None)
+            }
+        } else {
+            (xpath.to_string(), None)
+        };
+        
+        let xpath = &inner_xpath;
         let is_descendant = xpath.starts_with("//");
+        
+        // Helper: apply positional predicate [N] to search results.
+        // When the original XPath was (path)[N], we strip the wrapper before searching,
+        // then use this to select only the Nth match from the results.
+        let apply_position = |mut results: Vec<IUIAutomationElement>, segments: Vec<SegmentValidationResult>| 
+            -> (Vec<IUIAutomationElement>, Vec<SegmentValidationResult>) 
+        {
+            if let Some(pos) = position_index {
+                if pos > 0 && results.len() >= pos {
+                    log::info!("[XPath Fallback] Positional predicate [{}]: selecting match {} of {}", 
+                        pos, pos, results.len());
+                    results = vec![results.swap_remove(pos - 1)];
+                } else if !results.is_empty() {
+                    log::info!("[XPath Fallback] Positional predicate [{}]: only {} results, position out of range", 
+                        pos, results.len());
+                    results.clear();
+                }
+            }
+            (results, segments)
+        };
         
         if is_descendant {
             // ── Descendant XPath (//...): prioritize content root ──
@@ -2453,7 +2509,7 @@ pub mod windows_impl {
                     if !r.is_empty() {
                         log::info!("[XPath Fallback] ✓ Step 1: Found {} results from content root ({}ms)", 
                             r.len(), fallback_start.elapsed().as_millis());
-                        return Ok((r, s));
+                        return Ok(apply_position(r, s));
                     }
                 }
             }
@@ -2464,7 +2520,7 @@ pub mod windows_impl {
             if !results.is_empty() {
                 log::info!("[XPath Fallback] ✓ Step 2: Found {} results from window root ({}ms)", 
                     results.len(), fallback_start.elapsed().as_millis());
-                return Ok((results, segments));
+                return Ok(apply_position(results, segments));
             }
             
             // Step 3: EnumChildWindows + raw tree walk.
@@ -2484,7 +2540,7 @@ pub mod windows_impl {
                             if !r.is_empty() {
                                 log::info!("[XPath Fallback] ✓ Step 3a: Found {} from child HWND[{}] via uiauto-xpath ({}ms)",
                                     r.len(), idx, fallback_start.elapsed().as_millis());
-                                return Ok((r, s));
+                                return Ok(apply_position(r, s));
                             }
                         }
                         // 3b: raw tree descendants from child HWND (critical for Chrome/WebView)
@@ -2492,7 +2548,7 @@ pub mod windows_impl {
                             if !r.is_empty() {
                                 log::info!("[XPath Fallback] ✓ Step 3b: Found {} from child HWND[{}] via raw walk ({}ms)",
                                     r.len(), idx, fallback_start.elapsed().as_millis());
-                                return Ok((r, s));
+                                return Ok(apply_position(r, s));
                             }
                         }
                     }
@@ -2501,7 +2557,7 @@ pub mod windows_impl {
             
             log::info!("[XPath Fallback] All //XPath fallbacks exhausted ({}ms)", 
                 fallback_start.elapsed().as_millis());
-            Ok((results, segments))
+            Ok(apply_position(results, segments))
         } else {
             // ── Absolute XPath (/...): optimized multi-strategy approach ──
             
@@ -2511,7 +2567,7 @@ pub mod windows_impl {
             if !results.is_empty() {
                 log::info!("[XPath Fallback] ✓ Strategy 1: Found {} from window root ({}ms)", 
                     results.len(), fallback_start.elapsed().as_millis());
-                return Ok((results, segments));
+                return Ok(apply_position(results, segments));
             }
             
             // Strategy 1.5: RawViewWalker BFS from window root.
@@ -2552,7 +2608,8 @@ pub mod windows_impl {
                                         auto, &c, remaining_after_first, &xpath_parts,
                                         &fallback_start, "1.5",
                                     ) {
-                                        return Ok(result);
+                                        let (r, s) = result;
+                                        return Ok(apply_position(r, s));
                                     }
                                 }
                                 
@@ -2574,7 +2631,7 @@ pub mod windows_impl {
                     if !r2.is_empty() {
                         log::info!("[XPath Fallback] ✓ Strategy 2a: Found {} from content root ({}ms)", 
                             r2.len(), fallback_start.elapsed().as_millis());
-                        return Ok((r2, s2));
+                        return Ok(apply_position(r2, s2));
                     }
                 }
                 
@@ -2585,7 +2642,7 @@ pub mod windows_impl {
                     if !r3.is_empty() {
                         log::info!("[XPath Fallback] ✓ Strategy 2b: Found {} from content root desc ({}ms)", 
                             r3.len(), fallback_start.elapsed().as_millis());
-                        return Ok((r3, s3));
+                        return Ok(apply_position(r3, s3));
                     }
                 }
             }
@@ -2619,7 +2676,7 @@ pub mod windows_impl {
                         if !r25.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 2.5: Found {} via raw descendant search ({}ms)", 
                                 r25.len(), fallback_start.elapsed().as_millis());
-                            return Ok((r25, s25));
+                            return Ok(apply_position(r25, s25));
                         }
                     }
                 }
@@ -2771,7 +2828,8 @@ pub mod windows_impl {
                             if element_matches_parsed_step(&child_elem, &first_parsed) {
                                 log::info!("[Strategy 2.7]   ✓ child HWND matches first step!");
                                 if let Some(result) = try_remaining_from_match(auto, &child_elem, remaining_after_first, &xpath_parts, &fallback_start, "2.7a") {
-                                    return Ok(result);
+                                    let (r, s) = result;
+                                    return Ok(apply_position(r, s));
                                 }
                             }
                             
@@ -2783,7 +2841,8 @@ pub mod windows_impl {
                                     if element_matches_parsed_step(&sub, &first_parsed) {
                                         log::info!("[Strategy 2.7]   ✓ Found first-step match inside child HWND!");
                                         if let Some(result) = try_remaining_from_match(auto, &sub, remaining_after_first, &xpath_parts, &fallback_start, "2.7b") {
-                                            return Ok(result);
+                                            let (r, s) = result;
+                                            return Ok(apply_position(r, s));
                                         }
                                     }
                                     sub_match = unsafe { raw_walker.GetNextSiblingElement(&sub).ok() };
@@ -2805,7 +2864,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3: Found {} from sibling window {} ({}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok((r, s));
+                            return Ok(apply_position(r, s));
                         }
                     }
                 }
@@ -2846,7 +2905,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (absolute path, {}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok((r, s));
+                            return Ok(apply_position(r, s));
                         }
                     }
                     
@@ -2855,7 +2914,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (descendant path, {}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok((r, s));
+                            return Ok(apply_position(r, s));
                         }
                     }
                 }
@@ -2896,7 +2955,7 @@ pub mod windows_impl {
                         if !r4.is_empty() && elapsed < timeout_ms {
                             log::info!("[XPath Fallback] ✓ Strategy 4: Found {} from Desktop root desc ({}ms)", 
                                 r4.len(), fallback_start.elapsed().as_millis());
-                            return Ok((r4, s4));
+                            return Ok(apply_position(r4, s4));
                         } else if elapsed >= timeout_ms {
                             log::warn!("[XPath Fallback] Strategy 4 timed out after {}ms, skipping result", elapsed);
                         }
@@ -2906,7 +2965,7 @@ pub mod windows_impl {
             
             log::info!("[XPath Fallback] All /XPath strategies exhausted ({}ms)", 
                 fallback_start.elapsed().as_millis());
-            Ok((results, segments))
+            Ok(apply_position(results, segments))
         }
     }
 
