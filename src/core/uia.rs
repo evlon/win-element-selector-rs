@@ -2221,18 +2221,55 @@ pub mod windows_impl {
             // EnumChildWindows bypasses this by enumerating Win32 child HWNDs directly.
             log::info!("[XPath Fallback] /XPath — Strategy 2.7: child HWND search via EnumChildWindows");
             
+            /// Find the byte offset where the first XPath step ends in the original string.
+            /// E.g., for "/Pane[...]/Document[...]//Group[...]", returns the position right after "Pane[...]".
+            /// This preserves `//` axis markers that would be lost by split/join.
+            fn find_first_step_end(xpath: &str) -> usize {
+                let bytes = xpath.as_bytes();
+                let mut i = 0;
+                // Skip leading slashes
+                while i < bytes.len() && bytes[i] == b'/' {
+                    i += 1;
+                }
+                // Now at start of first step content
+                let mut bracket_depth: i32 = 0;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'[' => bracket_depth += 1,
+                        b']' => {
+                            if bracket_depth > 0 {
+                                bracket_depth -= 1;
+                            }
+                        }
+                        b'/' => {
+                            if bracket_depth == 0 {
+                                // End of first step (start of next / or //)
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i
+            }
+            
             /// Helper: given an element that matches the first XPath step, try to resolve
             /// the remaining steps via uiauto-xpath then raw tree walk.
             /// Returns per-segment validation results consistent with other strategies.
+            ///
+            /// `remaining_xpath` is the XPath after the first step, preserving `//` axis markers.
+            /// `xpath_parts` is the split step list (for segment validation results only).
             fn try_remaining_from_match(
                 auto: &IUIAutomation,
                 match_elem: &IUIAutomationElement,
+                remaining_xpath: &str,
                 xpath_parts: &[&str],
                 fallback_start: &std::time::Instant,
                 strategy_label: &str,
             ) -> Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-                // If first step is the only step, the matched element IS the result
-                if xpath_parts.len() <= 1 {
+                // If remaining path is empty, the matched element IS the result
+                if remaining_xpath.is_empty() || remaining_xpath == "/" {
                     let duration_ms = fallback_start.elapsed().as_millis() as u64;
                     log::info!("[XPath Fallback] ✓ Strategy {}: Found element ({}ms)", strategy_label, duration_ms);
                     let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
@@ -2248,16 +2285,17 @@ pub mod windows_impl {
                     return Some((vec![match_elem.clone()], segments));
                 }
                 
-                // Try uiauto-xpath for the remaining path
-                let remaining = format!("/{}", xpath_parts[1..].join("/"));
-                if let Ok((matches, segments)) = find_by_xpath_detailed(auto, match_elem, &remaining) {
+                log::info!("[XPath Fallback] Strategy {}: trying remaining XPath from matched element: {}", strategy_label, remaining_xpath);
+                
+                // Try uiauto-xpath for the remaining path (preserves // descendant axes)
+                if let Ok((matches, segments)) = find_by_xpath_detailed(auto, match_elem, remaining_xpath) {
                     if !matches.is_empty() {
                         log::info!("[XPath Fallback] ✓ Strategy {}: Found {} from subtree ({}ms)",
                             strategy_label, matches.len(), fallback_start.elapsed().as_millis());
                         // Prepend first-step segment and re-index
                         let mut all_segments = vec![SegmentValidationResult {
                             segment_index: 0,
-                            segment_text: xpath_parts[0].to_string(),
+                            segment_text: xpath_parts.first().unwrap_or(&"").to_string(),
                             matched: true,
                             match_count: 1,
                             duration_ms: 0,
@@ -2273,8 +2311,8 @@ pub mod windows_impl {
                 
                 // Fallback: raw tree walk for remaining steps
                 if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
-                    let remaining_parts = &xpath_parts[1..];
-                    if let Ok(matches) = walk_raw_tree_steps(auto, &raw_walker, match_elem, remaining_parts) {
+                    let remaining_parts: Vec<&str> = remaining_xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    if let Ok(matches) = walk_raw_tree_steps(auto, &raw_walker, match_elem, &remaining_parts) {
                         if !matches.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy {}: Found {} via raw walk ({}ms)",
                                 strategy_label, matches.len(), fallback_start.elapsed().as_millis());
@@ -2296,6 +2334,10 @@ pub mod windows_impl {
                 None
             }
             
+            // Compute the remaining XPath after the first step, preserving // axis markers
+            let first_step_end = find_first_step_end(xpath);
+            let remaining_after_first = &xpath[first_step_end..];
+            
             if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
                 let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
                 log::info!("[Strategy 2.7] Found {} child HWNDs under window", child_hwnds.len());
@@ -2316,7 +2358,7 @@ pub mod windows_impl {
                             let first_parsed = parse_xpath_step(xpath_parts[0]);
                             if element_matches_parsed_step(&child_elem, &first_parsed) {
                                 log::info!("[Strategy 2.7]   ✓ child HWND matches first step!");
-                                if let Some(result) = try_remaining_from_match(auto, &child_elem, &xpath_parts, &fallback_start, "2.7a") {
+                                if let Some(result) = try_remaining_from_match(auto, &child_elem, remaining_after_first, &xpath_parts, &fallback_start, "2.7a") {
                                     return Ok(result);
                                 }
                             }
@@ -2328,7 +2370,7 @@ pub mod windows_impl {
                                 while let Some(sub) = sub_match {
                                     if element_matches_parsed_step(&sub, &first_parsed) {
                                         log::info!("[Strategy 2.7]   ✓ Found first-step match inside child HWND!");
-                                        if let Some(result) = try_remaining_from_match(auto, &sub, &xpath_parts, &fallback_start, "2.7b") {
+                                        if let Some(result) = try_remaining_from_match(auto, &sub, remaining_after_first, &xpath_parts, &fallback_start, "2.7b") {
                                             return Ok(result);
                                         }
                                     }
@@ -2406,23 +2448,45 @@ pub mod windows_impl {
                 }
             }
             
-            // Strategy 4: Last resort — Desktop root descendant search (for deeply nested content like WeChat WebView)
-            // This handles cases where content is embedded so deeply that window-level search fails
-            log::info!("[XPath Fallback] /XPath — Strategy 4: Desktop root descendant (last resort for deep nesting)");
-            let desktop_desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
-            if let Ok(desktop) = unsafe { auto.GetRootElement() } {
-                // Use a timeout to prevent hanging on very large UI trees
-                let strategy4_start = std::time::Instant::now();
-                let timeout_ms = 2000; // 2 second timeout for Desktop search
-                
-                if let Ok((r4, s4)) = find_by_xpath_detailed(auto, &desktop, &desktop_desc_xpath) {
-                    let elapsed = strategy4_start.elapsed().as_millis();
-                    if !r4.is_empty() && elapsed < timeout_ms {
-                        log::info!("[XPath Fallback] ✓ Strategy 4: Found {} from Desktop root desc ({}ms)", 
-                            r4.len(), fallback_start.elapsed().as_millis());
-                        return Ok((r4, s4));
-                    } else if elapsed >= timeout_ms {
-                        log::warn!("[XPath Fallback] Strategy 4 timed out after {}ms, skipping result", elapsed);
+            // Strategy 4: Desktop root descendant search — DISABLED by default.
+            //
+            // Rationale: All searches in this system are window-scoped — we always locate the
+            // target window first, then search within it. Desktop root search is fundamentally
+            // incompatible with this design:
+            //   1. It searches the entire OS UI tree, which can take minutes on large trees
+            //      (e.g., Chrome/WebView with thousands of nodes).
+            //   2. The "timeout" check is post-hoc — it only checks elapsed AFTER the query
+            //      completes, so it doesn't actually prevent hangs.
+            //   3. If Strategies 1-3b couldn't find the element within the correct window,
+            //      a global search is extremely unlikely to help — the element probably
+            //      doesn't exist anymore or the XPath is stale.
+            //   4. Compass (relative) XPaths use /.., /preceding-sibling::, /following-sibling::
+            //      which are meaningless when searched from Desktop root.
+            //
+            // To explicitly enable (for rare edge cases), set environment variable:
+            //   ENABLE_DESKTOP_SEARCH=1
+            let desktop_search_enabled = std::env::var("ENABLE_DESKTOP_SEARCH")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            
+            if !desktop_search_enabled {
+                log::info!("[XPath Fallback] /XPath — Strategy 4: SKIPPED (Desktop root search disabled by default, set ENABLE_DESKTOP_SEARCH=1 to enable)");
+            } else {
+                log::info!("[XPath Fallback] /XPath — Strategy 4: Desktop root descendant (explicitly enabled via ENABLE_DESKTOP_SEARCH=1)");
+                let desktop_desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                if let Ok(desktop) = unsafe { auto.GetRootElement() } {
+                    let strategy4_start = std::time::Instant::now();
+                    let timeout_ms = 2000; // 2 second timeout for Desktop search
+                    
+                    if let Ok((r4, s4)) = find_by_xpath_detailed(auto, &desktop, &desktop_desc_xpath) {
+                        let elapsed = strategy4_start.elapsed().as_millis();
+                        if !r4.is_empty() && elapsed < timeout_ms {
+                            log::info!("[XPath Fallback] ✓ Strategy 4: Found {} from Desktop root desc ({}ms)", 
+                                r4.len(), fallback_start.elapsed().as_millis());
+                            return Ok((r4, s4));
+                        } else if elapsed >= timeout_ms {
+                            log::warn!("[XPath Fallback] Strategy 4 timed out after {}ms, skipping result", elapsed);
+                        }
                     }
                 }
             }
@@ -2997,6 +3061,194 @@ pub mod windows_impl {
         elements.iter().filter_map(|elem| {
             element_info_from_uia(elem, desktop_rect.as_ref(), random_range, &mut rng)
         }).collect()
+    }
+
+    /// Compass navigation: find base element by XPath, then walk the UIA tree step-by-step.
+    ///
+    /// This avoids the full XPath fallback pipeline for compass navigation,
+    /// reducing latency from 4-6 seconds to <100ms.
+    ///
+    /// Returns the target element info, or an error string if navigation fails.
+    pub fn navigate_from_element(
+        window_selector: &str,
+        base_xpath: &str,
+        steps: &[crate::api::types::NavigateStep],
+    ) -> Result<(Option<crate::api::types::ElementInfo>, String), String> {
+        use crate::api::types::NavigateStep;
+
+        let auto = get_automation().map_err(|e| format!("IUIAutomation init failed: {}", e))?;
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return Err(format!("Window not found: {}", window_selector));
+        }
+
+        // 窗口 XPath 前缀，用于构造 findSelector
+        let window_prefix = window_selector.to_string();
+
+        // Phase 1: Find base element (one XPath search)
+        let mut base_elem: Option<IUIAutomationElement> = None;
+        let mut window_rect: Option<crate::api::types::Rect> = None;
+
+        for window in &windows {
+            let wr = unsafe {
+                window.CurrentBoundingRectangle().ok().map(|r| {
+                    crate::api::types::Rect { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
+                })
+            };
+            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, base_xpath) {
+                if let Some(elem) = elements.into_iter().next() {
+                    base_elem = Some(elem);
+                    window_rect = wr;
+                    break;
+                }
+            }
+        }
+
+        let mut current = base_elem.ok_or_else(|| format!("Base element not found: {}", base_xpath))?;
+        log::info!("[Compass] Base element found, applying {} steps", steps.len());
+
+        // Phase 2: Walk tree step-by-step using TreeWalker
+        // Prefer RawViewWalker for Chrome/WebView compatibility,
+        // fall back to ControlViewWalker if RawViewWalker fails.
+        let raw_walker = unsafe { auto.RawViewWalker().ok() };
+        let ctrl_walker = unsafe { auto.ControlViewWalker().ok() };
+        let walker = raw_walker.as_ref().or(ctrl_walker.as_ref())
+            .ok_or_else(|| "Failed to create TreeWalker".to_string())?;
+
+        for (i, step) in steps.iter().enumerate() {
+            let before_label = format!("step[{}]={:?}", i, step);
+            match step {
+                NavigateStep::Parent { levels } => {
+                    for lv in 0..*levels {
+                        match unsafe { walker.GetParentElement(&current) } {
+                            Ok(parent) => {
+                                // Check if the parent is the desktop root (stop)
+                                let desktop = unsafe { auto.GetRootElement().ok() };
+                                let is_desktop = desktop.as_ref().map_or(false, |d| {
+                                    unsafe { auto.CompareElements(&parent, d).unwrap_or(windows::core::BOOL(0)).as_bool() }
+                                });
+                                if is_desktop {
+                                    return Err(format!("Step {} parent({}): reached Desktop root", i, lv + 1));
+                                }
+                                current = parent;
+                            }
+                            Err(e) => {
+                                return Err(format!("Step {} parent({}): GetParent failed: {:?}", i, lv + 1, e));
+                            }
+                        }
+                    }
+                    log::info!("[Compass] {}: parent({}) OK", before_label, levels);
+                }
+
+                NavigateStep::Child { index } => {
+                    let parent = current.clone();
+                    // Enumerate all direct children
+                    let mut children: Vec<IUIAutomationElement> = Vec::new();
+                    let mut child = unsafe { walker.GetFirstChildElement(&parent).ok() };
+                    while let Some(c) = child {
+                        children.push(c.clone());
+                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                    }
+
+                    let child_count = children.len() as i32;
+                    let resolved = if *index >= 0 {
+                        *index
+                    } else {
+                        // Negative index: -1 = last, -2 = second-to-last
+                        child_count + *index
+                    };
+
+                    if resolved < 0 || resolved >= child_count {
+                        return Err(format!(
+                            "Step {} child({}): index out of range (resolved={}, count={})",
+                            i, index, resolved, child_count
+                        ));
+                    }
+                    current = children[resolved as usize].clone();
+                    log::info!("[Compass] {}: child({}) OK (resolved={}, total={})", before_label, index, resolved, child_count);
+                }
+
+                NavigateStep::SiblingAbs { index } => {
+                    // sibling_abs(N) = parent().child(N)
+                    let parent = match unsafe { walker.GetParentElement(&current) } {
+                        Ok(p) => p,
+                        Err(e) => return Err(format!("Step {} sibling_abs({}): GetParent failed: {:?}", i, index, e)),
+                    };
+                    let mut siblings: Vec<IUIAutomationElement> = Vec::new();
+                    let mut child = unsafe { walker.GetFirstChildElement(&parent).ok() };
+                    while let Some(c) = child {
+                        siblings.push(c.clone());
+                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                    }
+                    let sib_count = siblings.len() as i32;
+                    let resolved = if *index >= 0 { *index } else { sib_count + *index };
+                    if resolved < 0 || resolved >= sib_count {
+                        return Err(format!(
+                            "Step {} sibling_abs({}): index out of range (resolved={}, count={})",
+                            i, index, resolved, sib_count
+                        ));
+                    }
+                    current = siblings[resolved as usize].clone();
+                    log::info!("[Compass] {}: sibling_abs({}) OK", before_label, index);
+                }
+
+                NavigateStep::SiblingLeft { offset } => {
+                    // preceding-sibling: go left by offset
+                    for off in 1..=*offset {
+                        match unsafe { walker.GetPreviousSiblingElement(&current) } {
+                            Ok(prev) => current = prev,
+                            Err(e) => return Err(format!(
+                                "Step {} sibling_left({}): GetPreviousSibling at offset {} failed: {:?}",
+                                i, offset, off, e
+                            )),
+                        }
+                    }
+                    log::info!("[Compass] {}: sibling_left({}) OK", before_label, offset);
+                }
+
+                NavigateStep::SiblingRight { offset } => {
+                    // following-sibling: go right by offset
+                    for off in 1..=*offset {
+                        match unsafe { walker.GetNextSiblingElement(&current) } {
+                            Ok(next) => current = next,
+                            Err(e) => return Err(format!(
+                                "Step {} sibling_right({}): GetNextSibling at offset {} failed: {:?}",
+                                i, offset, off, e
+                            )),
+                        }
+                    }
+                    log::info!("[Compass] {}: sibling_right({}) OK", before_label, offset);
+                }
+            }
+        }
+
+        // Phase 3: Convert result to ElementInfo
+        let mut rng = rand::thread_rng();
+        let info = element_info_from_uia(&current, window_rect.as_ref(), 5.0, &mut rng);
+
+        // 构造 findSelector: windowPrefix//ControlType[@Attr1='...' and @Attr2='...']
+        let find_selector = match &info {
+            Some(elem) => {
+                let mut preds: Vec<String> = Vec::new();
+                if !elem.automation_id.is_empty() {
+                    preds.push(format!("@AutomationId='{}'", elem.automation_id));
+                }
+                if !elem.name.is_empty() {
+                    preds.push(format!("@Name='{}'", elem.name.replace('\'', "&apos;")));
+                }
+                if !elem.class_name.is_empty() {
+                    preds.push(format!("@ClassName='{}'", elem.class_name.replace('\'', "&apos;")));
+                }
+                if !elem.framework_id.is_empty() {
+                    preds.push(format!("@FrameworkId='{}'", elem.framework_id));
+                }
+                let pred_str = if preds.is_empty() { String::new() } else { format!("[{}]", preds.join(" and ")) };
+                format!("{}//{}{}", window_prefix, elem.control_type, pred_str)
+            }
+            None => String::new(),
+        };
+
+        Ok((info, find_selector))
     }
 
     /// 从 UIA 元素提取子元素特征

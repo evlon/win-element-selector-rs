@@ -198,6 +198,52 @@ pub struct ElementInfo {
     pub is_selected: Option<bool>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 元素导航 API (Compass)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 导航步骤类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum NavigateStep {
+    /// 向上 N 层父元素
+    #[serde(rename = "parent")]
+    Parent { levels: u32 },
+    /// 第 N 个子元素（0-based，负数表示倒数）
+    #[serde(rename = "child")]
+    Child { index: i32 },
+    /// 绝对位置兄弟元素（0-based，负数表示倒数）
+    #[serde(rename = "sibling_abs")]
+    SiblingAbs { index: i32 },
+    /// 左侧第 N 个兄弟（相对偏移）
+    #[serde(rename = "sibling_left")]
+    SiblingLeft { offset: u32 },
+    /// 右侧第 N 个兄弟（相对偏移）
+    #[serde(rename = "sibling_right")]
+    SiblingRight { offset: u32 },
+}
+
+/// 元素导航请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct NavigateRequest {
+    /// 窗口选择器
+    pub window: String,
+    /// 基准元素 XPath（先找到此元素，再从它导航）
+    pub element: String,
+    /// 导航步骤列表
+    pub steps: Vec<NavigateStep>,
+}
+
+/// 元素导航响应
+#[derive(Debug, Clone, Serialize)]
+pub struct NavigateResponse {
+    pub found: bool,
+    #[serde(rename = "findSelector")]
+    pub find_selector: String,
+    pub element: Option<ElementInfo>,
+    pub error: Option<String>,
+}
+
 /// 元素查找响应
 #[derive(Debug, Clone, Serialize)]
 pub struct ElementResponse {

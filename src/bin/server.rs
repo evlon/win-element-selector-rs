@@ -117,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element/flash", web::post().to(element::flash_element))
             // 元素 Inspect
             .route("/api/element/inspect", web::post().to(element::inspect_element))
+            // 元素导航 (Compass)
+            .route("/api/element/navigate", web::post().to(element::navigate_element))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

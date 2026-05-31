@@ -146,6 +146,14 @@ pub enum UiaRequest {
         response: Sender<anyhow::Result<InspectResult>>,
     },
 
+    /// Compass 导航：找到基准元素后逐步 TreeWalker 导航
+    Navigate {
+        window_selector: String,
+        base_xpath: String,
+        steps: Vec<crate::api::types::NavigateStep>,
+        response: Sender<anyhow::Result<Result<(Option<crate::api::types::ElementInfo>, String), String>>>,
+    },
+
     /// 关闭工作线程
     Shutdown,
 }
@@ -154,6 +162,8 @@ pub enum UiaRequest {
 pub struct ComWorker {
     sender: Option<Sender<UiaRequest>>,
     handle: Option<thread::JoinHandle<()>>,
+    /// 标记 worker 是否已被废弃（超时后标记，下次请求时自动重启）
+    stale: bool,
 }
 
 impl ComWorker {
@@ -177,6 +187,7 @@ impl ComWorker {
         Ok(Self {
             sender: Some(sender),
             handle: Some(handle),
+            stale: false,
         })
     }
     
@@ -343,6 +354,13 @@ impl ComWorker {
                 log::info!("[PERF] inspect started for {} / {}", window_selector, element_xpath);
                 let result = Self::do_inspect(automation, &window_selector, &element_xpath, max_depth, max_nodes, &format);
                 log::info!("[PERF] inspect completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
+            UiaRequest::Navigate { window_selector, base_xpath, steps, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] navigate started for {} with {} steps", base_xpath, steps.len());
+                let result = Self::do_navigate(automation, &window_selector, &base_xpath, &steps);
+                log::info!("[PERF] navigate completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -803,6 +821,16 @@ impl ComWorker {
         ))
     }
 
+    /// 执行 Compass 导航操作
+    fn do_navigate(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+        base_xpath: &str,
+        steps: &[crate::api::types::NavigateStep],
+    ) -> anyhow::Result<Result<(Option<crate::api::types::ElementInfo>, String), String>> {
+        Ok(crate::core::uia::navigate_from_element(window_selector, base_xpath, steps))
+    }
+
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -1081,6 +1109,32 @@ impl ComWorker {
         }
     }
 
+    /// Compass 导航：从基准元素逐步 TreeWalker 导航
+    pub fn navigate(
+        &self,
+        window_selector: String,
+        base_xpath: String,
+        steps: Vec<crate::api::types::NavigateStep>,
+    ) -> anyhow::Result<Result<(Option<crate::api::types::ElementInfo>, String), String>> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::Navigate {
+                window_selector,
+                base_xpath,
+                steps,
+                response: response_sender,
+            })?;
+
+            // 导航通常很快，但基准元素查找可能慢
+            response_receiver
+                .recv_timeout(TIMEOUT_STANDARD)
+                .map_err(|e| anyhow::anyhow!("COM worker navigate timeout: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 优雅关闭工作线程
     pub fn shutdown(&mut self) {
         if let Some(ref sender) = self.sender {
@@ -1092,6 +1146,34 @@ impl ComWorker {
         }
         
         self.sender = None;
+    }
+
+    /// 强制关闭工作线程（不等待线程退出）
+    /// 适用于线程卡死无法优雅关闭的场景
+    pub fn force_shutdown(&mut self) {
+        // 发送 Shutdown 信号（可能失败，因为线程可能卡在处理中）
+        if let Some(ref sender) = self.sender {
+            let _ = sender.send(UiaRequest::Shutdown);
+        }
+        // 丢弃 sender，使工作线程的 receiver 在下次 recv 时返回 Disconnected
+        self.sender = None;
+        // 丢弃 JoinHandle 但不 join，线程变为 detached
+        // 旧线程会在完成当前操作后检测到 channel 断开并自动退出
+        if let Some(handle) = self.handle.take() {
+            std::mem::drop(handle);
+        }
+        log::warn!("COM worker force-shutdown: old thread detached, will exit after completing current operation");
+    }
+
+    /// 检查 worker 是否被标记为过期
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// 标记 worker 为过期（超时后调用）
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+        log::warn!("COM worker marked as stale due to timeout");
     }
 }
 
@@ -1111,6 +1193,43 @@ pub fn get_com_worker() -> &'static std::sync::Mutex<Option<ComWorker>> {
     COM_WORKER.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// 获取 COM worker sender 的克隆，并在必要时自动重启过期的 worker。
+/// 关键：Mutex 仅在获取 sender 期间持有，recv_timeout 时不持有，
+/// 避免一个超时请求阻塞所有后续请求。
+fn get_worker_sender() -> anyhow::Result<Sender<UiaRequest>> {
+    let mut worker_opt = get_com_worker().lock().unwrap();
+    
+    match worker_opt.as_mut() {
+        Some(worker) if worker.is_stale() => {
+            // Worker 被标记为过期（之前超时），需要重启
+            log::info!("Restarting stale COM worker...");
+            worker.force_shutdown();
+            *worker_opt = Some(ComWorker::new()?);
+            log::info!("COM worker restarted successfully");
+        }
+        Some(worker) if worker.sender.is_none() => {
+            // Worker 的 sender 已经断开（线程已退出），需要重启
+            log::warn!("COM worker sender is None, restarting...");
+            *worker_opt = Some(ComWorker::new()?);
+            log::info!("COM worker restarted successfully");
+        }
+        _ => {}
+    }
+
+    worker_opt
+        .as_ref()
+        .and_then(|w| w.sender.clone())
+        .ok_or_else(|| anyhow::anyhow!("Global COM worker not initialized"))
+}
+
+/// 标记 COM worker 为过期（超时后调用，下次请求时自动重启）
+fn mark_worker_stale() {
+    let mut worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref mut worker) = *worker_opt {
+        worker.mark_stale();
+    }
+}
+
 /// 初始化全局 COM 工作线程
 pub fn init_global_com_worker() -> anyhow::Result<()> {
     let mut worker_opt = get_com_worker().lock().unwrap();
@@ -1122,23 +1241,30 @@ pub fn init_global_com_worker() -> anyhow::Result<()> {
 }
 
 /// 使用全局 COM 工作线程执行捕获
+/// 关键：Mutex 仅在获取 sender 时短暂持有，recv_timeout 期间不持有
 pub fn global_capture_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.capture_at(x, y)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized. Call init_global_com_worker() first."))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::CaptureAt { x, y, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker capture_at timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程执行增强捕获（RawViewWalker + RECT 命中测试）
 pub fn global_capture_enhanced_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.capture_enhanced_at(x, y)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::CaptureEnhancedAt { x, y, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_BATCH)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker enhanced capture timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程查找元素
@@ -1147,12 +1273,15 @@ pub fn global_find_element(
     xpath: String,
     random_range: Option<f32>,
 ) -> anyhow::Result<Vec<ElementInfo>> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.find_element(window_selector, xpath, random_range)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::FindElement { window_selector, xpath, random_range, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker find_element timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程验证 XPath
@@ -1161,12 +1290,15 @@ pub fn global_validate_xpath(
     element_xpath: String,
     hierarchy: Vec<crate::core::model::HierarchyNode>,
 ) -> anyhow::Result<DetailedValidationResult> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.validate_xpath(window_selector, element_xpath, hierarchy)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::ValidateXPath { window_selector, element_xpath, hierarchy, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_SLOW)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker validation timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程查找相似元素
@@ -1174,12 +1306,15 @@ pub fn global_find_similar_elements(
     samples: Vec<crate::core::model::SimilarElementSample>,
     threshold: f32,
 ) -> anyhow::Result<Vec<crate::core::model::CaptureResult>> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.find_similar_elements(samples, threshold)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::FindSimilarElements { samples, threshold, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_BATCH)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker similar elements search timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程查找共同元素
@@ -1187,52 +1322,67 @@ pub fn global_find_common_elements(
     window_selector: String,
     xpath: String,
 ) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.find_common_elements(window_selector, xpath)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::FindCommonElements { window_selector, xpath, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_SLOW)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker common elements search timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程检查窗口是否存在
 pub fn global_exists_window(window_selector: String) -> anyhow::Result<bool> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.exists_window(window_selector)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::ExistsWindow { window_selector, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker exists_window timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程激活窗口
 pub fn global_activate_window(window_selector: String) -> anyhow::Result<bool> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.activate_window(window_selector)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::ActivateWindow { window_selector, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker activate_window timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程激活窗口并聚焦元素
 pub fn global_activate_and_focus_element(window_selector: String, xpath: String) -> anyhow::Result<bool> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.activate_and_focus_element(window_selector, xpath)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::ActivateAndFocusElement { window_selector, xpath, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_SLOW)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker activate_and_focus_element timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程列出所有窗口
 pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.list_windows()
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::ListWindows { response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker list_windows timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程获取元素可视区域位置
@@ -1241,22 +1391,45 @@ pub fn global_get_element_visibility(
     element_xpath: String,
     container_xpath: Option<String>,
 ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.get_element_visibility(window_selector, element_xpath, container_xpath)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::GetElementVisibility { window_selector, element_xpath, container_xpath, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker get_element_visibility timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程获取指定坐标处元素的边界矩形
 pub fn global_get_element_rect_at_point(x: i32, y: i32) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.get_element_rect_at_point(x, y)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::GetElementRectAtPoint { x, y, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_FAST)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker get_element_rect_at_point timeout: {:?}", e)
+        })?
+}
+
+/// 使用全局 COM 工作线程执行 Compass 导航操作
+pub fn global_navigate(
+    window_selector: String,
+    base_xpath: String,
+    steps: Vec<crate::api::types::NavigateStep>,
+) -> anyhow::Result<Result<(Option<crate::api::types::ElementInfo>, String), String>> {
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::Navigate { window_selector, base_xpath, steps, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_STANDARD)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker navigate timeout: {:?}", e)
+        })?
 }
 
 /// 使用全局 COM 工作线程执行 Inspect 操作
@@ -1267,10 +1440,13 @@ pub fn global_inspect(
     max_nodes: usize,
     format: String,
 ) -> anyhow::Result<InspectResult> {
-    let worker_opt = get_com_worker().lock().unwrap();
-    if let Some(ref worker) = *worker_opt {
-        worker.inspect(window_selector, element_xpath, max_depth, max_nodes, format)
-    } else {
-        Err(anyhow::anyhow!("Global COM worker not initialized"))
-    }
+    let sender = get_worker_sender()?;
+    let (response_sender, response_receiver) = mpsc::channel();
+    sender.send(UiaRequest::Inspect { window_selector, element_xpath, max_depth, max_nodes, format, response: response_sender })?;
+    response_receiver
+        .recv_timeout(TIMEOUT_INSPECT)
+        .map_err(|e| {
+            mark_worker_stale();
+            anyhow::anyhow!("COM worker inspect timeout: {:?}", e)
+        })?
 }

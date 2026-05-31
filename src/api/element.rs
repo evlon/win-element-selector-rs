@@ -6,7 +6,7 @@ use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo};
+use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo, NavigateRequest, NavigateResponse};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -404,6 +404,77 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
                 filtered_nodes: vec![],
                 text_output: None,
                 total_children: 0,
+                error: Some(format!("线程错误: {}", e)),
+            })
+        }
+    }
+}
+
+/// POST /api/element/navigate
+/// Compass 导航：找到基准元素后逐步 TreeWalker 导航
+pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responder {
+    let request = body.into_inner();
+
+    info!(
+        "API: /api/element/navigate window='{}' element='{}' steps={}",
+        request.window, request.element, request.steps.len()
+    );
+
+    let window = request.window.clone();
+    let base_xpath = request.element.clone();
+    let steps = request.steps.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_navigate(window, base_xpath, steps)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Ok((Some(element_info), find_selector)))) => {
+            info!(
+                "Navigate succeeded: type='{}' name='{}'",
+                element_info.control_type, element_info.name
+            );
+            HttpResponse::Ok().json(NavigateResponse {
+                found: true,
+                find_selector,
+                element: Some(element_info),
+                error: None,
+            })
+        }
+        Ok(Ok(Ok((None, find_selector)))) => {
+            warn!("Navigate: element not found at target position");
+            HttpResponse::Ok().json(NavigateResponse {
+                found: false,
+                find_selector,
+                element: None,
+                error: Some("导航目标元素不存在".to_string()),
+            })
+        }
+        Ok(Ok(Err(e))) => {
+            warn!("Navigate failed: {}", e);
+            HttpResponse::Ok().json(NavigateResponse {
+                found: false,
+                find_selector: String::new(),
+                element: None,
+                error: Some(e),
+            })
+        }
+        Ok(Err(e)) => {
+            warn!("Navigate COM worker error: {}", e);
+            HttpResponse::InternalServerError().json(NavigateResponse {
+                found: false,
+                find_selector: String::new(),
+                element: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+        Err(e) => {
+            warn!("Navigate spawn error: {}", e);
+            HttpResponse::InternalServerError().json(NavigateResponse {
+                found: false,
+                find_selector: String::new(),
+                element: None,
                 error: Some(format!("线程错误: {}", e)),
             })
         }
