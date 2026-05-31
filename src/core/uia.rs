@@ -1171,41 +1171,26 @@ pub mod windows_impl {
         debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
             hit_ct, hit_name, best_ct, best_name);
 
-        // Step 4: Build ancestor chain
-        let target_ancestors = unsafe { target_elem.FindAll(TreeScope_Ancestors, &true_cond)? };
-        let ancestor_count = unsafe { target_ancestors.Length()? };
+        // Step 4: Build ancestor chain using RawViewWalker
+        // Always use RawViewWalker (not FindAll(Ancestors)) because FindAll uses
+        // Control View which filters out intermediate elements (e.g. Qt Group nodes).
+        // This ensures the ancestor chain is complete and matches the XPath search side.
+        let walker = unsafe { auto.RawViewWalker() }
+            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
+        let desktop = unsafe { auto.GetRootElement()? };
 
-        let mut chain: Vec<IUIAutomationElement> = Vec::with_capacity(ancestor_count as usize + 1);
-        for i in (0..ancestor_count).rev() {
-            if let Ok(e) = unsafe { target_ancestors.GetElement(i) } {
-                chain.push(e);
+        let mut chain: Vec<IUIAutomationElement> = vec![target_elem.clone()];
+        let mut current = unsafe { walker.GetParentElement(&target_elem).ok() };
+        while let Some(elem) = current {
+            let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+            chain.push(elem.clone());
+            if is_desktop {
+                break;
             }
+            current = unsafe { walker.GetParentElement(&elem).ok() };
         }
-        chain.push(target_elem.clone());
-
-        // Fallback: FindAll(Ancestors) returns 0 for elements outside Control view (e.g. WebView).
-        // Fall back to RawViewWalker loop to capture all intermediate layers (including those
-        // filtered by ControlViewWalker), keeping consistency with validation-side RawViewWalker usage.
-        if ancestor_count == 0 {
-            debug!("[Enhanced] FindAll(Ancestors) returned 0, falling back to RawViewWalker");
-            chain.clear();
-            let walker = unsafe { auto.RawViewWalker()? };
-            let desktop = unsafe { auto.GetRootElement()? };
-
-            let mut elements: Vec<IUIAutomationElement> = vec![target_elem.clone()];
-            let mut current = unsafe { walker.GetParentElement(&target_elem).ok() };
-            while let Some(elem) = current {
-                let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
-                elements.push(elem.clone());
-                if is_desktop {
-                    break;
-                }
-                current = unsafe { walker.GetParentElement(&elem).ok() };
-            }
-            elements.reverse();
-            chain = elements;
-            debug!("[Enhanced] walker chain length = {}", chain.len());
-        }
+        chain.reverse();
+        debug!("[Enhanced] RawViewWalker chain length = {}", chain.len());
 
         // Step 5: Build hierarchy (same structure as normal capture)
         let window_index = 1;
