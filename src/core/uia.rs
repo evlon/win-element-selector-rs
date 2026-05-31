@@ -1,4 +1,4 @@
-// src/core/uia.rs
+﻿// src/core/uia.rs
 //
 // Windows UI Automation core operations.
 // Shared between GUI and HTTP API.
@@ -28,7 +28,6 @@ pub mod windows_impl {
                 Accessibility::{
                     CUIAutomation, IUIAutomation, IUIAutomationElement,
                     IUIAutomationTreeWalker,
-                    TreeScope_Subtree,
                 },
                 WindowsAndMessaging::{
                     GetCursorPos, EnumChildWindows, EnumWindows, GetWindowThreadProcessId,
@@ -60,6 +59,94 @@ pub mod windows_impl {
     #[inline]
     fn point_in_rect(x: i32, y: i32, r: &RECT) -> bool {
         x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+    }
+
+    /// Candidate element metadata for the "pick innermost" selection logic.
+    /// Extracted as a pure data struct so the selection algorithm can be tested
+    /// without COM / IUIAutomationElement dependencies.
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)] // fields used in tests and for diagnostic logging
+    struct CandidateElement {
+        /// index in the FindAll result array (later = deeper in tree traversal)
+        index: i32,
+        /// BoundingRectangle area (width * height)
+        area: i64,
+        /// Control type name (e.g. "Text", "Group")
+        control_type: String,
+        /// Element name
+        name: String,
+        /// RuntimeId (for dedup; NOT used for selection ordering)
+        runtime_id: Vec<i32>,
+    }
+
+    /// Control types that represent leaf/end-user elements (not containers).
+    /// Leaf elements are typically what the user wants to target — they carry
+    /// visible content (text, buttons, etc.) rather than structural grouping.
+    fn is_leaf_control_type(ct: &str) -> bool {
+        matches!(ct,
+            "Text" | "Button" | "Hyperlink" | "Edit" | "CheckBox" | "RadioButton"
+            | "ComboBox" | "ListItem" | "TreeItem" | "TabItem" | "MenuItem"
+            | "DataItem" | "Image" | "ScrollBar" | "Slider" | "Spinner"
+            | "ProgressBar" | "Thumb"
+        )
+    }
+
+    /// Decide whether `candidate` dominates (should replace) the current best.
+    /// 
+    /// Selection priority (Step 3 / Step 3.1 — FindAll filtering):
+    /// 1. **Leaf preference** — a leaf element with a meaningful name dominates
+    ///    a container element with an empty name. This fixes the case where
+    ///    Chrome's UIA tree has tiny Group wrappers/overlays that beat meaningful
+    ///    Text elements due to having a smaller area. A Group with empty name
+    ///    is useless for XPath targeting; a Text with a name is always more useful.
+    /// 2. **Smallest area** — the most specific / deepest leaf element
+    /// 3. **Later array index** (tiebreaker) — deeper in tree traversal order
+    ///
+    /// NOTE: We deliberately do NOT use RuntimeId length as a depth proxy.
+    /// Chrome's UIA provider assigns varying-length RuntimeIds regardless of
+    /// tree depth, causing intermediate Group elements to be incorrectly selected
+    /// over deeper Text elements. See the unit tests for concrete examples.
+    #[allow(dead_code)] // Used in tests; kept for future BFS sibling selection logic
+    fn candidate_dominates_findall(
+        candidate: &CandidateElement,
+        best_area: i64,
+        best_index: i32,
+        best_ct: &str,
+        best_name: &str,
+    ) -> bool {
+        let c_is_leaf = is_leaf_control_type(&candidate.control_type);
+        let b_is_leaf = is_leaf_control_type(best_ct);
+        let c_has_name = !candidate.name.is_empty();
+        let b_has_name = !best_name.is_empty();
+
+        // Leaf preference: a leaf element with a meaningful name always dominates
+        // a container element with an empty name, regardless of area.
+        // This fixes: Group(name='', area=200) beating Text(name='article title', area=30000)
+        if c_is_leaf && c_has_name && !b_is_leaf && !b_has_name {
+            return true;
+        }
+        // Reverse: container without name does NOT dominate leaf with name
+        if !c_is_leaf && !c_has_name && b_is_leaf && b_has_name {
+            return false;
+        }
+
+        // Default: smallest area wins, with later index as tiebreaker
+        candidate.area < best_area
+            || (candidate.area == best_area && candidate.index > best_index)
+    }
+
+    /// Decide whether a drill-down child dominates (should replace) the current deeper candidate.
+    /// 
+    /// Selection priority (Step 3.5 — RawViewWalker drill-down):
+    /// 1. **Smaller area** — strictly smaller always wins
+    /// 2. **Equal area with longer RuntimeId** — for equal-area containers (common in Qt/Chrome
+    ///    where Group/Pane shares the same rect as its parent), longer RuntimeId hints at a
+    ///    deeper element. This is acceptable here because drill-down walks the Raw View tree
+    ///    directly (not FindAll), so RuntimeId length is more meaningful.
+    #[allow(dead_code)] // Used in tests; kept for potential future drill-down scenarios
+    fn candidate_dominates_drilldown(child_area: i64, child_rid_len: usize, deeper_area: i64, deeper_rid_len: usize) -> bool {
+        child_area < deeper_area
+            || (child_area == deeper_area && child_rid_len > deeper_rid_len)
     }
 
     /// 计算元素的 visibleRect（元素矩形 ∩ 窗口视口矩形）
@@ -1064,17 +1151,16 @@ pub mod windows_impl {
         let pt = POINT { x, y };
         debug!("[Enhanced] Starting at ({}, {})", x, y);
 
-        let true_cond = unsafe { auto.CreateTrueCondition()? };
-
         // Step 1: ElementFromPoint to get the top-level element at cursor
         let mut hit_elem = unsafe {
             auto.ElementFromPoint(pt)
                 .map_err(|e| anyhow::anyhow!("ElementFromPoint: {}", e))?
         };
+        #[allow(unused_assignments)] // hit_name/_hit_ct updated in Steps 1.1/1.5 for diagnostics
         let mut hit_name = get_bstr(unsafe { hit_elem.CurrentName() });
-        let mut hit_ct = unsafe { hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        let mut _hit_ct = unsafe { hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
         let mut hit_fwid = get_bstr(unsafe { hit_elem.CurrentFrameworkId() });
-        debug!("[Enhanced] ElementFromPoint: type='{}' name='{}' fwid='{}'", hit_ct, hit_name, hit_fwid);
+        debug!("[Enhanced] ElementFromPoint: type='{}' name='{}' fwid='{}'", _hit_ct, hit_name, hit_fwid);
 
         let my_pid = std::process::id();
 
@@ -1084,7 +1170,7 @@ pub mod windows_impl {
         if let Ok(pid) = unsafe { hit_elem.CurrentProcessId() } {
             if pid as u32 == my_pid {
                 info!("[Enhanced] ElementFromPoint hit own process (type='{}' name='{}'), searching for real target",
-                    hit_ct, hit_name);
+                    _hit_ct, hit_name);
                 let desktop = unsafe { auto.GetRootElement()? };
                 let walker = match unsafe { auto.RawViewWalker().ok() }
                     .or_else(|| unsafe { auto.ControlViewWalker().ok() }) {
@@ -1113,7 +1199,7 @@ pub mod windows_impl {
                                 c_ct, c_name, c_fwid);
                             hit_elem = c;
                             hit_name = c_name;
-                            hit_ct = c_ct;
+                            _hit_ct = c_ct;
                             hit_fwid = c_fwid;
                             break;
                         }
@@ -1123,6 +1209,11 @@ pub mod windows_impl {
             }
         }
 
+        // PID of the (possibly Step-1.1-corrected) hit element.
+        // Used by Step 2.5 to enumerate same-process windows when BFS fails.
+        let hit_pid = unsafe { hit_elem.CurrentProcessId() }
+            .map(|p| p as u32)
+            .unwrap_or(0);
 
         // Save the original hit element for fallback (normal capture chain).
         // Must be after Step 1.1 so we save the corrected element (not our own overlay).
@@ -1134,8 +1225,8 @@ pub mod windows_impl {
         // (e.g., WeChat's Chrome HWND covers the entire window but cursor is in Qt area).
         // In that case, we retry FindAll with the pre-Step-1.5 element.
         let pre_cross_hwnd_elem = hit_elem.clone();
-        let pre_cross_hwnd_ct = hit_ct.clone();
-        let pre_cross_hwnd_name = hit_name.clone();
+        let _pre_cross_hwnd_ct = _hit_ct.clone();
+        let _pre_cross_hwnd_name = hit_name.clone();
 
         // Step 1.5: Cross-HWND probe
         // In apps like WeChat, ElementFromPoint returns a Qt element, but the real
@@ -1184,8 +1275,8 @@ pub mod windows_impl {
                                 debug!("[Enhanced] Cross-HWND: child type='{}' name='{}' fwid='{}' contains point — using as hit element",
                                     c_ct_local, c_name, c_fwid);
                                 hit_elem = child_elem;
-                                hit_ct = c_ct_local;
-                                hit_name = c_name;
+                                _hit_ct = c_ct_local;
+                                hit_name = c_name; // tracked for diagnostics
                                 break;
                             }
                         }
@@ -1196,169 +1287,211 @@ pub mod windows_impl {
             debug!("[Enhanced] Step 1.5: no window handle found, skipping cross-HWND probe");
         }
 
-        // Step 2: FindAll(TreeScope_Subtree) on the hit element to get ALL descendants
-        // If Step 1.5 replaced hit_elem with a cross-HWND element, we also try FindAll
-        // on the original element as a fallback (the cross-HWND element's subtree may
-        // not contain elements at the cursor point even though its BoundingRectangle does).
-        let mut all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
-        let mut element_count = unsafe { all_elements.Length()? };
-        debug!("[Enhanced] FindAll(Subtree) returned {} elements", element_count);
-
-        // Step 2.5: Quick retry if FindAll returned 0 elements and Step 1.5 changed hit_elem.
-        // The more thorough retry (with point-in-rect filtering) happens in Step 3.1.
+        // Step 2: BFS-style traversal from hit_elem to find the deepest element at the cursor point.
+        //
+        // Instead of FindAll (which returns a flat list of ALL descendants and requires
+        // area-based heuristics to estimate depth), we walk the RawViewWalker tree
+        // level by level. At each level, we scan the direct children and pick the one
+        // whose BoundingRectangle contains the cursor point. Then we descend into that
+        // child and repeat, until no child contains the point.
+        //
+        // This naturally encodes depth — each BFS level IS one tree level — so we don't
+        // need area as a depth proxy. When multiple siblings contain the point, we apply
+        // leaf preference (leaf with name > container without name) then smallest area.
+        //
+        // Compared to the old FindAll + drill-down approach:
+        // - FindAll(Subtree) returns a flat array; depth is unknown → area heuristic
+        //   needed → tiny Group overlays beat large Text elements (BUG)
+        // - Drill-down started from the (possibly wrong) FindAll result → too late
+        // - BFS starts from the top and walks down → depth is inherent in the traversal
         let cross_hwnd_changed = !unsafe { auto.CompareElements(&hit_elem, &pre_cross_hwnd_elem)
             .unwrap_or(windows::core::BOOL(0)).as_bool() };
-        if element_count == 0 && cross_hwnd_changed {
-            debug!("[Enhanced] FindAll on cross-HWND element returned 0, retrying with pre-Step-1.5 element");
-            hit_elem = pre_cross_hwnd_elem.clone();
-            hit_ct = pre_cross_hwnd_ct.clone();
-            hit_name = pre_cross_hwnd_name.clone();
-            all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
-            element_count = unsafe { all_elements.Length()? };
-            debug!("[Enhanced] FindAll(Subtree) retry returned {} elements", element_count);
+
+        let raw_walker = unsafe { auto.RawViewWalker() }
+            .or_else(|_| unsafe { auto.ControlViewWalker() })
+            .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?;
+
+        /// Inner BFS loop: walk the tree from `start_elem` level by level,
+        /// returning the deepest element whose BoundingRectangle contains (x, y).
+        fn bfs_find_deepest(
+            walker: &IUIAutomationTreeWalker,
+            start_elem: &IUIAutomationElement,
+            x: i32, y: i32,
+            my_pid: u32,
+        ) -> Option<IUIAutomationElement> {
+            let mut current = start_elem.clone();
+            let mut visited_rids: HashSet<Vec<i32>> = HashSet::new();
+            if let Some(rid) = runtime_id_key(&current) { visited_rids.insert(rid); }
+            let mut depth: u32 = 0;
+
+            loop {
+                if depth > 30 { break; } // Safety: prevent infinite loop
+
+                let mut best_child: Option<IUIAutomationElement> = None;
+                let mut best_area = i64::MAX;
+                let mut best_ct = String::new();
+                let mut best_name = String::new();
+                let mut best_is_leaf_with_name = false;
+
+                let mut child = unsafe { walker.GetFirstChildElement(&current).ok() };
+                while let Some(c) = child {
+                    // Skip elements from our own process (highlight/overlay windows)
+                    if let Ok(pid) = unsafe { c.CurrentProcessId() } {
+                        if pid as u32 == my_pid {
+                            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                            continue;
+                        }
+                    }
+                    // Skip offscreen elements
+                    if let Ok(offscreen) = unsafe { c.CurrentIsOffscreen() } {
+                        if offscreen.0 != 0 {
+                            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                            continue;
+                        }
+                    }
+                    // Cycle detection
+                    if let Some(rid) = runtime_id_key(&c) {
+                        if visited_rids.contains(&rid) {
+                            child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                            continue;
+                        }
+                    }
+                    // Check BoundingRectangle contains the point
+                    let rect = match unsafe { c.CurrentBoundingRectangle() } {
+                        Ok(r) => r,
+                        Err(_) => { child = unsafe { walker.GetNextSiblingElement(&c).ok() }; continue; }
+                    };
+                    let w = rect.right - rect.left;
+                    let h = rect.bottom - rect.top;
+                    if w <= 0 || h <= 0 || !point_in_rect(x, y, &rect) {
+                        child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                        continue;
+                    }
+
+                    let area = w as i64 * h as i64;
+                    let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                    let name = get_bstr(unsafe { c.CurrentName() });
+                    let c_is_leaf_with_name = is_leaf_control_type(&ct) && !name.is_empty();
+
+                    debug!("[BFS]   depth={} match: type='{}' name='{}' area={} leaf_with_name={}",
+                        depth, ct, name, area, c_is_leaf_with_name);
+
+                    // Selection among siblings at this level:
+                    // 1. Leaf with name beats container without name (leaf preference)
+                    //    — fixes tiny Group overlays that beat larger Text elements
+                    // 2. Smallest area (most specific element)
+                    //    — for equal-area containers (Qt/Chrome intermediate Group/Pane),
+                    //      pick any; the next BFS level will refine further
+                    let should_replace = if c_is_leaf_with_name && !best_is_leaf_with_name {
+                        true  // Leaf preference: leaf with name beats container without name
+                    } else if !c_is_leaf_with_name && best_is_leaf_with_name {
+                        false // Don't replace leaf with container
+                    } else {
+                        area < best_area
+                    };
+
+                    if should_replace {
+                        best_child = Some(c.clone());
+                        best_area = area;
+                        best_ct = ct;
+                        best_name = name;
+                        best_is_leaf_with_name = c_is_leaf_with_name;
+                    }
+
+                    child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                }
+
+                match best_child {
+                    Some(c) => {
+                        if let Some(rid) = runtime_id_key(&c) { visited_rids.insert(rid); }
+                        debug!("[BFS] depth={} → type='{}' name='{}' area={}",
+                            depth, best_ct, best_name, best_area);
+                        current = c;
+                        depth += 1;
+                    }
+                    None => break, // No child contains the point → current is deepest
+                }
+            }
+
+            if depth > 0 { Some(current) } else { None }
         }
 
-        // Step 3: Iterate, filter by point-in-rect + offscreen + RuntimeId dedup, pick innermost
-        let mut best_elem: Option<IUIAutomationElement> = None;
-        let mut best_area = i64::MAX;
-        let mut best_ct = String::new();
-        let mut best_name = String::new();
-        let mut best_rid_len: usize = 0;
-        let mut best_index: i32 = 0;
-        let mut seen_ids: HashSet<Vec<i32>> = HashSet::new();
-        let mut point_match_count = 0;
-        let mut offscreen_skip_count = 0;
+        // Try BFS from the current hit_elem (which may have been changed by Step 1.5)
+        let mut target_elem = bfs_find_deepest(&raw_walker, &hit_elem, x, y, my_pid);
 
-        for i in 0..element_count {
-            let elem = unsafe { all_elements.GetElement(i)? };
-
-            // RuntimeId dedup
-            let Some(rid) = runtime_id_key(&elem) else { continue };
-            let rid_len = rid.len();
-            if !seen_ids.insert(rid) { continue; }
-
-            // Skip elements from our own process (highlight/overlay windows)
-            if let Ok(pid) = unsafe { elem.CurrentProcessId() } {
-                if pid as u32 == my_pid { continue; }
-            }
-
-            // IsOffscreen filter
-            if let Ok(is_offscreen) = unsafe { elem.CurrentIsOffscreen() } {
-                if is_offscreen.0 != 0 { offscreen_skip_count += 1; continue; }
-            }
-
-            // BoundingRectangle must contain the point
-            let rect = match unsafe { elem.CurrentBoundingRectangle() } {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let w = rect.right - rect.left;
-            let h = rect.bottom - rect.top;
-            if w <= 0 || h <= 0 || !point_in_rect(x, y, &rect) { continue; }
-
-            point_match_count += 1;
-            let area = w as i64 * h as i64;
-            let e_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
-            let e_name = get_bstr(unsafe { elem.CurrentName() });
-            debug!("[Enhanced]   match #{}: type='{}' name='{}' area={} rid_len={} rect=[{},{},{}x{}]",
-                point_match_count, e_ct, e_name, area, rid_len, rect.left, rect.top, w, h);
-
-            // Pick innermost: RuntimeId length (depth proxy) > smallest area > array index (later = deeper)
-            let dominated = rid_len > best_rid_len
-                || (rid_len == best_rid_len && area < best_area)
-                || (rid_len == best_rid_len && area == best_area && i > best_index);
-            if dominated {
-                best_area = area;
-                best_ct = e_ct;
-                best_name = e_name;
-                best_elem = Some(elem);
-                best_rid_len = rid_len;
-                best_index = i;
-            }
+        // Step 2.1: Retry with pre-Step-1.5 element if BFS found nothing and
+        // Step 1.5 changed hit_elem (cross-HWND scenario).
+        // This handles the case where WeChat's Chrome HWND covers the entire window
+        // but the cursor is in the Qt area — the Chrome element's subtree has no
+        // matching elements, so we retry with the Qt element.
+        if target_elem.is_none() && cross_hwnd_changed {
+            info!("[Enhanced] BFS from cross-HWND element found no matches, retrying with pre-Step-1.5 element");
+            target_elem = bfs_find_deepest(&raw_walker, &pre_cross_hwnd_elem, x, y, my_pid);
         }
 
-        debug!("[Enhanced] filtered — point_match={}, offscreen_skip={}",
-            point_match_count, offscreen_skip_count);
+        // Step 2.5: Same-process window enumeration.
+        // If BFS found nothing, the target element might be in a different HWND tree
+        // within the same process (e.g., a multi-window app where ElementFromPoint
+        // returned a top-level container, but the real element is in a child HWND
+        // of a different top-level window of the same process).
+        // We enumerate all top-level windows belonging to hit_elem's PID,
+        // then their child HWNDs, to find the most specific HWND containing (x,y).
+        if target_elem.is_none() && hit_pid != 0 && hit_pid != my_pid {
+            info!("[Enhanced] Step 2.5: searching same-process windows (PID={})", hit_pid);
+            let top_hwnds = enumerate_top_level_windows();
+            // Filter to windows belonging to the same PID
+            let same_pid_hwnds: Vec<HWND> = top_hwnds.into_iter().filter(|hwnd| {
+                let mut pid: u32 = 0;
+                unsafe { GetWindowThreadProcessId(*hwnd, Some(&mut pid)) };
+                pid == hit_pid
+            }).collect();
+            debug!("[Enhanced] Step 2.5: found {} top-level HWNDs for PID={}", same_pid_hwnds.len(), hit_pid);
 
-        // Step 3.1: If FindAll found no matching element AND Step 1.5 changed hit_elem,
-        // retry FindAll with the pre-Step-1.5 element. This handles the case where
-        // WeChat's Chrome HWND covers the entire window (including the Qt sidebar area)
-        // but Chrome elements at the cursor position don't match — the cursor is actually
-        // in the Qt area and the Qt element's subtree has the right elements.
-        if best_elem.is_none() && cross_hwnd_changed {
-            info!("[Enhanced] FindAll on cross-HWND element found no point matches, retrying with pre-Step-1.5 element");
-            hit_elem = pre_cross_hwnd_elem.clone();
-            hit_ct = pre_cross_hwnd_ct.clone();
-            hit_name = pre_cross_hwnd_name.clone();
-            all_elements = unsafe { hit_elem.FindAll(TreeScope_Subtree, &true_cond)? };
-            element_count = unsafe { all_elements.Length()? };
-            debug!("[Enhanced] FindAll(Subtree) retry on pre-Step-1.5 element returned {} elements", element_count);
-            // Re-run Step 3 filtering
-            seen_ids.clear();
-            point_match_count = 0;
-            offscreen_skip_count = 0;
-            for i in 0..element_count {
-                let elem = unsafe { all_elements.GetElement(i)? };
-                let Some(rid) = runtime_id_key(&elem) else { continue };
-                let rid_len = rid.len();
-                if !seen_ids.insert(rid) { continue };
-                if let Ok(pid) = unsafe { elem.CurrentProcessId() } {
-                    if pid as u32 == my_pid { continue; }
+            for top_hwnd in &same_pid_hwnds {
+                let children = enum_child_hwnds(*top_hwnd);
+                for child_hwnd in &children {
+                    if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        if let Ok(rect) = unsafe { child_elem.CurrentBoundingRectangle() } {
+                            let w = rect.right - rect.left;
+                            let h = rect.bottom - rect.top;
+                            if w > 0 && h > 0 && point_in_rect(x, y, &rect) {
+                                let c_ct = unsafe { child_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                                let c_name = get_bstr(unsafe { child_elem.CurrentName() });
+                                debug!("[Enhanced] Step 2.5: child HWND type='{}' name='{}' contains point — trying BFS",
+                                    c_ct, c_name);
+                                target_elem = bfs_find_deepest(&raw_walker, &child_elem, x, y, my_pid);
+                                if target_elem.is_some() {
+                                    info!("[Enhanced] Step 2.5: found element via same-process child HWND");
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
-                if let Ok(is_offscreen) = unsafe { elem.CurrentIsOffscreen() } {
-                    if is_offscreen.0 != 0 { offscreen_skip_count += 1; continue; }
-                }
-                let rect = match unsafe { elem.CurrentBoundingRectangle() } {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let w = rect.right - rect.left;
-                let h = rect.bottom - rect.top;
-                if w <= 0 || h <= 0 || !point_in_rect(x, y, &rect) { continue; }
-                point_match_count += 1;
-                let area = w as i64 * h as i64;
-                let e_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                let e_name = get_bstr(unsafe { elem.CurrentName() });
-                let dominated = rid_len > best_rid_len
-                    || (rid_len == best_rid_len && area < best_area)
-                    || (rid_len == best_rid_len && area == best_area && i > best_index);
-                if dominated {
-                    best_area = area;
-                    best_ct = e_ct;
-                    best_name = e_name;
-                    best_elem = Some(elem);
-                    best_rid_len = rid_len;
-                    best_index = i;
-                }
+                if target_elem.is_some() { break; }
             }
-            debug!("[Enhanced] retry filtered — point_match={}, offscreen_skip={}",
-                point_match_count, offscreen_skip_count);
         }
 
         // If no matching element found after all retries, fall back to original_hit_elem
         // (the ElementFromPoint result) — equivalent to normal capture, which is always reliable.
-        let mut target_elem = match best_elem {
+        let mut target_elem = match target_elem {
             Some(e) => {
-                debug!("[Enhanced] SELECTED: type='{}' name='{}' area={} rid_len={}", best_ct, best_name, best_area, best_rid_len);
-                debug!("[Enhanced] COMPARISON: normal→type='{}' name='{}' | enhanced→type='{}' name='{}'",
-                    hit_ct, hit_name, best_ct, best_name);
+                debug!("[Enhanced] SELECTED via BFS: type='{}' name='{}'",
+                    unsafe { e.CurrentControlType().map(control_type_name).unwrap_or_default() },
+                    get_bstr(unsafe { e.CurrentName() }));
                 e
             }
             None => {
-                info!("[Enhanced] No matching elements from FindAll, falling back to ElementFromPoint result");
+                info!("[Enhanced] BFS found no matches, falling back to ElementFromPoint result");
                 hit_elem = original_hit_elem.clone();
-                // Skip drill-down for fallback — build chain directly
-                let raw_walker_fallback = unsafe { auto.RawViewWalker() }
-                    .or_else(|_| unsafe { auto.ControlViewWalker() })
-                    .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?;
                 let desktop = unsafe { auto.GetRootElement()? };
                 let mut ch: Vec<IUIAutomationElement> = vec![hit_elem.clone()];
-                let mut cur = unsafe { raw_walker_fallback.GetParentElement(&hit_elem).ok() };
+                let mut cur = unsafe { raw_walker.GetParentElement(&hit_elem).ok() };
                 while let Some(elem) = cur {
                     let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
                     ch.push(elem.clone());
                     if is_desktop { break; }
-                    cur = unsafe { raw_walker_fallback.GetParentElement(&elem).ok() };
+                    cur = unsafe { raw_walker.GetParentElement(&elem).ok() };
                 }
                 ch.reverse();
                 let window_index = 1;
@@ -1371,12 +1504,12 @@ pub mod windows_impl {
                 }
                 if let Some(last) = hierarchy.last_mut() {
                     last.is_target = true;
-                    last.index = sibling_index(&hit_elem, &raw_walker_fallback).unwrap_or(0);
+                    last.index = sibling_index(&hit_elem, &raw_walker).unwrap_or(0);
                     if last.index > 0 {
                         if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
                             f.value = last.index.to_string(); f.enabled = true;
                         }
-                        last.sibling_count = count_siblings(&hit_elem, &raw_walker_fallback).unwrap_or(0);
+                        last.sibling_count = count_siblings(&hit_elem, &raw_walker).unwrap_or(0);
                     }
                 }
                 let window_info = extract_window_info(&hierarchy);
@@ -1384,106 +1517,6 @@ pub mod windows_impl {
                 return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info });
             }
         };
-
-        // Step 3.5: Raw View drill-down
-        // FindAll(Subtree) uses Control View, which filters Qt intermediate elements.
-        // The "best" element from FindAll may be a shallow Group that has deeper
-        // Raw View children containing the point. Walk the Raw View tree downward
-        // from the selected element to find the truly innermost element.
-        //
-        // IMPORTANT: We must continue drilling down even when child area == parent area,
-        // because Qt/Chrome intermediate containers (Group/Pane) often have the same
-        // bounding rectangle as their parent. Only stopping when no child contains
-        // the point ensures we reach the truly deepest element.
-        let raw_walker = unsafe { auto.RawViewWalker() }
-            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
-        let mut drill_down_depth: u32 = 0;
-        let mut visited_rids: HashSet<Vec<i32>> = HashSet::new();
-        if let Some(rid) = runtime_id_key(&target_elem) { visited_rids.insert(rid); }
-        loop {
-            // Safety: prevent infinite drill-down
-            if drill_down_depth > 30 { break; }
-
-            let rect = match unsafe { target_elem.CurrentBoundingRectangle() } {
-                Ok(r) => r,
-                Err(_) => break,
-            };
-            let parent_area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
-
-            // Scan Raw View children for a smaller OR equal-area element containing the point.
-            // Equal-area children are common in Qt/Chrome where intermediate Group/Pane
-            // containers share the same bounding rectangle as their parent. We must continue
-            // through them to reach the truly deepest element.
-            // deeper_area starts as parent_area+1 so equal-area children also qualify.
-            let mut deeper: Option<IUIAutomationElement> = None;
-            let mut deeper_area = parent_area + 1;
-            let mut deeper_rid_len: usize = 0;
-            let mut child_count = 0u32;
-            let mut point_match_count = 0u32;
-            let mut child = unsafe { raw_walker.GetFirstChildElement(&target_elem).ok() };
-            while let Some(c) = child {
-                child_count += 1;
-                // Skip elements from our own process (highlight/overlay windows)
-                if let Ok(pid) = unsafe { c.CurrentProcessId() } {
-                    if pid as u32 == my_pid {
-                        child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
-                        continue;
-                    }
-                }
-                if let Ok(c_rect) = unsafe { c.CurrentBoundingRectangle() } {
-                    let cw = c_rect.right - c_rect.left;
-                    let ch = c_rect.bottom - c_rect.top;
-                    if cw > 0 && ch > 0 && point_in_rect(x, y, &c_rect) {
-                        // Skip offscreen elements
-                        if let Ok(offscreen) = unsafe { c.CurrentIsOffscreen() } {
-                            if offscreen.0 != 0 {
-                                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
-                                continue;
-                            }
-                        }
-                        // Skip already-visited elements (cycle detection)
-                        if let Some(rid) = runtime_id_key(&c) {
-                            if visited_rids.contains(&rid) {
-                                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
-                                continue;
-                            }
-                        }
-                        point_match_count += 1;
-                        let c_area = cw as i64 * ch as i64;
-                        let c_rid_len = runtime_id_key(&c).map(|r| r.len()).unwrap_or(0);
-                        // Prefer: smaller area first, then longer RuntimeId (deeper element)
-                        let dominated = c_area < deeper_area
-                            || (c_area == deeper_area && c_rid_len > deeper_rid_len);
-                        if dominated {
-                            deeper = Some(c.clone());
-                            deeper_area = c_area;
-                            deeper_rid_len = c_rid_len;
-                        }
-                    }
-                }
-                child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
-            }
-
-            if drill_down_depth == 0 || point_match_count > 0 {
-                let t_ct = unsafe { target_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                let t_name = get_bstr(unsafe { target_elem.CurrentName() });
-                debug!("[Enhanced] drill-down[{}]: type='{}' name='{}' area={} children={} point_matches={}",
-                    drill_down_depth, t_ct, t_name, parent_area, child_count, point_match_count);
-            }
-
-            match deeper {
-                Some(d) => {
-                    if let Some(rid) = runtime_id_key(&d) { visited_rids.insert(rid); }
-                    let d_ct = unsafe { d.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                    let d_name = get_bstr(unsafe { d.CurrentName() });
-                    debug!("[Enhanced] drill-down[{}] → type='{}' name='{}' area={}",
-                        drill_down_depth, d_ct, d_name, deeper_area);
-                    target_elem = d;
-                    drill_down_depth += 1;
-                }
-                None => break,
-            }
-        }
 
         // Step 4: Build ancestor chain using RawViewWalker (same walker from drill-down)
         // Always use RawViewWalker (not FindAll(Ancestors)) because FindAll uses
@@ -4509,6 +4542,523 @@ pub mod windows_impl {
         }
         for child in &node.children {
             flatten_inspect_node_recursive(child, result);
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Unit Tests — Enhanced Capture Element Selection Logic
+    // ═════════════════════════════════════════════════════════════════════════
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // ─── point_in_rect tests ─────────────────────────────────────────────
+
+        #[test]
+        fn test_point_in_rect_basic() {
+            let rect = RECT { left: 100, top: 200, right: 300, bottom: 400 };
+            assert!(point_in_rect(100, 200, &rect), "top-left corner should be inclusive");
+            assert!(point_in_rect(300, 400, &rect), "bottom-right corner should be inclusive");
+            assert!(point_in_rect(200, 300, &rect), "center should be inside");
+            assert!(!point_in_rect(99, 200, &rect), "just outside left");
+            assert!(!point_in_rect(100, 199, &rect), "just outside top");
+            assert!(!point_in_rect(301, 300, &rect), "just outside right");
+            assert!(!point_in_rect(200, 401, &rect), "just outside bottom");
+        }
+
+        #[test]
+        fn test_point_in_rect_single_pixel() {
+            let rect = RECT { left: 50, top: 50, right: 50, bottom: 50 };
+            assert!(point_in_rect(50, 50, &rect), "single pixel point should match");
+            assert!(!point_in_rect(49, 50, &rect));
+            assert!(!point_in_rect(51, 50, &rect));
+        }
+
+        // ─── is_leaf_control_type tests ──────────────────────────────────────
+
+        #[test]
+        fn test_is_leaf_control_type() {
+            assert!(is_leaf_control_type("Text"));
+            assert!(is_leaf_control_type("Button"));
+            assert!(is_leaf_control_type("Hyperlink"));
+            assert!(is_leaf_control_type("Edit"));
+            assert!(is_leaf_control_type("Image"));
+            assert!(is_leaf_control_type("ListItem"));
+            assert!(!is_leaf_control_type("Group"));
+            assert!(!is_leaf_control_type("Pane"));
+            assert!(!is_leaf_control_type("Window"));
+            assert!(!is_leaf_control_type("Document"));
+        }
+
+        // ─── candidate_dominates_findall tests ───────────────────────────────
+
+        fn select_best_findall(candidates: &[CandidateElement]) -> Option<&CandidateElement> {
+            let mut best: Option<&CandidateElement> = None;
+            let mut best_area = i64::MAX;
+            let mut best_index: i32 = -1;
+            let mut best_ct = String::new();
+            let mut best_name = String::new();
+            for c in candidates {
+                let ct = best_ct.clone();
+                let nm = best_name.clone();
+                if candidate_dominates_findall(c, best_area, best_index, &ct, &nm) {
+                    best = Some(c);
+                    best_area = c.area;
+                    best_index = c.index;
+                    best_ct = c.control_type.clone();
+                    best_name = c.name.clone();
+                }
+            }
+            best
+        }
+
+        /// THE KEY FIX: Chrome Group (larger area, long rid) vs Text (smaller area, short rid).
+        /// Old code (rid_len priority) selected Group. New code (area priority) selects Text.
+        #[test]
+        fn test_findall_area_beats_rid_len_chrome_text_vs_group() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 5,
+                    area: 4000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![42, 7, 3, 9, 15, 20],
+                },
+                CandidateElement {
+                    index: 8,
+                    area: 2000,
+                    control_type: "Text".into(),
+                    name: "some text content".into(),
+                    runtime_id: vec![42, 7, 3],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text",
+                "Text (area=2000) should beat Group (area=4000) despite shorter RuntimeId");
+        }
+
+        /// Verify the OLD behavior (rid_len priority) was wrong.
+        #[test]
+        fn test_findall_rid_len_is_unreliable_depth_proxy() {
+            let group = CandidateElement {
+                index: 5, area: 4000, control_type: "Group".into(),
+                name: String::new(), runtime_id: vec![42, 7, 3, 9, 15, 20],
+            };
+            let text = CandidateElement {
+                index: 8, area: 2000, control_type: "Text".into(),
+                name: "some text".into(), runtime_id: vec![42, 7, 3],
+            };
+            // NEW logic: area-based, Text wins
+            assert!(candidate_dominates_findall(&text, group.area, group.index, &group.control_type, &group.name));
+            assert!(!candidate_dominates_findall(&group, text.area, text.index, &text.control_type, &text.name));
+            // OLD logic would have: group.runtime_id.len() > text.runtime_id.len() → wrong
+            assert!(group.runtime_id.len() > text.runtime_id.len());
+        }
+
+        /// Same area → later index (deeper in traversal) wins.
+        #[test]
+        fn test_findall_same_area_later_index_wins() {
+            let candidates = vec![
+                CandidateElement { index: 3, area: 5000, control_type: "Group".into(), name: "outer".into(), runtime_id: vec![1, 2] },
+                CandidateElement { index: 7, area: 5000, control_type: "Group".into(), name: "inner".into(), runtime_id: vec![3, 4] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.name, "inner");
+            assert_eq!(best.index, 7);
+        }
+
+        /// Taskbar: Image (smaller) inside Button (larger).
+        #[test]
+        fn test_findall_taskbar_image_inside_button() {
+            let candidates = vec![
+                CandidateElement { index: 0, area: 2304, control_type: "Button".into(), name: "app".into(), runtime_id: vec![1, 2] },
+                CandidateElement { index: 2, area: 576, control_type: "Image".into(), name: String::new(), runtime_id: vec![1, 2, 3] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Image");
+        }
+
+        /// Single candidate → selected.
+        #[test]
+        fn test_findall_single_candidate() {
+            let candidates = vec![
+                CandidateElement { index: 0, area: 100, control_type: "Text".into(), name: "hello".into(), runtime_id: vec![1] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text");
+        }
+
+        /// Empty candidates → None.
+        #[test]
+        fn test_findall_no_candidates() {
+            let candidates: Vec<CandidateElement> = vec![];
+            assert!(select_best_findall(&candidates).is_none());
+        }
+
+        /// Deeply nested Chrome: Text leaf wins over all intermediate Groups.
+        #[test]
+        fn test_findall_chrome_deep_nesting_text_wins() {
+            let candidates = vec![
+                CandidateElement { index: 0, area: 480000, control_type: "Pane".into(), name: String::new(), runtime_id: vec![1] },
+                CandidateElement { index: 1, area: 452400, control_type: "Document".into(), name: String::new(), runtime_id: vec![1,2,3] },
+                CandidateElement { index: 2, area: 425600, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3,4,5] },
+                CandidateElement { index: 3, area: 399600, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3,4,5,6,7] },
+                CandidateElement { index: 4, area: 374400, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3] },
+                CandidateElement { index: 5, area: 350000, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3,4,5,6] },
+                CandidateElement { index: 6, area: 12000,  control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3,4,5,6,7,8,9] },
+                CandidateElement { index: 7, area: 6000,   control_type: "Text".into(), name: "text leaf".into(), runtime_id: vec![1,2] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text",
+                "Text leaf (area=6000) must win over Group (area=12000) despite shorter RuntimeId");
+        }
+
+        // ─── Leaf preference tests (based on real log scenarios) ─────────────
+
+        /// LOG CASE 1: (527, 208) WeChat Chrome article title
+        /// target='Group' name='' | ElementFromPoint type='Text' name='最高年费 5088！...'
+        /// A tiny Group (empty name) was selected over a much larger Text (with name)
+        /// because Group had a smaller area. Leaf preference fixes this.
+        #[test]
+        fn test_leaf_preference_text_beats_group_with_smaller_area() {
+            let candidates = vec![
+                // Tiny Group overlay/wrapper at the cursor point — empty name, small area
+                CandidateElement {
+                    index: 5,
+                    area: 400,       // e.g. 20x20 tiny overlay
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![42, 7, 3, 9],
+                },
+                // The actual Text element the user wants — meaningful name, larger area
+                CandidateElement {
+                    index: 8,
+                    area: 30000,     // e.g. 300x100 article title
+                    control_type: "Text".into(),
+                    name: "最高年费 5088！豆包收费让网友炸锅了，人民日报发声定调".into(),
+                    runtime_id: vec![42, 7, 3],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text",
+                "Text with meaningful name must beat tiny Group with empty name (leaf preference)");
+            assert!(!best.name.is_empty());
+        }
+
+        /// LOG CASE 1 (variant): Group appears first in traversal but Text has name.
+        /// Even if Group is evaluated first and becomes "best", Text must replace it.
+        #[test]
+        fn test_leaf_preference_group_first_then_text_replaces() {
+            let candidates = vec![
+                // Group evaluated first → becomes best (area=400, initially i64::MAX)
+                CandidateElement {
+                    index: 3,
+                    area: 400,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![1, 2, 3],
+                },
+                // Text evaluated later → must replace Group via leaf preference
+                CandidateElement {
+                    index: 7,
+                    area: 30000,
+                    control_type: "Text".into(),
+                    name: "article title".into(),
+                    runtime_id: vec![4, 5],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text");
+        }
+
+        /// LOG CASE 3: (551, 260) Both Group with empty name
+        /// target='Group' name='' | ElementFromPoint type='Group' name=''
+        /// When there's no leaf element, the smallest-area Group should still win.
+        #[test]
+        fn test_leaf_preference_no_leaf_available_group_wins() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 0,
+                    area: 400000,
+                    control_type: "Pane".into(),
+                    name: String::new(),
+                    runtime_id: vec![1],
+                },
+                CandidateElement {
+                    index: 3,
+                    area: 12000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![1, 2, 3, 4],
+                },
+                CandidateElement {
+                    index: 6,
+                    area: 2000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![5, 6],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Group",
+                "When no leaf available, smallest-area Group wins");
+            assert_eq!(best.area, 2000);
+        }
+
+        /// LOG CASE 4: (482, 273) Text with name vs Group with empty name
+        /// target='Text' name='程序员的那些事' | ElementFromPoint type='Group' name=''
+        /// Text already has smaller area + leaf preference. Both mechanisms agree.
+        #[test]
+        fn test_leaf_preference_text_smaller_area_also_wins() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 2,
+                    area: 20000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![1, 2, 3],
+                },
+                CandidateElement {
+                    index: 5,
+                    area: 5000,
+                    control_type: "Text".into(),
+                    name: "程序员的那些事".into(),
+                    runtime_id: vec![4, 5],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text");
+            assert_eq!(best.name, "程序员的那些事");
+        }
+
+        /// Leaf preference should NOT override when the container has a meaningful name.
+        /// A Group with name (e.g., "Card") is a valid target.
+        #[test]
+        fn test_leaf_preference_not_applied_when_container_has_name() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 2,
+                    area: 400,
+                    control_type: "Group".into(),
+                    name: "Card".into(),      // Container WITH name
+                    runtime_id: vec![1, 2, 3],
+                },
+                CandidateElement {
+                    index: 5,
+                    area: 30000,
+                    control_type: "Text".into(),
+                    name: "content".into(),
+                    runtime_id: vec![4, 5],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            // Group with name and smaller area wins via normal area logic
+            assert_eq!(best.control_type, "Group");
+            assert_eq!(best.area, 400);
+        }
+
+        /// Leaf preference should NOT override when both are leaf types.
+        /// Between two Text elements, smallest area should still win.
+        #[test]
+        fn test_leaf_preference_not_applied_between_two_leaves() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 0,
+                    area: 5000,
+                    control_type: "Text".into(),
+                    name: "title".into(),
+                    runtime_id: vec![1],
+                },
+                CandidateElement {
+                    index: 3,
+                    area: 2000,
+                    control_type: "Text".into(),
+                    name: String::new(),     // Text with empty name — smaller area wins
+                    runtime_id: vec![2],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.area, 2000);
+            // Text with empty name wins because both are leaves → area comparison
+        }
+
+        /// Leaf preference should NOT override when both are containers.
+        #[test]
+        fn test_leaf_preference_not_applied_between_two_containers() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 0,
+                    area: 5000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![1],
+                },
+                CandidateElement {
+                    index: 3,
+                    area: 2000,
+                    control_type: "Pane".into(),
+                    name: String::new(),
+                    runtime_id: vec![2],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Pane"); // smaller area wins
+            assert_eq!(best.area, 2000);
+        }
+
+        /// Leaf with empty name vs container with empty name → area wins.
+        #[test]
+        fn test_leaf_empty_name_vs_container_empty_name_area_wins() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 0,
+                    area: 5000,
+                    control_type: "Group".into(),
+                    name: String::new(),
+                    runtime_id: vec![1],
+                },
+                CandidateElement {
+                    index: 3,
+                    area: 2000,
+                    control_type: "Text".into(),
+                    name: String::new(),    // Text with no name — no leaf preference
+                    runtime_id: vec![2],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            // Text with empty name: leaf preference not triggered (c_has_name = false)
+            // Falls back to area → Text (2000) wins
+            assert_eq!(best.control_type, "Text");
+            assert_eq!(best.area, 2000);
+        }
+
+        /// Full WeChat Chrome scenario: multiple Groups + one Text.
+        #[test]
+        fn test_wechat_chrome_full_scenario() {
+            let candidates = vec![
+                CandidateElement { index: 0, area: 480000, control_type: "Pane".into(), name: String::new(), runtime_id: vec![1] },
+                CandidateElement { index: 1, area: 390000, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2] },
+                CandidateElement { index: 2, area: 195000, control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3] },
+                // Tiny Group overlay at cursor — the bug trigger
+                CandidateElement { index: 3, area: 400,    control_type: "Group".into(), name: String::new(), runtime_id: vec![1,2,3,4,5,6] },
+                // The actual article title
+                CandidateElement { index: 4, area: 30000,  control_type: "Text".into(), name: "article title".into(), runtime_id: vec![1,2,3,4] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text",
+                "Text with name must beat tiny Group overlay (leaf preference)");
+            assert_eq!(best.name, "article title");
+        }
+
+        /// Leaf preference does not override when leaf has much larger area AND
+        /// the container has a meaningful name (both have useful info).
+        #[test]
+        fn test_leaf_preference_container_named_vs_leaf_named() {
+            let candidates = vec![
+                CandidateElement {
+                    index: 0,
+                    area: 400,
+                    control_type: "Group".into(),
+                    name: "sidebar section".into(),  // Container WITH name
+                    runtime_id: vec![1, 2],
+                },
+                CandidateElement {
+                    index: 3,
+                    area: 30000,
+                    control_type: "Text".into(),
+                    name: "content text".into(),     // Leaf WITH name
+                    runtime_id: vec![3, 4],
+                },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            // Both have names → leaf preference NOT triggered → area comparison
+            assert_eq!(best.control_type, "Group",
+                "When both have names, smallest area wins");
+        }
+
+        // ─── candidate_dominates_drilldown tests ─────────────────────────────
+
+        #[test]
+        fn test_drilldown_smaller_area_wins() {
+            assert!(candidate_dominates_drilldown(100, 2, 200, 3));
+        }
+
+        #[test]
+        fn test_drilldown_same_area_longer_rid_wins() {
+            assert!(candidate_dominates_drilldown(100, 4, 100, 2));
+        }
+
+        #[test]
+        fn test_drilldown_same_area_same_rid_no_dominate() {
+            assert!(!candidate_dominates_drilldown(100, 3, 100, 3));
+        }
+
+        #[test]
+        fn test_drilldown_larger_area_no_dominate() {
+            assert!(!candidate_dominates_drilldown(200, 5, 100, 2));
+        }
+
+        #[test]
+        fn test_drilldown_same_area_shorter_rid_no_dominate() {
+            assert!(!candidate_dominates_drilldown(100, 2, 100, 5));
+        }
+
+        // ─── Integration-style tests ─────────────────────────────────────────
+
+        /// WeChat scenario: Group (300x40) vs Text (300x20) at same point.
+        #[test]
+        fn test_wechat_scenario_group_vs_text() {
+            let group_rect = RECT { left: 400, top: 250, right: 700, bottom: 290 };
+            let text_rect = RECT { left: 400, top: 260, right: 700, bottom: 280 };
+            assert!(point_in_rect(549, 269, &group_rect));
+            assert!(point_in_rect(549, 269, &text_rect));
+
+            let group_area = (group_rect.right - group_rect.left) as i64
+                * (group_rect.bottom - group_rect.top) as i64;
+            let text_area = (text_rect.right - text_rect.left) as i64
+                * (text_rect.bottom - text_rect.top) as i64;
+
+            let candidates = vec![
+                CandidateElement { index: 5, area: group_area, control_type: "Group".into(), name: String::new(), runtime_id: vec![42, 7, 3, 9, 15, 20] },
+                CandidateElement { index: 8, area: text_area, control_type: "Text".into(), name: "text content".into(), runtime_id: vec![42, 7, 3] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Text",
+                "In WeChat Chrome, Text (area={}) must win over Group (area={})", text_area, group_area);
+        }
+
+        /// Group only (no Text child) → Group is selected.
+        #[test]
+        fn test_findall_group_only_selected_when_no_text() {
+            let candidates = vec![
+                CandidateElement { index: 0, area: 4000, control_type: "Group".into(), name: String::new(), runtime_id: vec![1, 2] },
+            ];
+            let best = select_best_findall(&candidates).unwrap();
+            assert_eq!(best.control_type, "Group");
+        }
+
+        /// Same area, same index → leaf preference makes Text dominate Group with no name.
+        #[test]
+        fn test_findall_identical_area_same_index_leaf_wins() {
+            let c1_area = 1000i64;
+            let c1_index = 3i32;
+            let c1_ct = "Group".to_string();
+            let c1_name = String::new();
+            let c2 = CandidateElement { index: 3, area: 1000, control_type: "Text".into(), name: "second".into(), runtime_id: vec![2] };
+            // Leaf preference: Text(name="second") dominates Group(name="") even with same area+index
+            assert!(candidate_dominates_findall(&c2, c1_area, c1_index, &c1_ct, &c1_name));
+        }
+
+        /// Same area, same index, both same type with name → no flip.
+        #[test]
+        fn test_findall_identical_area_same_index_same_type_no_flip() {
+            let c1_area = 1000i64;
+            let c1_index = 3i32;
+            let c1_ct = "Text".to_string();
+            let c1_name = "first".to_string();
+            let c2 = CandidateElement { index: 3, area: 1000, control_type: "Text".into(), name: "second".into(), runtime_id: vec![2] };
+            // Both are leaves with names → no leaf preference → same area+index → no flip
+            assert!(!candidate_dominates_findall(&c2, c1_area, c1_index, &c1_ct, &c1_name));
         }
     }
 }
