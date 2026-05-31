@@ -3380,6 +3380,568 @@ pub mod windows_impl {
             })
         }).collect()
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Inspect - 遍历元素子树，提取调试信息
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Inspect 返回的单个节点信息（核心模型）
+    #[derive(Debug, Clone, serde::Serialize)]
+    pub struct InspectNode {
+        /// 元素层级深度（根元素为 0）
+        pub depth: usize,
+        /// 控件类型，如 "Button"、"Text"、"Edit" 等
+        pub control_type: String,
+        /// 控件的 Name 属性
+        pub name: String,
+        /// 控件的 ClassName 属性
+        pub class_name: String,
+        /// 控件的 AutomationId 属性
+        pub automation_id: String,
+        /// 控件的 FrameworkId 属性
+        pub framework_id: String,
+        /// 控件的文本内容（通过 ValuePattern 获取）
+        pub text_value: Option<String>,
+        /// 控件的 HelpText 属性（辅助说明文字）
+        pub help_text: String,
+        /// 控件的 ItemType 属性
+        pub item_type: String,
+        /// 控件的 ItemStatus 属性
+        pub item_status: String,
+        /// 控件的区域位置
+        pub rect: Option<crate::api::types::Rect>,
+        /// 是否在屏幕外
+        pub is_offscreen: bool,
+        /// 选中该控件相对于根元素的 XPath 表达式
+        pub relative_xpath: String,
+        /// 子节点列表
+        pub children: Vec<InspectNode>,
+    }
+
+    /// Inspect 结果
+    #[derive(Debug, Clone, serde::Serialize)]
+    pub struct InspectResult {
+        /// 是否成功
+        pub success: bool,
+        /// 根元素 XPath
+        pub root_xpath: String,
+        /// 结构化节点树
+        pub nodes: Option<InspectNode>,
+        /// 扁平化节点列表（DFS 顺序，无嵌套 children）
+        pub flat_nodes: Vec<InspectNode>,
+        /// 格式化文本（format='txt' 时有值）
+        pub text_output: Option<String>,
+        /// 子元素总数
+        pub total_children: usize,
+        /// 错误信息
+        pub error: Option<String>,
+    }
+
+    /// 遍历指定元素下的所有子元素，提取层级/控件类型/name/Text/rect/相对xpath。
+    ///
+    /// 使用 RawViewWalker 递归遍历子树（支持 WebView/Chrome 元素），
+    /// 对每个子元素提取关键属性并构建相对 XPath。
+    pub fn inspect_subtree(
+        window_selector: &str,
+        element_xpath: &str,
+        max_depth: usize,
+        max_nodes: usize,
+        format: &str,
+    ) -> InspectResult {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        let auto = match get_automation() {
+            Ok(a) => a,
+            Err(e) => {
+                return InspectResult {
+                    success: false,
+                    root_xpath: element_xpath.to_string(),
+                    nodes: None,
+                    flat_nodes: vec![],
+                    text_output: None,
+                    total_children: 0,
+                    error: Some(format!("获取 IUIAutomation 实例失败: {}", e)),
+                };
+            }
+        };
+
+        // Step 1: 查找目标窗口
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return InspectResult {
+                success: false,
+                root_xpath: element_xpath.to_string(),
+                nodes: None,
+                flat_nodes: vec![],
+                text_output: None,
+                total_children: 0,
+                error: Some(format!("窗口未找到: {}", window_selector)),
+            };
+        }
+
+        // Step 2: 在窗口中查找目标元素
+        let mut target_element: Option<IUIAutomationElement> = None;
+        for window in &windows {
+            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, element_xpath) {
+                if let Some(elem) = elements.into_iter().next() {
+                    target_element = Some(elem);
+                    break;
+                }
+            }
+        }
+
+        let root_element = match target_element {
+            Some(e) => e,
+            None => {
+                return InspectResult {
+                    success: false,
+                    root_xpath: element_xpath.to_string(),
+                    nodes: None,
+                    flat_nodes: vec![],
+                    text_output: None,
+                    total_children: 0,
+                    error: Some(format!("元素未找到: {}", element_xpath)),
+                };
+            }
+        };
+
+        // Step 3: 使用 RawViewWalker 递归遍历子树
+        let raw_walker = match unsafe { auto.RawViewWalker() } {
+            Ok(w) => w,
+            Err(e) => {
+                return InspectResult {
+                    success: false,
+                    root_xpath: element_xpath.to_string(),
+                    nodes: None,
+                    flat_nodes: vec![],
+                    text_output: None,
+                    total_children: 0,
+                    error: Some(format!("获取 RawViewWalker 失败: {}", e)),
+                };
+            }
+        };
+
+        // 计数器，用于限制总节点数和跟踪同类型兄弟索引
+        let mut total_count = 0usize;
+
+        // DFS 遍历构建节点树
+        let root_node = build_inspect_node(
+            &root_element,
+            &raw_walker,
+            0,       // depth
+            max_depth,
+            max_nodes,
+            &mut total_count,
+            "",
+        );
+
+        log::info!(
+            "[inspect_subtree] Completed in {}ms, total_nodes={}",
+            start.elapsed().as_millis(),
+            total_count,
+        );
+
+        // 生成扁平化节点列表
+        let flat_nodes = flatten_inspect_tree(&root_node);
+
+        // 根据格式生成输出
+        let text_output = if format == "txt" || format == "text" {
+            Some(format_inspect_tree(&root_node, 0))
+        } else {
+            None
+        };
+
+        InspectResult {
+            success: true,
+            root_xpath: element_xpath.to_string(),
+            nodes: Some(root_node),
+            flat_nodes,
+            text_output,
+            total_children: total_count.saturating_sub(1), // 减去根节点自身
+            error: None,
+        }
+    }
+
+    /// 递归构建 InspectNode 树
+    ///
+    /// 使用 DFS 遍历，对每个节点：
+    /// - 提取属性（control_type, name, class_name, automation_id, framework_id, rect, is_offscreen）
+    /// - 尝试获取 ValuePattern 的文本内容
+    /// - 构建相对 XPath 路径
+    /// - 递归处理子元素
+    fn build_inspect_node(
+        element: &IUIAutomationElement,
+        walker: &IUIAutomationTreeWalker,
+        depth: usize,
+        max_depth: usize,
+        max_nodes: usize,
+        total_count: &mut usize,
+        parent_xpath: &str,
+    ) -> InspectNode {
+        *total_count += 1;
+
+        // 提取元素属性
+        let control_type = unsafe { element.CurrentControlType() }
+            .map(|id| control_type_name(id))
+            .unwrap_or_default();
+        let name = get_bstr(unsafe { element.CurrentName() });
+        let class_name = get_bstr(unsafe { element.CurrentClassName() });
+        let automation_id = get_bstr(unsafe { element.CurrentAutomationId() });
+        let framework_id = get_bstr(unsafe { element.CurrentFrameworkId() });
+        let help_text = get_bstr(unsafe { element.CurrentHelpText() });
+        let item_type = get_bstr(unsafe { element.CurrentItemType() });
+        let item_status = get_bstr(unsafe { element.CurrentItemStatus() });
+        let is_offscreen = unsafe { element.CurrentIsOffscreen() }
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+
+        // 获取边界矩形
+        let rect = match unsafe { element.CurrentBoundingRectangle() } {
+            Ok(r) => Some(crate::api::types::Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            }),
+            Err(_) => None,
+        };
+
+        // 尝试获取 ValuePattern 的文本内容
+        let text_value = get_value_pattern_text(element);
+
+        // 构建相对 XPath
+        let relative_xpath = build_relative_xpath(
+            &control_type,
+            &name,
+            &class_name,
+            &automation_id,
+            parent_xpath,
+        );
+
+        // 递归遍历子元素
+        let mut children = Vec::new();
+        if depth < max_depth && *total_count < max_nodes {
+            // 首先收集所有直接子元素，以便计算同类型兄弟索引
+            let child_elements: Vec<IUIAutomationElement> = {
+                let mut kids = Vec::new();
+                let mut child = unsafe { walker.GetFirstChildElement(element).ok() };
+                while let Some(c) = child {
+                    let last = c.clone();
+                    kids.push(c);
+                    child = unsafe { walker.GetNextSiblingElement(&last).ok() };
+                }
+                kids
+            };
+
+            // 按控件类型统计出现次数，用于构建带索引的 XPath
+            let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for child_elem in &child_elements {
+                let ct = unsafe { child_elem.CurrentControlType() }
+                    .map(|id| control_type_name(id))
+                    .unwrap_or_default();
+                let idx = type_counts.entry(ct.clone()).or_insert(0);
+                *idx += 1;
+            }
+
+            // 跟踪当前同类型已出现的次数
+            let mut type_seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+            for child_elem in &child_elements {
+                if *total_count >= max_nodes {
+                    break;
+                }
+                let ct = unsafe { child_elem.CurrentControlType() }
+                    .map(|id| control_type_name(id))
+                    .unwrap_or_default();
+
+                let seen = type_seen.entry(ct.clone()).or_insert(0);
+                *seen += 1;
+                let same_type_total = type_counts.get(&ct).copied().unwrap_or(1);
+
+                // 为子节点构建带索引的 XPath 前缀
+                let child_xpath = if same_type_total > 1 {
+                    format!("{}/{}[{}]", relative_xpath, ct, seen)
+                } else {
+                    format!("{}/{}", relative_xpath, ct)
+                };
+
+                let mut child_node = build_inspect_node_inner(
+                    child_elem,
+                    walker,
+                    depth + 1,
+                    max_depth,
+                    max_nodes,
+                    total_count,
+                    &child_xpath,
+                    &name,
+                    &class_name,
+                    &automation_id,
+                );
+                child_node.relative_xpath = child_xpath;
+                children.push(child_node);
+            }
+        }
+
+        InspectNode {
+            depth,
+            control_type,
+            name,
+            class_name,
+            automation_id,
+            framework_id,
+            text_value,
+            help_text,
+            item_type,
+            item_status,
+            rect,
+            is_offscreen,
+            relative_xpath: relative_xpath.to_string(),
+            children,
+        }
+    }
+
+    /// 内部递归构建函数（由 build_inspect_node 调用用于子节点）
+    ///
+    /// 与 build_inspect_node 类似，但 XPath 已经由父节点构建好了
+    fn build_inspect_node_inner(
+        element: &IUIAutomationElement,
+        walker: &IUIAutomationTreeWalker,
+        depth: usize,
+        max_depth: usize,
+        max_nodes: usize,
+        total_count: &mut usize,
+        current_xpath: &str,
+        _parent_name: &str,
+        _parent_class: &str,
+        _parent_aid: &str,
+    ) -> InspectNode {
+        *total_count += 1;
+
+        let control_type = unsafe { element.CurrentControlType() }
+            .map(|id| control_type_name(id))
+            .unwrap_or_default();
+        let name = get_bstr(unsafe { element.CurrentName() });
+        let class_name = get_bstr(unsafe { element.CurrentClassName() });
+        let automation_id = get_bstr(unsafe { element.CurrentAutomationId() });
+        let framework_id = get_bstr(unsafe { element.CurrentFrameworkId() });
+        let help_text = get_bstr(unsafe { element.CurrentHelpText() });
+        let item_type = get_bstr(unsafe { element.CurrentItemType() });
+        let item_status = get_bstr(unsafe { element.CurrentItemStatus() });
+        let is_offscreen = unsafe { element.CurrentIsOffscreen() }
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+
+        let rect = match unsafe { element.CurrentBoundingRectangle() } {
+            Ok(r) => Some(crate::api::types::Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            }),
+            Err(_) => None,
+        };
+
+        let text_value = get_value_pattern_text(element);
+
+        // 递归遍历子元素
+        let mut children = Vec::new();
+        if depth < max_depth && *total_count < max_nodes {
+            let child_elements: Vec<IUIAutomationElement> = {
+                let mut kids = Vec::new();
+                let mut child = unsafe { walker.GetFirstChildElement(element).ok() };
+                while let Some(c) = child {
+                    let last = c.clone();
+                    kids.push(c);
+                    child = unsafe { walker.GetNextSiblingElement(&last).ok() };
+                }
+                kids
+            };
+
+            let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for child_elem in &child_elements {
+                let ct = unsafe { child_elem.CurrentControlType() }
+                    .map(|id| control_type_name(id))
+                    .unwrap_or_default();
+                let idx = type_counts.entry(ct.clone()).or_insert(0);
+                *idx += 1;
+            }
+
+            let mut type_seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+            for child_elem in &child_elements {
+                if *total_count >= max_nodes {
+                    break;
+                }
+                let ct = unsafe { child_elem.CurrentControlType() }
+                    .map(|id| control_type_name(id))
+                    .unwrap_or_default();
+
+                let seen = type_seen.entry(ct.clone()).or_insert(0);
+                *seen += 1;
+                let same_type_total = type_counts.get(&ct).copied().unwrap_or(1);
+
+                let child_xpath = if same_type_total > 1 {
+                    format!("{}/{}[{}]", current_xpath, ct, seen)
+                } else {
+                    format!("{}/{}", current_xpath, ct)
+                };
+
+                let mut child_node = build_inspect_node_inner(
+                    child_elem,
+                    walker,
+                    depth + 1,
+                    max_depth,
+                    max_nodes,
+                    total_count,
+                    &child_xpath,
+                    &name,
+                    &class_name,
+                    &automation_id,
+                );
+                child_node.relative_xpath = child_xpath;
+                children.push(child_node);
+            }
+        }
+
+        InspectNode {
+            depth,
+            control_type,
+            name,
+            class_name,
+            automation_id,
+            framework_id,
+            text_value,
+            help_text,
+            item_type,
+            item_status,
+            rect,
+            is_offscreen,
+            relative_xpath: String::new(), // 将由调用者设置
+            children,
+        }
+    }
+
+    /// 通过 ValuePattern 获取元素的文本内容
+    fn get_value_pattern_text(element: &IUIAutomationElement) -> Option<String> {
+        use windows::Win32::UI::Accessibility::{UIA_ValuePatternId, IValueProvider};
+
+        let pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }.ok()?;
+        let value_provider: IValueProvider = unsafe { std::mem::transmute(pattern) };
+        let value = unsafe { value_provider.Value() }.ok()?;
+        let bstr: BSTR = value.into();
+        let s = bstr.to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    /// 构建元素的相对 XPath 路径
+    ///
+    /// 策略：优先使用 AutomationId（最稳定），其次 ClassName，最后 Name
+    fn build_relative_xpath(
+        control_type: &str,
+        name: &str,
+        class_name: &str,
+        automation_id: &str,
+        parent_xpath: &str,
+    ) -> String {
+        let predicate = if !automation_id.is_empty() {
+            format!("[@AutomationId='{}']", automation_id)
+        } else if !class_name.is_empty() {
+            format!("[@ClassName='{}']", class_name)
+        } else if !name.is_empty() {
+            format!("[@Name='{}']", name)
+        } else {
+            String::new()
+        };
+
+        if parent_xpath.is_empty() {
+            format!("/{}{}", control_type, predicate)
+        } else {
+            format!("{}/{}{}", parent_xpath, control_type, predicate)
+        }
+    }
+
+    /// 将 InspectNode 树格式化为缩进文本
+    fn format_inspect_tree(node: &InspectNode, indent: usize) -> String {
+        let mut lines = Vec::new();
+        format_inspect_node_recursive(node, indent, &mut lines);
+        lines.join("\n")
+    }
+
+    fn format_inspect_node_recursive(node: &InspectNode, indent: usize, lines: &mut Vec<String>) {
+        // 判断节点是否有可识别信息：仅 name、text_value、help_text，且必须是非空有效字符串
+        let has_identifiable_info = !node.name.is_empty()
+            || node.text_value.as_ref().map_or(false, |s| !s.is_empty())
+            || !node.help_text.is_empty();
+
+        // 仅当有可识别信息时才输出该节点（否则只递归处理子节点）
+        if has_identifiable_info {
+            let prefix = "  ".repeat(indent);
+
+            let mut parts = vec![format!("{}{}", prefix, node.control_type)];
+            if !node.name.is_empty() {
+                parts.push(format!("name=\"{}\"", node.name));
+            }
+            if !node.class_name.is_empty() {
+                parts.push(format!("class=\"{}\"", node.class_name));
+            }
+            if !node.automation_id.is_empty() {
+                parts.push(format!("id=\"{}\"", node.automation_id));
+            }
+            if let Some(ref text) = node.text_value {
+                parts.push(format!("text=\"{}\"", text));
+            }
+            if !node.help_text.is_empty() {
+                parts.push(format!("help=\"{}\"", node.help_text));
+            }
+            if !node.item_type.is_empty() {
+                parts.push(format!("itemType=\"{}\"", node.item_type));
+            }
+            if !node.item_status.is_empty() {
+                parts.push(format!("itemStatus=\"{}\"", node.item_status));
+            }
+            if let Some(ref rect) = node.rect {
+                parts.push(format!("rect=({},{},{},{})", rect.x, rect.y, rect.width, rect.height));
+            }
+            if node.is_offscreen {
+                parts.push("[offscreen]".to_string());
+            }
+
+            lines.push(parts.join(" "));
+
+            for child in &node.children {
+                format_inspect_node_recursive(child, indent + 1, lines);
+            }
+        } else {
+            // 无可识别信息的节点不显示，但其子节点继承当前缩进层级
+            for child in &node.children {
+                format_inspect_node_recursive(child, indent, lines);
+            }
+        }
+    }
+
+    /// 将嵌套的 InspectNode 树扁平化为 DFS 顺序的一维数组
+    /// 每个节点的 children 字段置空（扁平列表不需要嵌套）
+    fn flatten_inspect_tree(root: &InspectNode) -> Vec<InspectNode> {
+        let mut result = Vec::new();
+        flatten_inspect_node_recursive(root, &mut result);
+        result
+    }
+
+    fn flatten_inspect_node_recursive(node: &InspectNode, result: &mut Vec<InspectNode>) {
+        let has_identifiable_info = !node.name.is_empty()
+            || node.text_value.as_ref().map_or(false, |s| !s.is_empty())
+            || !node.help_text.is_empty();
+
+        if has_identifiable_info {
+            let mut flat = node.clone();
+            flat.children = vec![];
+            result.push(flat);
+        }
+        for child in &node.children {
+            flatten_inspect_node_recursive(child, result);
+        }
+    }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

@@ -813,6 +813,188 @@ pub struct ElementFlashResponse {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// 元素 Inspect API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inspect 请求参数
+#[derive(Debug, Clone, Deserialize)]
+pub struct InspectRequest {
+    /// 窗口选择器 XPath
+    pub window: String,
+    /// 目标元素 XPath（inspect 此元素下的所有子元素）
+    pub element: String,
+    /// 最大遍历深度，默认 10
+    #[serde(rename = "maxDepth", default = "default_inspect_max_depth")]
+    pub max_depth: usize,
+    /// 最大节点数，默认 500
+    #[serde(rename = "maxNodes", default = "default_inspect_max_nodes")]
+    pub max_nodes: usize,
+    /// 返回格式：'json'（默认）、'txt' 或 'text'
+    #[serde(default = "default_inspect_format")]
+    pub format: String,
+}
+
+fn default_inspect_max_depth() -> usize { 10 }
+fn default_inspect_max_nodes() -> usize { 500 }
+fn default_inspect_format() -> String { "json".to_string() }
+
+/// Inspect 单个节点信息（API 响应格式）
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectNodeInfo {
+    /// 元素层级深度（根元素为 0）
+    pub depth: usize,
+    /// 控件类型，如 "Button"、"Text"、"Edit" 等
+    #[serde(rename = "controlType")]
+    pub control_type: String,
+    /// 控件的 Name 属性
+    pub name: String,
+    /// 控件的 ClassName 属性
+    #[serde(rename = "className")]
+    pub class_name: String,
+    /// 控件的 AutomationId 属性
+    #[serde(rename = "automationId")]
+    pub automation_id: String,
+    /// 控件的 FrameworkId 属性
+    #[serde(rename = "frameworkId")]
+    pub framework_id: String,
+    /// 控件的文本内容（通过 ValuePattern 获取）
+    #[serde(rename = "textValue", skip_serializing_if = "Option::is_none")]
+    pub text_value: Option<String>,
+    /// 控件的 HelpText 属性（辅助说明文字）
+    #[serde(rename = "helpText", skip_serializing_if = "String::is_empty")]
+    pub help_text: String,
+    /// 控件的 ItemType 属性
+    #[serde(rename = "itemType", skip_serializing_if = "String::is_empty")]
+    pub item_type: String,
+    /// 控件的 ItemStatus 属性
+    #[serde(rename = "itemStatus", skip_serializing_if = "String::is_empty")]
+    pub item_status: String,
+    /// 控件的区域位置
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<Rect>,
+    /// 是否在屏幕外
+    #[serde(rename = "isOffscreen")]
+    pub is_offscreen: bool,
+    /// 选中该控件相对于根元素的 XPath 表达式
+    pub xpath: String,
+    /// 子节点列表
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<InspectNodeInfo>,
+}
+
+/// Inspect 单个节点信息（扁平列表格式，无 children）
+#[derive(Debug, Clone, Serialize)]
+pub struct FlatInspectNodeInfo {
+    /// 元素层级深度（根元素为 0）
+    pub depth: usize,
+    /// 控件类型，如 "Button"、"Text"、"Edit" 等
+    #[serde(rename = "controlType")]
+    pub control_type: String,
+    /// 控件的 Name 属性
+    pub name: String,
+    /// 控件的 ClassName 属性
+    #[serde(rename = "className")]
+    pub class_name: String,
+    /// 控件的 AutomationId 属性
+    #[serde(rename = "automationId")]
+    pub automation_id: String,
+    /// 控件的 FrameworkId 属性
+    #[serde(rename = "frameworkId")]
+    pub framework_id: String,
+    /// 控件的文本内容（通过 ValuePattern 获取）
+    #[serde(rename = "textValue", skip_serializing_if = "Option::is_none")]
+    pub text_value: Option<String>,
+    /// 控件的 HelpText 属性（辅助说明文字）
+    #[serde(rename = "helpText", skip_serializing_if = "String::is_empty")]
+    pub help_text: String,
+    /// 控件的 ItemType 属性
+    #[serde(rename = "itemType", skip_serializing_if = "String::is_empty")]
+    pub item_type: String,
+    /// 控件的 ItemStatus 属性
+    #[serde(rename = "itemStatus", skip_serializing_if = "String::is_empty")]
+    pub item_status: String,
+    /// 控件的区域位置
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rect: Option<Rect>,
+    /// 是否在屏幕外
+    #[serde(rename = "isOffscreen")]
+    pub is_offscreen: bool,
+    /// 选中该控件相对于根元素的 XPath 表达式
+    pub xpath: String,
+}
+
+/// Inspect 响应
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectResponse {
+    /// 是否成功
+    pub success: bool,
+    /// 根元素 XPath
+    #[serde(rename = "rootXpath")]
+    pub root_xpath: String,
+    /// 结构化节点树（format='json' 时有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<InspectNodeInfo>,
+    /// 扁平化节点列表（DFS 顺序，方便遍历和过滤）
+    #[serde(rename = "flatNodes")]
+    pub flat_nodes: Vec<FlatInspectNodeInfo>,
+    /// 过滤后的节点列表（当请求中包含 filter 时有值）
+    #[serde(rename = "filteredNodes", skip_serializing_if = "Vec::is_empty")]
+    pub filtered_nodes: Vec<FlatInspectNodeInfo>,
+    /// 格式化文本（format='txt'/'text' 时有值）
+    #[serde(rename = "text", skip_serializing_if = "Option::is_none")]
+    pub text_output: Option<String>,
+    /// 子元素总数
+    #[serde(rename = "totalChildren")]
+    pub total_children: usize,
+    /// 错误信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 将 core::uia::InspectNode 转换为 API 层的 InspectNodeInfo
+impl From<crate::core::uia::InspectNode> for InspectNodeInfo {
+    fn from(node: crate::core::uia::InspectNode) -> Self {
+        InspectNodeInfo {
+            depth: node.depth,
+            control_type: node.control_type,
+            name: node.name,
+            class_name: node.class_name,
+            automation_id: node.automation_id,
+            framework_id: node.framework_id,
+            text_value: node.text_value,
+            help_text: node.help_text,
+            item_type: node.item_type,
+            item_status: node.item_status,
+            rect: node.rect,
+            is_offscreen: node.is_offscreen,
+            xpath: node.relative_xpath,
+            children: node.children.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// 将 core::uia::InspectNode 转换为 API 层的 FlatInspectNodeInfo（扁平格式，无 children）
+impl From<crate::core::uia::InspectNode> for FlatInspectNodeInfo {
+    fn from(node: crate::core::uia::InspectNode) -> Self {
+        FlatInspectNodeInfo {
+            depth: node.depth,
+            control_type: node.control_type,
+            name: node.name,
+            class_name: node.class_name,
+            automation_id: node.automation_id,
+            framework_id: node.framework_id,
+            text_value: node.text_value,
+            help_text: node.help_text,
+            item_type: node.item_type,
+            item_status: node.item_status,
+            rect: node.rect,
+            is_offscreen: node.is_offscreen,
+            xpath: node.relative_xpath,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════════════════════════════════════
 

@@ -115,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element/visibility", web::post().to(element::get_element_visibility))
             // 元素高亮闪烁
             .route("/api/element/flash", web::post().to(element::flash_element))
+            // 元素 Inspect
+            .route("/api/element/inspect", web::post().to(element::inspect_element))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

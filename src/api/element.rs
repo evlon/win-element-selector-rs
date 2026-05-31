@@ -6,7 +6,7 @@ use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect};
+use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -339,6 +339,71 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
             HttpResponse::InternalServerError().json(ElementFlashResponse {
                 success: false,
                 element_rect: None,
+                error: Some(format!("线程错误: {}", e)),
+            })
+        }
+    }
+}
+
+/// POST /api/element/inspect
+/// 遍历指定元素下的所有子元素，提取层级/控件类型/name/Text/rect/相对xpath
+pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder {
+    let request = body.into_inner();
+
+    info!(
+        "API: /api/element/inspect window='{}' element='{}' max_depth={} max_nodes={} format={}",
+        request.window, request.element, request.max_depth, request.max_nodes, request.format
+    );
+
+    let window = request.window.clone();
+    let element = request.element.clone();
+    let max_depth = request.max_depth;
+    let max_nodes = request.max_nodes;
+    let format = request.format.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_inspect(window, element, max_depth, max_nodes, format)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(inspect_result)) => {
+            let api_nodes: Option<InspectNodeInfo> = inspect_result.nodes.map(Into::into);
+            let flat_nodes: Vec<FlatInspectNodeInfo> = inspect_result.flat_nodes.into_iter().map(Into::into).collect();
+            HttpResponse::Ok().json(InspectResponse {
+                success: inspect_result.success,
+                root_xpath: inspect_result.root_xpath,
+                nodes: api_nodes,
+                flat_nodes,
+                filtered_nodes: vec![],
+                text_output: inspect_result.text_output,
+                total_children: inspect_result.total_children,
+                error: inspect_result.error,
+            })
+        }
+        Ok(Err(e)) => {
+            warn!("Inspect element COM worker error: {}", e);
+            HttpResponse::Ok().json(InspectResponse {
+                success: false,
+                root_xpath: request.element.clone(),
+                nodes: None,
+                flat_nodes: vec![],
+                filtered_nodes: vec![],
+                text_output: None,
+                total_children: 0,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+        Err(e) => {
+            warn!("Inspect element spawn error: {}", e);
+            HttpResponse::InternalServerError().json(InspectResponse {
+                success: false,
+                root_xpath: request.element.clone(),
+                nodes: None,
+                flat_nodes: vec![],
+                filtered_nodes: vec![],
+                text_output: None,
+                total_children: 0,
                 error: Some(format!("线程错误: {}", e)),
             })
         }

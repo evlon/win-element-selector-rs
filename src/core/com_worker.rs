@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
+use crate::core::uia::InspectResult;
 
 /// 计算两个 Rect 的交集，无交集返回 None
 fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> Option<crate::api::types::Rect> {
@@ -117,6 +118,16 @@ pub enum UiaRequest {
         x: i32,
         y: i32,
         response: Sender<anyhow::Result<Option<crate::core::model::ElementRect>>>,
+    },
+
+    /// Inspect: 遍历元素子树提取调试信息
+    Inspect {
+        window_selector: String,
+        element_xpath: String,
+        max_depth: usize,
+        max_nodes: usize,
+        format: String,
+        response: Sender<anyhow::Result<InspectResult>>,
     },
 
     /// 关闭工作线程
@@ -309,6 +320,13 @@ impl ComWorker {
                 log::debug!("[PERF] get_element_rect_at_point started for ({}, {})", x, y);
                 let result = Self::do_get_element_rect_at_point(automation, x, y);
                 log::debug!("[PERF] get_element_rect_at_point completed in {}ms", start.elapsed().as_millis());
+                let _ = response.send(result);
+            }
+            UiaRequest::Inspect { window_selector, element_xpath, max_depth, max_nodes, format, response } => {
+                let start = std::time::Instant::now();
+                log::info!("[PERF] inspect started for {} / {}", window_selector, element_xpath);
+                let result = Self::do_inspect(automation, &window_selector, &element_xpath, max_depth, max_nodes, &format);
+                log::info!("[PERF] inspect completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -751,6 +769,24 @@ impl ComWorker {
         }
     }
 
+    /// 执行 Inspect 操作
+    fn do_inspect(
+        _automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+        window_selector: &str,
+        element_xpath: &str,
+        max_depth: usize,
+        max_nodes: usize,
+        format: &str,
+    ) -> anyhow::Result<InspectResult> {
+        Ok(crate::core::uia::inspect_subtree(
+            window_selector,
+            element_xpath,
+            max_depth,
+            max_nodes,
+            format,
+        ))
+    }
+
     /// 发送捕获请求
     pub fn capture_at(&self, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         let (response_sender, response_receiver) = mpsc::channel();
@@ -1001,6 +1037,36 @@ impl ComWorker {
         }
     }
 
+    /// Inspect: 遍历元素子树提取调试信息
+    pub fn inspect(
+        &self,
+        window_selector: String,
+        element_xpath: String,
+        max_depth: usize,
+        max_nodes: usize,
+        format: String,
+    ) -> anyhow::Result<InspectResult> {
+        let (response_sender, response_receiver) = mpsc::channel();
+
+        if let Some(ref sender) = self.sender {
+            sender.send(UiaRequest::Inspect {
+                window_selector,
+                element_xpath,
+                max_depth,
+                max_nodes,
+                format,
+                response: response_sender,
+            })?;
+
+            // Inspect 大子树可能很耗时，给 60 秒超时
+            response_receiver
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .map_err(|e| anyhow::anyhow!("COM worker inspect timeout after 60s: {:?}", e))?
+        } else {
+            Err(anyhow::anyhow!("COM worker not initialized"))
+        }
+    }
+
     /// 优雅关闭工作线程
     pub fn shutdown(&mut self) {
         if let Some(ref sender) = self.sender {
@@ -1174,6 +1240,22 @@ pub fn global_get_element_rect_at_point(x: i32, y: i32) -> anyhow::Result<Option
     let worker_opt = get_com_worker().lock().unwrap();
     if let Some(ref worker) = *worker_opt {
         worker.get_element_rect_at_point(x, y)
+    } else {
+        Err(anyhow::anyhow!("Global COM worker not initialized"))
+    }
+}
+
+/// 使用全局 COM 工作线程执行 Inspect 操作
+pub fn global_inspect(
+    window_selector: String,
+    element_xpath: String,
+    max_depth: usize,
+    max_nodes: usize,
+    format: String,
+) -> anyhow::Result<InspectResult> {
+    let worker_opt = get_com_worker().lock().unwrap();
+    if let Some(ref worker) = *worker_opt {
+        worker.inspect(window_selector, element_xpath, max_depth, max_nodes, format)
     } else {
         Err(anyhow::anyhow!("Global COM worker not initialized"))
     }
