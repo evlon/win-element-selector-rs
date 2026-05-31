@@ -27,7 +27,7 @@ pub mod windows_impl {
             UI::{
                 Accessibility::{
                     CUIAutomation, IUIAutomation, IUIAutomationElement,
-                    IUIAutomationTreeWalker, TreeScope_Ancestors,
+                    IUIAutomationTreeWalker,
                     TreeScope_Subtree,
                 },
                 WindowsAndMessaging::{
@@ -524,54 +524,25 @@ pub mod windows_impl {
         let target_ct = unsafe { target.CurrentControlType().map(control_type_name).unwrap_or_default() };
         debug!("[Normal] ElementFromPoint: type='{}' name='{}'", target_ct, target_name);
 
-        // 2. Get full ancestor chain using FindAll(TreeScope_Ancestors)
-        let condition = unsafe {
-            auto.CreateTrueCondition()
-                .map_err(|e| anyhow::anyhow!("CreateTrueCondition: {e}"))?
-        };
-        let ancestors = unsafe {
-            target.FindAll(TreeScope_Ancestors, &condition)
-                .map_err(|e| anyhow::anyhow!("FindAll(Ancestors): {e}"))?
-        };
+        // 2. Build ancestor chain using RawViewWalker
+        // Always use RawViewWalker (not FindAll(Ancestors)) because FindAll uses
+        // Control View which filters out intermediate elements (e.g. Qt Group nodes),
+        // causing hierarchy gaps (depth 7 jumping to depth 13).
+        let walker = unsafe { auto.RawViewWalker() }
+            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
+        let desktop = unsafe { auto.GetRootElement()? };
 
-        let ancestor_count = unsafe { ancestors.Length()? };
-        debug!("[Normal] FindAll(Ancestors) returned {} elements", ancestor_count);
-
-        let mut chain: Vec<IUIAutomationElement> = Vec::with_capacity(ancestor_count as usize + 1);
-        chain.push(target.clone());
-        for i in 0..ancestor_count {
-            if let Ok(elem) = unsafe { ancestors.GetElement(i) } {
-                chain.push(elem);
+        let mut chain: Vec<IUIAutomationElement> = vec![target.clone()];
+        let mut current = unsafe { walker.GetParentElement(&target).ok() };
+        while let Some(elem) = current {
+            let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
+            chain.push(elem.clone());
+            if is_desktop {
+                break;
             }
+            current = unsafe { walker.GetParentElement(&elem).ok() };
         }
-
-        // Chain is: [target, parent, grandparent, ..., root]
         chain.reverse(); // now: root → target
-
-        // Fallback: FindAll(Ancestors) uses the control view, which may return 0
-        // for elements inside WebView/Chrome (not visible in control view).
-        // Fall back to RawViewWalker to capture all intermediate layers, same as
-        // enhanced capture does.
-        if ancestor_count == 0 {
-            debug!("[Normal] FindAll(Ancestors) returned 0, falling back to RawViewWalker");
-            chain.clear();
-            let walker = unsafe { auto.RawViewWalker()? };
-            let desktop = unsafe { auto.GetRootElement()? };
-
-            let mut elements: Vec<IUIAutomationElement> = vec![target.clone()];
-            let mut current = unsafe { walker.GetParentElement(&target).ok() };
-            while let Some(elem) = current {
-                let is_desktop = unsafe { auto.CompareElements(&elem, &desktop).unwrap_or(windows::core::BOOL(0)).as_bool() };
-                elements.push(elem.clone());
-                if is_desktop {
-                    break;
-                }
-                current = unsafe { walker.GetParentElement(&elem).ok() };
-            }
-            elements.reverse();
-            chain = elements;
-            debug!("[Normal] walker chain length = {}", chain.len());
-        }
 
         // 3. Build hierarchy (root → target order)
         let window_index = 1;
@@ -2504,7 +2475,8 @@ pub mod windows_impl {
                         idx + 1, child_pid, child_class, child_name);
                     
                     // Try to inspect the window's children structure
-                    if let Ok(walker) = unsafe { auto.ControlViewWalker() } {
+                    if let Ok(walker) = unsafe { auto.RawViewWalker() }
+                        .or_else(|_| unsafe { auto.ControlViewWalker() }) {
                         if let Some(first_child) = unsafe { walker.GetFirstChildElement(child_win).ok() } {
                             let child_name_str = get_bstr(unsafe { first_child.CurrentName() });
                             let child_class_inner = get_bstr(unsafe { first_child.CurrentClassName() });
