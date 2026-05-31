@@ -84,6 +84,8 @@ pub struct PersistedCapture {
     pub xpath_source_kind:      String,  // "Auto", "Optimized", "Manual"
     /// 优化摘要（如果有）
     pub optimization_summary:   Option<OptimizationSummaryPersisted>,
+    /// 结果序号（选择第N个匹配元素）
+    pub result_index:           Option<String>,
 }
 
 /// 优化摘要持久化格式

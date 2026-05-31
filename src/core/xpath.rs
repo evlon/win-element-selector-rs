@@ -152,8 +152,18 @@ pub fn lint(xpath: &str) -> Option<String> {
             return Some("窗口选择器必须以 Window/Pane/Document 等类型开头".into());
         }
         
-        // Validate element XPath (should start with /)
-        if !element_part.starts_with('/') {
+        // Validate element XPath (should start with / or ( for indexed expression)
+        let inner_xpath = if element_part.starts_with('(') {
+            // Indexed form: (//xpath)[N] — validate the inner part
+            if let Some(end) = element_part.find(')') {
+                &element_part[1..end]
+            } else {
+                return Some("索引格式错误：缺少右括号 ')'".into());
+            }
+        } else {
+            element_part
+        };
+        if !inner_xpath.starts_with('/') {
             return Some("元素 XPath 必须以 / 开头".into());
         }
         

@@ -111,7 +111,8 @@ impl PropertyFilter {
     /// Create filter with custom operator (e.g., StartsWith for dynamic class names)
     pub fn new_with_operator(name: impl Into<String>, value: impl Into<String>, operator: Operator) -> Self {
         let value = value.into();
-        let enabled = !value.is_empty();
+        // NotEquals with empty value means "attribute is not empty" — meaningful, keep enabled
+        let enabled = !value.is_empty() || matches!(operator, Operator::NotEquals | Operator::Equals);
         Self { name: name.into(), operator, value, enabled }
     }
 
@@ -122,8 +123,16 @@ impl PropertyFilter {
 
     /// Returns the XPath predicate string, or empty string if disabled/empty.
     pub fn predicate(&self) -> Option<String> {
-        if !self.enabled || self.value.is_empty() {
+        if !self.enabled {
             return None;
+        }
+        // Equals/NotEquals with empty value: compare against empty string
+        if self.value.is_empty() {
+            return match self.operator {
+                Operator::Equals    => Some(format!("@{}=''", self.name)),
+                Operator::NotEquals => Some(format!("@{}!=''", self.name)),
+                _ => None, // Contains/StartsWith etc. with empty value are meaningless
+            };
         }
         Some(self.operator.to_predicate(&self.name, &self.value))
     }
@@ -427,7 +436,7 @@ impl HierarchyNode {
 
     /// Short label shown in the hierarchy tree panel.
     pub fn tree_label(&self) -> String {
-        let mut parts = vec![format!("{}[d{}]", self.control_type, self.depth_from_window)];
+        let mut parts = vec![self.control_type.clone()];
         if !self.automation_id.is_empty() {
             parts.push(format!("id=\"{}\"", truncate(&self.automation_id, 22)));
         } else if !self.name.is_empty() {
