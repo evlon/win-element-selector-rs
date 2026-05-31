@@ -82,7 +82,7 @@ mod windows_impl {
                 WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
                 WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
                 SetLayeredWindowAttributes, LWA_COLORKEY, GetClientRect,
-                PM_REMOVE, WM_QUIT,
+                PM_REMOVE, WM_QUIT, WS_EX_TOOLWINDOW,
             },
             System::LibraryLoader::GetModuleHandleW,
         },
@@ -294,7 +294,7 @@ mod windows_impl {
             let _ = RegisterClassExW(&wc);
 
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
@@ -378,7 +378,7 @@ mod windows_impl {
             let _ = RegisterClassExW(&wc);
 
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
@@ -493,7 +493,7 @@ mod point_impl {
                 WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
                 WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
                 SetLayeredWindowAttributes, LWA_ALPHA, GetClientRect,
-                PM_REMOVE, WM_QUIT,
+                PM_REMOVE, WM_QUIT, WS_EX_TOOLWINDOW,
             },
             System::LibraryLoader::GetModuleHandleW,
         },
@@ -567,7 +567,7 @@ mod point_impl {
             let _ = RegisterClassExW(&wc);
 
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,

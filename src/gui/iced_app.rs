@@ -2507,6 +2507,7 @@ fn view_properties(state: &State) -> Element<'_, Message> {
     // Node summary
     let dims = format!("{}×{}  @({}, {})", node.rect.width, node.rect.height, node.rect.x, node.rect.y);
     let pid_str = if node.process_id > 0 { Some(format!("pid:{}", node.process_id)) } else { None };
+    let depth_str = format!("depth:{}", node.depth_from_window);
     let mut summary_items: Vec<Element<'_, Message>> = vec![
         text("控件类型").size(11).color(colors.muted).into(),
         text(&node.control_type).size(13).color(colors.target_fg).into(),
@@ -2514,6 +2515,7 @@ fn view_properties(state: &State) -> Element<'_, Message> {
     if node.rect.width > 0 {
         summary_items.push(text(dims.clone()).size(10).color(colors.muted).into());
     }
+    summary_items.push(text(depth_str).size(10).color(colors.muted).into());
     if let Some(pid) = pid_str {
         summary_items.push(text(pid).size(10).color(colors.muted).into());
     }
@@ -2547,6 +2549,21 @@ fn view_properties(state: &State) -> Element<'_, Message> {
         });
 
     let mut filter_rows: Vec<Element<'_, Message>> = vec![header_container.into()];
+
+    // Depth info row (read-only)
+    {
+        let depth_val = format!("{}", node.depth_from_window);
+        let depth_row = row![
+            Space::with_width(Length::Fixed(22.0)),
+            text("Depth").size(12).color(colors.muted).width(Length::Fixed(90.0)),
+            text("—").size(12).color(colors.muted).width(Length::Fixed(76.0)),
+            text(depth_val).size(12).color(colors.mono_fg),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .padding([1, 4]);
+        filter_rows.push(depth_row.into());
+    }
 
     for (f_idx, filter) in node.filters.iter().enumerate() {
         let cb = checkbox("", filter.enabled)

@@ -427,7 +427,7 @@ impl HierarchyNode {
 
     /// Short label shown in the hierarchy tree panel.
     pub fn tree_label(&self) -> String {
-        let mut parts = vec![self.control_type.clone()];
+        let mut parts = vec![format!("{}[d{}]", self.control_type, self.depth_from_window)];
         if !self.automation_id.is_empty() {
             parts.push(format!("id=\"{}\"", truncate(&self.automation_id, 22)));
         } else if !self.name.is_empty() {

@@ -29,6 +29,7 @@ use windows::{
             ShowWindow,
             HWND_TOPMOST, WM_DESTROY, WM_PAINT, WM_CLOSE, WNDCLASSEXW,
             WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW,
             WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
             SetLayeredWindowAttributes, LWA_COLORKEY, GetClientRect,
             SetWindowLongPtrW,
@@ -207,7 +208,7 @@ impl MultiHighlightManager {
 
         unsafe {
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(class_name_wide.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
@@ -236,7 +237,7 @@ impl MultiHighlightManager {
 
         unsafe {
             let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(class_name_wide.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
