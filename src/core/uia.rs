@@ -587,7 +587,8 @@ pub mod windows_impl {
         // 4. Compute sibling index for the target element
         if let Some(last) = hierarchy.last_mut() {
             last.is_target = true;
-            let walker = unsafe { auto.ControlViewWalker().ok() };
+            let walker = unsafe { auto.RawViewWalker().ok() }
+                .or_else(|| unsafe { auto.ControlViewWalker().ok() });
             if let Some(ref w) = walker {
                 last.index = sibling_index(&target, w).unwrap_or(0);
                 if last.index > 0 {
@@ -719,15 +720,11 @@ pub mod windows_impl {
                 elem.GetCurrentPattern(UIA_TogglePatternId)
             } {
                 use windows::Win32::UI::Accessibility::IToggleProvider;
-                let toggle: IToggleProvider = {
-                    if let Err(e) = pattern.cast::<IToggleProvider>() {
-                        log::warn!("TogglePattern cast failed: {:?}", e);
+                if let Ok(toggle) = pattern.cast::<IToggleProvider>() {
+                    if let Ok(state) = unsafe { toggle.ToggleState() } {
+                        // ToggleState_Off = 0, ToggleState_On = 1, ToggleState_Indeterminate = 2
+                        node.is_checked = Some(state.0 == 1);
                     }
-                    pattern.cast().ok()?
-                };
-                if let Ok(state) = unsafe { toggle.ToggleState() } {
-                    // ToggleState_Off = 0, ToggleState_On = 1, ToggleState_Indeterminate = 2
-                    node.is_checked = Some(state.0 == 1);
                 }
             }
         }
@@ -738,14 +735,10 @@ pub mod windows_impl {
                 elem.GetCurrentPattern(UIA_SelectionItemPatternId)
             } {
                 use windows::Win32::UI::Accessibility::ISelectionItemProvider;
-                let sel: ISelectionItemProvider = {
-                    if let Err(e) = pattern.cast::<ISelectionItemProvider>() {
-                        log::warn!("SelectionItemPattern cast failed: {:?}", e);
+                if let Ok(sel) = pattern.cast::<ISelectionItemProvider>() {
+                    if let Ok(selected) = unsafe { sel.IsSelected() } {
+                        node.is_selected = Some(selected.as_bool());
                     }
-                    pattern.cast().ok()?
-                };
-                if let Ok(selected) = unsafe { sel.IsSelected() } {
-                    node.is_selected = Some(selected.as_bool());
                 }
             }
         }
@@ -1226,15 +1219,16 @@ pub mod windows_impl {
             }
         }
 
-        let walker_control = unsafe { auto.ControlViewWalker()? };
+        let walker_raw = unsafe { auto.RawViewWalker() }
+            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
         if let Some(last) = hierarchy.last_mut() {
             last.is_target = true;
-            last.index = sibling_index(&target_elem, &walker_control).unwrap_or(0);
+            last.index = sibling_index(&target_elem, &walker_raw).unwrap_or(0);
             if last.index > 0 {
                 if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
                     f.value = last.index.to_string(); f.enabled = true;
                 }
-                last.sibling_count = count_siblings(&target_elem, &walker_control).unwrap_or(0);
+                last.sibling_count = count_siblings(&target_elem, &walker_raw).unwrap_or(0);
             }
         }
 
@@ -2769,9 +2763,12 @@ pub mod windows_impl {
         // Collect raw tree children of the window, then search deeper if needed
         let mut first_step_matches: Vec<IUIAutomationElement> = Vec::new();
 
-        // BFS: search for first-step matches in the raw tree (up to depth 3 to avoid slowness)
+        // BFS: search for first-step matches in the raw tree
+        // Depth 8 covers most real-world UI hierarchies (e.g., WeChat's Qt tree can be 7+ levels deep).
+        // Previously depth 3 was too shallow, causing elements captured by RawViewWalker to be
+        // unreachable during validation/search.
         let mut queue: std::collections::VecDeque<(IUIAutomationElement, u32)> = std::collections::VecDeque::from(vec![(window.clone(), 0)]);
-        let max_depth = 3u32;
+        let max_depth = 8u32;
 
         while let Some((elem, depth)) = queue.pop_front() {
             let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
