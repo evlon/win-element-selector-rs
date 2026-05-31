@@ -94,6 +94,89 @@ pub mod windows_impl {
         }
     }
 
+    /// 从 IUIAutomationElement 构建 ElementInfo
+    ///
+    /// 统一的元素信息构造函数，供 find_all_elements_detailed 和 find_all_elements_from_root 共用。
+    /// 统一 isOffscreen 处理：rect 始终保留（即使元素标记为 offscreen，坐标仍有效），
+    /// center / center_random 仅在非 offscreen 时提供。
+    fn element_info_from_uia<R: rand::Rng>(
+        elem: &IUIAutomationElement,
+        container_rect: Option<&crate::api::types::Rect>,
+        random_range: f32,
+        rng: &mut R,
+    ) -> Option<crate::api::types::ElementInfo> {
+        use crate::api::types::{ElementInfo, Rect, Point};
+
+        let r = match unsafe { elem.CurrentBoundingRectangle() } {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        let api_rect = Rect {
+            x: r.left,
+            y: r.top,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+        };
+        let center = api_rect.center();
+
+        // 计算 visibleRect
+        let visible_rect = compute_element_visible_rect(&api_rect, container_rect);
+
+        // Calculate random center
+        let half_range_w = api_rect.width as f32 * random_range / 2.0;
+        let half_range_h = api_rect.height as f32 * random_range / 2.0;
+
+        // 防止空范围导致 panic
+        let offset_x = if half_range_w > 0.0 {
+            rng.gen_range(-half_range_w..half_range_w) as i32
+        } else {
+            0
+        };
+        let offset_y = if half_range_h > 0.0 {
+            rng.gen_range(-half_range_h..half_range_h) as i32
+        } else {
+            0
+        };
+        let center_random = Point::new(center.x + offset_x, center.y + offset_y);
+
+        let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
+
+        // rect 始终保留：即使元素标记为 offscreen，坐标仍有效（如副屏负坐标场景）
+        // center / center_random 仅在非 offscreen 时提供，避免误点击不可见元素
+        let (center_opt, cr_opt) = if is_offscreen {
+            (None, None)
+        } else {
+            (Some(center), Some(center_random))
+        };
+
+        Some(ElementInfo {
+            rect: Some(api_rect),
+            visible_rect,
+            center: center_opt,
+            center_random: cr_opt,
+            control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
+            name: get_bstr(unsafe { elem.CurrentName() }),
+            automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
+            class_name: get_bstr(unsafe { elem.CurrentClassName() }),
+            framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
+            help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
+            localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
+            is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+            is_offscreen,
+            is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
+            accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
+            access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
+            item_type: get_bstr(unsafe { elem.CurrentItemType() }),
+            item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
+            process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+            is_checkable: None,
+            is_checked: None,
+            is_clickable: None,
+            is_scrollable: None,
+            is_selected: None,
+        })
+    }
+
     /// Build a dedup key from an element's RuntimeId.
     fn runtime_id_key(elem: &IUIAutomationElement) -> Option<Vec<i32>> {
         unsafe {
@@ -2822,9 +2905,6 @@ pub mod windows_impl {
         element_xpath: &str,
         random_range: f32,
     ) -> Vec<crate::api::types::ElementInfo> {
-        use crate::api::types::{ElementInfo, Rect, Point};
-        use rand::Rng;
-        
         let auto = match get_automation() {
             Ok(a) => a,
             Err(_) => return vec![],
@@ -2856,76 +2936,8 @@ pub mod windows_impl {
             
             if !elements.is_empty() {
                 let mut rng = rand::thread_rng();
-                
                 return elements.iter().filter_map(|elem| {
-                    let r = match unsafe { elem.CurrentBoundingRectangle() } {
-                        Ok(r) => r,
-                        Err(_) => return None,
-                    };
-                    let api_rect = Rect {
-                        x: r.left,
-                        y: r.top,
-                        width: r.right - r.left,
-                        height: r.bottom - r.top,
-                    };
-                    let center = api_rect.center();
-                    
-                    // 计算 visibleRect
-                    let visible_rect = compute_element_visible_rect(&api_rect, window_rect.as_ref());
-                    
-                    // Calculate random center
-                    let half_range_w = api_rect.width as f32 * random_range / 2.0;
-                    let half_range_h = api_rect.height as f32 * random_range / 2.0;
-                    
-                    // 防止空范围导致 panic
-                    let offset_x = if half_range_w > 0.0 {
-                        rng.gen_range(-half_range_w..half_range_w) as i32
-                    } else {
-                        0
-                    };
-                    let offset_y = if half_range_h > 0.0 {
-                        rng.gen_range(-half_range_h..half_range_h) as i32
-                    } else {
-                        0
-                    };
-                    let center_random = Point::new(center.x + offset_x, center.y + offset_y);
-                    
-                    let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
-
-                    // rect 始终保留：即使元素标记为 offscreen，坐标仍有效（如副屏负坐标场景）
-                    // center / center_random 仅在非 offscreen 时提供，避免误点击不可见元素
-                    let (center_opt, cr_opt) = if is_offscreen {
-                        (None, None)
-                    } else {
-                        (Some(center), Some(center_random))
-                    };
-
-                    Some(ElementInfo {
-                        rect: Some(api_rect),
-                        visible_rect,
-                        center: center_opt,
-                        center_random: cr_opt,
-                        control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                        name: get_bstr(unsafe { elem.CurrentName() }),
-                        automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
-                        class_name: get_bstr(unsafe { elem.CurrentClassName() }),
-                        framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
-                        help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
-                        localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
-                        is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
-                        is_offscreen,
-                        is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
-                        accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
-                        access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
-                        item_type: get_bstr(unsafe { elem.CurrentItemType() }),
-                        item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
-                        process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
-                        is_checkable: None,
-                        is_checked: None,
-                        is_clickable: None,
-                        is_scrollable: None,
-                        is_selected: None,
-                    })
+                    element_info_from_uia(elem, window_rect.as_ref(), random_range, &mut rng)
                 }).collect();
             }
         }
@@ -2940,9 +2952,6 @@ pub mod windows_impl {
         element_xpath: &str,
         random_range: f32,
     ) -> Vec<crate::api::types::ElementInfo> {
-        use crate::api::types::{ElementInfo, Rect, Point};
-        use rand::Rng;
-
         let auto = match get_automation() {
             Ok(a) => a,
             Err(_) => return vec![],
@@ -2986,70 +2995,7 @@ pub mod windows_impl {
 
         let mut rng = rand::thread_rng();
         elements.iter().filter_map(|elem| {
-            let r = match unsafe { elem.CurrentBoundingRectangle() } {
-                Ok(r) => r,
-                Err(_) => return None,
-            };
-            let api_rect = Rect {
-                x: r.left,
-                y: r.top,
-                width: r.right - r.left,
-                height: r.bottom - r.top,
-            };
-            let center = api_rect.center();
-
-            // 计算 visibleRect
-            let visible_rect = compute_element_visible_rect(&api_rect, desktop_rect.as_ref());
-
-            let half_range_w = api_rect.width as f32 * random_range / 2.0;
-            let half_range_h = api_rect.height as f32 * random_range / 2.0;
-
-            let offset_x = if half_range_w > 0.0 {
-                rng.gen_range(-half_range_w..half_range_w) as i32
-            } else {
-                0
-            };
-            let offset_y = if half_range_h > 0.0 {
-                rng.gen_range(-half_range_h..half_range_h) as i32
-            } else {
-                0
-            };
-            let center_random = Point::new(center.x + offset_x, center.y + offset_y);
-
-            let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
-
-            let (rect_opt, center_opt, cr_opt) = if is_offscreen {
-                (None, None, None)
-            } else {
-                (Some(api_rect), Some(center), Some(center_random))
-            };
-
-            Some(ElementInfo {
-                rect: rect_opt,
-                visible_rect,
-                center: center_opt,
-                center_random: cr_opt,
-                control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-                name: get_bstr(unsafe { elem.CurrentName() }),
-                automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
-                class_name: get_bstr(unsafe { elem.CurrentClassName() }),
-                framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
-                help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
-                localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
-                is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
-                is_offscreen,
-                is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
-                accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
-                access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
-                item_type: get_bstr(unsafe { elem.CurrentItemType() }),
-                item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
-                process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
-                is_checkable: None,
-                is_checked: None,
-                is_clickable: None,
-                is_scrollable: None,
-                is_selected: None,
-            })
+            element_info_from_uia(elem, desktop_rect.as_ref(), random_range, &mut rng)
         }).collect()
     }
 
