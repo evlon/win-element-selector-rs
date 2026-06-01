@@ -14,6 +14,7 @@ pub mod similarity;
 pub mod screenshot;
 pub mod commonality;
 pub mod narrator;
+pub mod metrics;
 
 // Re-export commonly used types for convenience
 pub use model::*;

@@ -13,7 +13,7 @@ pub async fn list_windows() -> impl Responder {
     info!("API: /api/window/list");
     
     let windows = tokio::task::spawn_blocking(|| {
-        crate::core::com_worker::global_list_windows()
+        crate::core::com_worker::global_list_windows(crate::core::metrics::next_request_id())
             .unwrap_or_default()
     })
     .await
@@ -51,7 +51,7 @@ pub async fn exists_window(req: web::Json<ExistsWindowRequest>) -> impl Responde
     let window_selector = req.window_selector.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_exists_window(window_selector)
+        crate::core::com_worker::global_exists_window(crate::core::metrics::next_request_id(), window_selector)
     })
     .await;
 
@@ -99,7 +99,7 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     let window_selector = req.window_selector.clone();
     
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_activate_window(window_selector)
+        crate::core::com_worker::global_activate_window(crate::core::metrics::next_request_id(), window_selector)
     })
     .await;
     
@@ -147,7 +147,7 @@ pub async fn focus_element(req: web::Json<FocusElementRequest>) -> impl Responde
     let xpath = req.xpath.clone();
     
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_activate_and_focus_element(window_selector, xpath)
+        crate::core::com_worker::global_activate_and_focus_element(crate::core::metrics::next_request_id(), window_selector, xpath)
     })
     .await;
     

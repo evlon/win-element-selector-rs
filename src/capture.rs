@@ -33,7 +33,7 @@ pub fn capture() -> CaptureResult {
         p
     };
     
-    match crate::core::com_worker::global_capture_at(pt.x, pt.y) {
+    match crate::core::com_worker::global_capture_at(crate::core::metrics::next_request_id(), pt.x, pt.y) {
         Ok(result) => result,
         Err(e) => CaptureResult {
             hierarchy: vec![],
@@ -48,7 +48,7 @@ pub fn capture() -> CaptureResult {
 #[allow(dead_code)]
 pub fn capture_at(x: i32, y: i32) -> CaptureResult {
     // 通过 ComWorker 执行
-    match crate::core::com_worker::global_capture_at(x, y) {
+    match crate::core::com_worker::global_capture_at(crate::core::metrics::next_request_id(), x, y) {
         Ok(result) => result,
         Err(e) => CaptureResult {
             hierarchy: vec![],
@@ -62,7 +62,7 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
 /// Enhanced capture: uses RawViewWalker + RECT hit-test to find the innermost element.
 /// Useful for WebView-based apps where ElementFromPoint returns a wrapper element.
 pub fn capture_enhanced_at(x: i32, y: i32) -> CaptureResult {
-    match crate::core::com_worker::global_capture_enhanced_at(x, y) {
+    match crate::core::com_worker::global_capture_enhanced_at(crate::core::metrics::next_request_id(), x, y) {
         Ok(result) => result,
         Err(e) => CaptureResult {
             hierarchy: vec![],
@@ -81,6 +81,7 @@ pub fn validate_selector_and_xpath_detailed(
 ) -> DetailedValidationResult {
     // 通过 ComWorker 执行
     match crate::core::com_worker::global_validate_xpath(
+        crate::core::metrics::next_request_id(),
         window_selector.to_string(),
         element_xpath.to_string(),
         hierarchy.to_vec(),
@@ -104,6 +105,7 @@ pub fn find_all_elements_detailed(
 ) -> Vec<crate::api::types::ElementInfo> {
     // 通过 ComWorker 执行
     match crate::core::com_worker::global_find_element(
+        crate::core::metrics::next_request_id(),
         window_selector.to_string(),
         element_xpath.to_string(),
         Some(random_range),
@@ -125,6 +127,7 @@ pub fn list_windows() -> Vec<WindowInfo> {
 /// 查找共同元素（基于共同祖先链 XPath）
 pub fn find_common_elements(window_selector: &str, xpath: &str) -> Vec<crate::api::types::ElementInfo> {
     match crate::core::com_worker::global_find_common_elements(
+        crate::core::metrics::next_request_id(),
         window_selector.to_string(),
         xpath.to_string(),
     ) {

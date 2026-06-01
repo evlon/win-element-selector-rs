@@ -8,9 +8,6 @@
 // 3. 工作线程串行处理所有 UIA 操作
 // 4. 统一的错误处理和状态恢复
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
 use crate::core::uia::InspectResult;
+use crate::core::metrics::{next_request_id, selector_hash, xpath_meta};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // COM Worker 超时常量
@@ -34,27 +32,6 @@ const TIMEOUT_SLOW: Duration = Duration::from_secs(60);
 const TIMEOUT_BATCH: Duration = Duration::from_secs(60);
 /// Inspect 大子树遍历（120s）
 const TIMEOUT_INSPECT: Duration = Duration::from_secs(120);
-
-static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn next_request_id() -> u64 {
-    REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-fn selector_hash(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn xpath_meta(xpath: &str) -> String {
-    format!(
-        "xpath_hash={:016x} xpath_len={} descendant={}",
-        selector_hash(xpath),
-        xpath.len(),
-        xpath.starts_with("//") || xpath.contains("//")
-    )
-}
 
 /// 计算两个 Rect 的交集，无交集返回 None
 fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> Option<crate::api::types::Rect> {
@@ -79,6 +56,8 @@ fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> 
 pub enum UiaRequest {
     /// 捕获指定坐标的元素
     CaptureAt {
+        request_id: u64,
+        enqueued_at: Instant,
         x: i32,
         y: i32,
         response: Sender<anyhow::Result<CaptureResult>>,
@@ -86,6 +65,8 @@ pub enum UiaRequest {
 
     /// 增强捕获：RawViewWalker + RECT 命中测试
     CaptureEnhancedAt {
+        request_id: u64,
+        enqueued_at: Instant,
         x: i32,
         y: i32,
         response: Sender<anyhow::Result<CaptureResult>>,
@@ -103,6 +84,8 @@ pub enum UiaRequest {
     
     /// 验证 XPath
     ValidateXPath {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         element_xpath: String,
         hierarchy: Vec<crate::core::model::HierarchyNode>,
@@ -111,6 +94,8 @@ pub enum UiaRequest {
     
     /// 查找相似元素（基于样本集）
     FindSimilarElements {
+        request_id: u64,
+        enqueued_at: Instant,
         samples: Vec<crate::core::model::SimilarElementSample>,
         threshold: f32,
         response: Sender<anyhow::Result<Vec<crate::core::model::CaptureResult>>>,
@@ -118,6 +103,8 @@ pub enum UiaRequest {
 
     /// 查找共同元素（基于共同祖先链 XPath）
     FindCommonElements {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         xpath: String,
         response: Sender<anyhow::Result<Vec<crate::api::types::ElementInfo>>>,
@@ -125,18 +112,24 @@ pub enum UiaRequest {
 
     /// 检查窗口是否存在
     ExistsWindow {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         response: Sender<anyhow::Result<bool>>,
     },
 
     /// 激活窗口
     ActivateWindow {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         response: Sender<anyhow::Result<bool>>,
     },
 
     /// 激活窗口并聚焦元素
     ActivateAndFocusElement {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         xpath: String,
         response: Sender<anyhow::Result<bool>>,
@@ -144,6 +137,8 @@ pub enum UiaRequest {
 
     /// 列出窗口
     ListWindows {
+        request_id: u64,
+        enqueued_at: Instant,
         response: Sender<anyhow::Result<Vec<crate::core::model::WindowInfo>>>,
     },
 
@@ -159,6 +154,8 @@ pub enum UiaRequest {
 
     /// 获取指定坐标处元素的边界矩形（轻量级，仅返回 rect）
     GetElementRectAtPoint {
+        request_id: u64,
+        enqueued_at: Instant,
         x: i32,
         y: i32,
         response: Sender<anyhow::Result<Option<crate::core::model::ElementRect>>>,
@@ -294,18 +291,20 @@ impl ComWorker {
         request: UiaRequest,
     ) {
         match request {
-            UiaRequest::CaptureAt { x, y, response } => {
+            UiaRequest::CaptureAt { request_id, enqueued_at, x, y, response } => {
                 let start = std::time::Instant::now();
-                log::debug!("[PERF] capture_at started for ({}, {})", x, y);
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!("[PERF][COM][{}] capture_at start queue_wait_ms={} pos=({}, {})", request_id, queue_wait_ms, x, y);
                 let result = Self::do_capture(automation, x, y);
-                log::debug!("[PERF] capture_at completed in {}ms", start.elapsed().as_millis());
+                log::debug!("[PERF][COM][{}] capture_at done queue_wait_ms={} exec_ms={}", request_id, queue_wait_ms, start.elapsed().as_millis());
                 let _ = response.send(result);
             }
-            UiaRequest::CaptureEnhancedAt { x, y, response } => {
+            UiaRequest::CaptureEnhancedAt { request_id, enqueued_at, x, y, response } => {
                 let start = std::time::Instant::now();
-                log::info!("[PERF] capture_enhanced_at started for ({}, {})", x, y);
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!("[PERF][COM][{}] capture_enhanced_at start queue_wait_ms={} pos=({}, {})", request_id, queue_wait_ms, x, y);
                 let result = Self::do_capture_enhanced(automation, x, y);
-                log::info!("[PERF] capture_enhanced_at completed in {}ms", start.elapsed().as_millis());
+                log::info!("[PERF][COM][{}] capture_enhanced_at done queue_wait_ms={} exec_ms={}", request_id, queue_wait_ms, start.elapsed().as_millis());
                 let _ = response.send(result);
             }
             UiaRequest::FindElement { request_id, enqueued_at, window_selector, xpath, random_range, response } => {
@@ -330,56 +329,105 @@ impl ComWorker {
                 );
                 let _ = response.send(result);
             }
-            UiaRequest::ValidateXPath { window_selector, element_xpath, hierarchy, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] validate_xpath started");
+            UiaRequest::ValidateXPath { request_id, enqueued_at, window_selector, element_xpath, hierarchy, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] validate_xpath start queue_wait_ms={} window_hash={:016x} {}",
+                    request_id, queue_wait_ms, selector_hash(&window_selector), xpath_meta(&element_xpath)
+                );
                 let result = Self::do_validate(automation, &window_selector, &element_xpath, &hierarchy);
-                log::info!("[PERF] validate_xpath completed in {}ms", start.elapsed().as_millis());
+                log::info!(
+                    "[PERF][COM][{}] validate_xpath done queue_wait_ms={} exec_ms={} error={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis(), result.is_err()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::FindSimilarElements { samples, threshold, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] find_similar_elements started ({} samples)", samples.len());
+            UiaRequest::FindSimilarElements { request_id, enqueued_at, samples, threshold, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] find_similar_elements start queue_wait_ms={} samples={}",
+                    request_id, queue_wait_ms, samples.len()
+                );
                 let result = Self::do_find_similar_elements(automation, samples, threshold);
-                log::info!("[PERF] find_similar_elements completed in {}ms, found {} elements",
-                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                log::info!(
+                    "[PERF][COM][{}] find_similar_elements done queue_wait_ms={} exec_ms={} found={} error={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis(),
+                    result.as_ref().map_or(0, |v| v.len()), result.is_err()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::FindCommonElements { window_selector, xpath, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] find_common_elements started for {}", xpath);
+            UiaRequest::FindCommonElements { request_id, enqueued_at, window_selector, xpath, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] find_common_elements start queue_wait_ms={} window_hash={:016x} {}",
+                    request_id, queue_wait_ms, selector_hash(&window_selector), xpath_meta(&xpath)
+                );
                 let result = Self::do_find_common_elements(automation, &window_selector, &xpath);
-                log::info!("[PERF] find_common_elements completed in {}ms, found {} elements",
-                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                log::info!(
+                    "[PERF][COM][{}] find_common_elements done queue_wait_ms={} exec_ms={} found={} error={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis(),
+                    result.as_ref().map_or(0, |v| v.len()), result.is_err()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::ExistsWindow { window_selector, response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] exists_window started for {}", window_selector);
+            UiaRequest::ExistsWindow { request_id, enqueued_at, window_selector, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!(
+                    "[PERF][COM][{}] exists_window start queue_wait_ms={} window_hash={:016x}",
+                    request_id, queue_wait_ms, selector_hash(&window_selector)
+                );
                 let result = Self::do_exists_window(automation, &window_selector);
-                log::debug!("[PERF] exists_window completed in {}ms", start.elapsed().as_millis());
+                log::debug!(
+                    "[PERF][COM][{}] exists_window done queue_wait_ms={} exec_ms={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::ActivateWindow { window_selector, response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] activate_window started for {}", window_selector);
+            UiaRequest::ActivateWindow { request_id, enqueued_at, window_selector, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!(
+                    "[PERF][COM][{}] activate_window start queue_wait_ms={} window_hash={:016x}",
+                    request_id, queue_wait_ms, selector_hash(&window_selector)
+                );
                 let result = Self::do_activate_window(automation, &window_selector);
-                log::debug!("[PERF] activate_window completed in {}ms", start.elapsed().as_millis());
+                log::debug!(
+                    "[PERF][COM][{}] activate_window done queue_wait_ms={} exec_ms={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::ActivateAndFocusElement { window_selector, xpath, response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] activate_and_focus_element started for {} / {}", window_selector, xpath);
+            UiaRequest::ActivateAndFocusElement { request_id, enqueued_at, window_selector, xpath, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!(
+                    "[PERF][COM][{}] activate_and_focus start queue_wait_ms={} window_hash={:016x} {}",
+                    request_id, queue_wait_ms, selector_hash(&window_selector), xpath_meta(&xpath)
+                );
                 let result = Self::do_activate_and_focus_element(automation, &window_selector, &xpath);
-                log::debug!("[PERF] activate_and_focus_element completed in {}ms", start.elapsed().as_millis());
+                log::debug!(
+                    "[PERF][COM][{}] activate_and_focus done queue_wait_ms={} exec_ms={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::ListWindows { response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] list_windows started");
+            UiaRequest::ListWindows { request_id, enqueued_at, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!(
+                    "[PERF][COM][{}] list_windows start queue_wait_ms={}",
+                    request_id, queue_wait_ms
+                );
                 let result = Self::do_list_windows();
-                log::debug!("[PERF] list_windows completed in {}ms, found {} windows",
-                    start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
+                log::debug!(
+                    "[PERF][COM][{}] list_windows done queue_wait_ms={} exec_ms={} found={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis(),
+                    result.as_ref().map_or(0, |v| v.len())
+                );
                 let _ = response.send(result);
             }
             UiaRequest::GetElementVisibility { request_id, enqueued_at, window_selector, element_xpath, container_xpath, response } => {
@@ -403,11 +451,18 @@ impl ComWorker {
                 );
                 let _ = response.send(result);
             }
-            UiaRequest::GetElementRectAtPoint { x, y, response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] get_element_rect_at_point started for ({}, {})", x, y);
+            UiaRequest::GetElementRectAtPoint { request_id, enqueued_at, x, y, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::debug!(
+                    "[PERF][COM][{}] get_element_rect_at_point start queue_wait_ms={} pos=({}, {})",
+                    request_id, queue_wait_ms, x, y
+                );
                 let result = Self::do_get_element_rect_at_point(automation, x, y);
-                log::debug!("[PERF] get_element_rect_at_point completed in {}ms", start.elapsed().as_millis());
+                log::debug!(
+                    "[PERF][COM][{}] get_element_rect_at_point done queue_wait_ms={} exec_ms={}",
+                    request_id, queue_wait_ms, start.elapsed().as_millis()
+                );
                 let _ = response.send(result);
             }
             UiaRequest::Inspect { request_id, enqueued_at, window_selector, element_xpath, max_depth, max_nodes, format, response } => {
@@ -930,6 +985,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::CaptureAt {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 x, y, response: response_sender,
             })?;
             response_receiver
@@ -946,6 +1003,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::CaptureEnhancedAt {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 x, y, response: response_sender,
             })?;
             response_receiver
@@ -994,6 +1053,8 @@ impl ComWorker {
         
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::ValidateXPath {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 element_xpath,
                 hierarchy,
@@ -1019,6 +1080,8 @@ impl ComWorker {
         
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::FindSimilarElements {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 samples,
                 threshold,
                 response: response_sender,
@@ -1043,6 +1106,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::FindCommonElements {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 xpath,
                 response: response_sender,
@@ -1062,6 +1127,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::ExistsWindow {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 response: response_sender,
             })?;
@@ -1080,6 +1147,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::ActivateWindow {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 response: response_sender,
             })?;
@@ -1098,6 +1167,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::ActivateAndFocusElement {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 xpath,
                 response: response_sender,
@@ -1117,6 +1188,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::ListWindows {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 response: response_sender,
             })?;
 
@@ -1165,6 +1238,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::GetElementRectAtPoint {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 x, y, response: response_sender,
             })?;
 
@@ -1343,10 +1418,10 @@ pub fn init_global_com_worker() -> anyhow::Result<()> {
 
 /// 使用全局 COM 工作线程执行捕获
 /// 关键：Mutex 仅在获取 sender 时短暂持有，recv_timeout 期间不持有
-pub fn global_capture_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
+pub fn global_capture_at(request_id: u64, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::CaptureAt { x, y, response: response_sender })?;
+    sender.send(UiaRequest::CaptureAt { request_id, enqueued_at: Instant::now(), x, y, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1356,10 +1431,10 @@ pub fn global_capture_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
 }
 
 /// 使用全局 COM 工作线程执行增强捕获（RawViewWalker + RECT 命中测试）
-pub fn global_capture_enhanced_at(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
+pub fn global_capture_enhanced_at(request_id: u64, x: i32, y: i32) -> anyhow::Result<CaptureResult> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::CaptureEnhancedAt { x, y, response: response_sender })?;
+    sender.send(UiaRequest::CaptureEnhancedAt { request_id, enqueued_at: Instant::now(), x, y, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_BATCH)
         .map_err(|e| {
@@ -1370,6 +1445,7 @@ pub fn global_capture_enhanced_at(x: i32, y: i32) -> anyhow::Result<CaptureResul
 
 /// 使用全局 COM 工作线程查找元素
 pub fn global_find_element(
+    request_id: u64,
     window_selector: String,
     xpath: String,
     random_range: Option<f32>,
@@ -1377,7 +1453,7 @@ pub fn global_find_element(
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
     sender.send(UiaRequest::FindElement {
-        request_id: next_request_id(),
+        request_id,
         enqueued_at: Instant::now(),
         window_selector,
         xpath,
@@ -1394,13 +1470,14 @@ pub fn global_find_element(
 
 /// 使用全局 COM 工作线程验证 XPath
 pub fn global_validate_xpath(
+    request_id: u64,
     window_selector: String,
     element_xpath: String,
     hierarchy: Vec<crate::core::model::HierarchyNode>,
 ) -> anyhow::Result<DetailedValidationResult> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::ValidateXPath { window_selector, element_xpath, hierarchy, response: response_sender })?;
+    sender.send(UiaRequest::ValidateXPath { request_id, enqueued_at: Instant::now(), window_selector, element_xpath, hierarchy, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_SLOW)
         .map_err(|e| {
@@ -1411,12 +1488,13 @@ pub fn global_validate_xpath(
 
 /// 使用全局 COM 工作线程查找相似元素
 pub fn global_find_similar_elements(
+    request_id: u64,
     samples: Vec<crate::core::model::SimilarElementSample>,
     threshold: f32,
 ) -> anyhow::Result<Vec<crate::core::model::CaptureResult>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::FindSimilarElements { samples, threshold, response: response_sender })?;
+    sender.send(UiaRequest::FindSimilarElements { request_id, enqueued_at: Instant::now(), samples, threshold, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_BATCH)
         .map_err(|e| {
@@ -1427,12 +1505,13 @@ pub fn global_find_similar_elements(
 
 /// 使用全局 COM 工作线程查找共同元素
 pub fn global_find_common_elements(
+    request_id: u64,
     window_selector: String,
     xpath: String,
 ) -> anyhow::Result<Vec<crate::api::types::ElementInfo>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::FindCommonElements { window_selector, xpath, response: response_sender })?;
+    sender.send(UiaRequest::FindCommonElements { request_id, enqueued_at: Instant::now(), window_selector, xpath, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_SLOW)
         .map_err(|e| {
@@ -1442,10 +1521,10 @@ pub fn global_find_common_elements(
 }
 
 /// 使用全局 COM 工作线程检查窗口是否存在
-pub fn global_exists_window(window_selector: String) -> anyhow::Result<bool> {
+pub fn global_exists_window(request_id: u64, window_selector: String) -> anyhow::Result<bool> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::ExistsWindow { window_selector, response: response_sender })?;
+    sender.send(UiaRequest::ExistsWindow { request_id, enqueued_at: Instant::now(), window_selector, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1455,10 +1534,10 @@ pub fn global_exists_window(window_selector: String) -> anyhow::Result<bool> {
 }
 
 /// 使用全局 COM 工作线程激活窗口
-pub fn global_activate_window(window_selector: String) -> anyhow::Result<bool> {
+pub fn global_activate_window(request_id: u64, window_selector: String) -> anyhow::Result<bool> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::ActivateWindow { window_selector, response: response_sender })?;
+    sender.send(UiaRequest::ActivateWindow { request_id, enqueued_at: Instant::now(), window_selector, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1468,10 +1547,10 @@ pub fn global_activate_window(window_selector: String) -> anyhow::Result<bool> {
 }
 
 /// 使用全局 COM 工作线程激活窗口并聚焦元素
-pub fn global_activate_and_focus_element(window_selector: String, xpath: String) -> anyhow::Result<bool> {
+pub fn global_activate_and_focus_element(request_id: u64, window_selector: String, xpath: String) -> anyhow::Result<bool> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::ActivateAndFocusElement { window_selector, xpath, response: response_sender })?;
+    sender.send(UiaRequest::ActivateAndFocusElement { request_id, enqueued_at: Instant::now(), window_selector, xpath, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_SLOW)
         .map_err(|e| {
@@ -1481,10 +1560,10 @@ pub fn global_activate_and_focus_element(window_selector: String, xpath: String)
 }
 
 /// 使用全局 COM 工作线程列出所有窗口
-pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
+pub fn global_list_windows(request_id: u64) -> anyhow::Result<Vec<crate::core::model::WindowInfo>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::ListWindows { response: response_sender })?;
+    sender.send(UiaRequest::ListWindows { request_id, enqueued_at: Instant::now(), response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1495,6 +1574,7 @@ pub fn global_list_windows() -> anyhow::Result<Vec<crate::core::model::WindowInf
 
 /// 使用全局 COM 工作线程获取元素可视区域位置
 pub fn global_get_element_visibility(
+    request_id: u64,
     window_selector: String,
     element_xpath: String,
     container_xpath: Option<String>,
@@ -1502,7 +1582,7 @@ pub fn global_get_element_visibility(
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
     sender.send(UiaRequest::GetElementVisibility {
-        request_id: next_request_id(),
+        request_id,
         enqueued_at: Instant::now(),
         window_selector,
         element_xpath,
@@ -1518,10 +1598,10 @@ pub fn global_get_element_visibility(
 }
 
 /// 使用全局 COM 工作线程获取指定坐标处元素的边界矩形
-pub fn global_get_element_rect_at_point(x: i32, y: i32) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
+pub fn global_get_element_rect_at_point(request_id: u64, x: i32, y: i32) -> anyhow::Result<Option<crate::core::model::ElementRect>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::GetElementRectAtPoint { x, y, response: response_sender })?;
+    sender.send(UiaRequest::GetElementRectAtPoint { request_id, enqueued_at: Instant::now(), x, y, response: response_sender })?;
     response_receiver
         .recv_timeout(TIMEOUT_FAST)
         .map_err(|e| {
@@ -1532,6 +1612,7 @@ pub fn global_get_element_rect_at_point(x: i32, y: i32) -> anyhow::Result<Option
 
 /// 使用全局 COM 工作线程执行 Compass 导航操作
 pub fn global_navigate(
+    request_id: u64,
     window_selector: String,
     base_xpath: String,
     steps: Vec<crate::api::types::NavigateStep>,
@@ -1539,7 +1620,7 @@ pub fn global_navigate(
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
     sender.send(UiaRequest::Navigate {
-        request_id: next_request_id(),
+        request_id,
         enqueued_at: Instant::now(),
         window_selector,
         base_xpath,
@@ -1556,6 +1637,7 @@ pub fn global_navigate(
 
 /// 使用全局 COM 工作线程执行 Inspect 操作
 pub fn global_inspect(
+    request_id: u64,
     window_selector: String,
     element_xpath: String,
     max_depth: usize,
@@ -1565,7 +1647,7 @@ pub fn global_inspect(
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
     sender.send(UiaRequest::Inspect {
-        request_id: next_request_id(),
+        request_id,
         enqueued_at: Instant::now(),
         window_selector,
         element_xpath,

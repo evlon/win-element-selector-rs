@@ -2,37 +2,14 @@
 //
 // 元素查找 API
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::core::metrics::{next_request_id, selector_hash, xpath_meta};
 use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo, NavigateRequest, NavigateResponse};
-
-static API_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
-
-fn next_api_request_id() -> u64 {
-    API_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-fn selector_hash(value: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn xpath_meta(xpath: &str) -> String {
-    format!(
-        "xpath_hash={:016x} xpath_len={} descendant={}",
-        selector_hash(xpath),
-        xpath.len(),
-        xpath.starts_with("//") || xpath.contains("//")
-    )
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -76,7 +53,7 @@ pub async fn get_element(
         });
     };
 
-    let request_id = next_api_request_id();
+    let request_id = next_request_id();
     let request_start = Instant::now();
     let window_hash = selector_hash(&element_query.window);
     let element_meta = xpath_meta(&element_query.element);
@@ -93,7 +70,7 @@ pub async fn get_element(
 
     // Use global COM worker thread (single-threaded COM management)
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(window, element, Some(random_range))
+        crate::core::com_worker::global_find_element(request_id, window, element, Some(random_range))
     })
     .await;
 
@@ -192,7 +169,7 @@ pub async fn get_all_elements(
         });
     };
 
-    let request_id = next_api_request_id();
+    let request_id = next_request_id();
     let request_start = Instant::now();
     let window_hash = selector_hash(&element_query.window);
     let element_meta = xpath_meta(&element_query.element);
@@ -208,7 +185,7 @@ pub async fn get_all_elements(
 
     // Use global COM worker thread
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(window, element, Some(random_range))
+        crate::core::com_worker::global_find_element(request_id, window, element, Some(random_range))
     })
     .await;
 
@@ -289,7 +266,7 @@ pub async fn get_all_elements(
 pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -> impl Responder {
     let request = body.into_inner();
 
-    let request_id = next_api_request_id();
+    let request_id = next_request_id();
     let request_start = Instant::now();
     let window_hash = selector_hash(&request.window);
     let element_meta = xpath_meta(&request.element);
@@ -307,7 +284,7 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
     let container = request.container.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_get_element_visibility(window, element, container)
+        crate::core::com_worker::global_get_element_visibility(request_id, window, element, container)
     })
     .await;
 
@@ -386,8 +363,9 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
     let timeout = request.timeout;
 
     // 查找元素获取其矩形区域
+    let request_id = next_request_id();
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(window, element, None)
+        crate::core::com_worker::global_find_element(request_id, window, element, None)
     })
     .await;
 
@@ -459,7 +437,7 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder {
     let request = body.into_inner();
 
-    let request_id = next_api_request_id();
+    let request_id = next_request_id();
     let request_start = Instant::now();
     let window_hash = selector_hash(&request.window);
     let element_meta = xpath_meta(&request.element);
@@ -481,7 +459,7 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
     let format = request.format.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_inspect(window, element, max_depth, max_nodes, format)
+        crate::core::com_worker::global_inspect(request_id, window, element, max_depth, max_nodes, format)
     })
     .await;
 
@@ -553,7 +531,7 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
 pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responder {
     let request = body.into_inner();
 
-    let request_id = next_api_request_id();
+    let request_id = next_request_id();
     let request_start = Instant::now();
     let window_hash = selector_hash(&request.window);
     let element_meta = xpath_meta(&request.element);
@@ -571,7 +549,7 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
     let steps = request.steps.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_navigate(window, base_xpath, steps)
+        crate::core::com_worker::global_navigate(request_id, window, base_xpath, steps)
     })
     .await;
 

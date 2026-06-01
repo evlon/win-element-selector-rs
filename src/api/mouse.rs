@@ -18,6 +18,44 @@ use super::types::{
 use super::super::mouse_control;
 use super::idle_motion::with_auto_pause;
 
+/// 从 serde_json::Value 中提取 xpath 字符串列表
+/// 支持字符串和字符串数组两种形式：
+/// - "xpath1" → vec!["xpath1"]
+/// - ["xpath1", "xpath2"] → vec!["xpath1", "xpath2"]
+fn extract_wait_xpaths(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(arr) => {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        }
+        _ => {
+            warn!("wait field expected string or array of strings, got: {}", value);
+            vec![]
+        }
+    }
+}
+
+/// 检查多个 wait xpath，返回第一个找到的结果
+/// 任意一个 xpath 匹配即视为成功（OR 语义）
+fn check_wait_xpaths(
+    window_selector: &str,
+    xpaths: &[String],
+) -> Option<super::super::model::DetailedValidationResult> {
+    for xpath in xpaths {
+        let result = super::super::capture::validate_selector_and_xpath_detailed(
+            window_selector,
+            xpath,
+            &[],
+        );
+        if matches!(result.overall, super::super::model::ValidationResult::Found { .. }) {
+            return Some(result);
+        }
+    }
+    None
+}
+
 /// 将 viewportInset 应用到容器 rect 上，返回扣减后的有效视口 rect
 /// 如果 inset 导致 width 或 height <= 0，返回 None（完全被遮挡）
 fn apply_viewport_inset(container_rect: &Option<super::types::Rect>, inset: &Option<ViewportInset>) -> Option<super::types::Rect> {
@@ -692,21 +730,17 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
     // Step 1.5: 预检查 wait 元素是否已完全可见（在容器视口内且非 offscreen）
     // 如果已可见，直接返回，避免无意义的滚动和鼠标移动
-    if let Some(ref wait_xpath) = options.wait {
+    if let Some(ref wait_value) = options.wait {
         if wait_visible {
-            let precheck_xpath = wait_xpath.clone();
+            let precheck_xpaths = extract_wait_xpaths(wait_value);
             let precheck_window = window_selector.clone();
             let precheck_container_rect = container_rect.clone();
             let precheck_result = tokio::task::spawn_blocking(move || {
-                super::super::capture::validate_selector_and_xpath_detailed(
-                    &precheck_window,
-                    &precheck_xpath,
-                    &[],
-                )
+                check_wait_xpaths(&precheck_window, &precheck_xpaths)
             })
             .await;
 
-            if let Ok(pr) = precheck_result {
+            if let Ok(Some(pr)) = precheck_result {
                 if matches!(pr.overall, ValidationResult::Found { .. }) {
                     let cur_offscreen = pr.is_offscreen.unwrap_or(false);
                     if !cur_offscreen {
@@ -772,7 +806,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 
         while scrolled < times {
             // 检测 wait xpath
-            if let Some(ref wait_xpath) = options.wait {
+            if let Some(ref wait_value) = options.wait {
                 if start_time.elapsed().as_millis() as u64 >= timeout_ms {
                     // 超时，返回结果
                     info!("Scroll timeout after {} scrolls", scrolled);
@@ -788,18 +822,14 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 }
 
                 // 检测 wait xpath 是否存在
-                let wait_xpath_clone = wait_xpath.clone();
+                let wait_xpaths = extract_wait_xpaths(wait_value);
                 let win_sel = window_selector_for_wait.clone();
                 let wait_result = tokio::task::spawn_blocking(move || {
-                    super::super::capture::validate_selector_and_xpath_detailed(
-                        &win_sel,
-                        &wait_xpath_clone,
-                        &[],
-                    )
+                    check_wait_xpaths(&win_sel, &wait_xpaths)
                 })
                 .await;
 
-                if let Ok(wr) = wait_result {
+                if let Ok(Some(wr)) = wait_result {
                     if matches!(wr.overall, ValidationResult::Found { .. }) {
                         // 提取目标元素的 rect（用于客户端判断元素是否完全可见）
                         let target_rect: Option<super::types::Rect> = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
@@ -994,7 +1024,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 let cx = check_x;
                 let cy = check_y;
                 let rect_result = tokio::task::spawn_blocking(move || {
-                    super::super::core::com_worker::global_get_element_rect_at_point(cx, cy)
+                    super::super::core::com_worker::global_get_element_rect_at_point(super::super::core::metrics::next_request_id(), cx, cy)
                 }).await;
 
                 if let Ok(Ok(Some(rect))) = rect_result {

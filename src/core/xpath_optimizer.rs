@@ -424,6 +424,7 @@ impl XPathOptimizer {
                 
                 // 使用 COM worker 进行验证
                 match crate::core::com_worker::global_validate_xpath(
+                    crate::core::metrics::next_request_id(),
                     window_sel.clone(),
                     test_xpath.to_string(),
                     hierarchy_clone.clone(),

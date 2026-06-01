@@ -548,8 +548,8 @@ pub struct MouseScrollOptions {
     /// 滚动次数，默认 30
     #[serde(default = "default_scroll_times")]
     pub times: Option<u32>,
-    /// 等待出现的 xpath
-    pub wait: Option<String>,
+    /// 等待出现的 xpath（支持多个，任意一个满足即停止滚动）
+    pub wait: Option<serde_json::Value>,
     /// 等待超时 ms，默认 5000
     pub timeout: Option<u64>,
     /// 是否自动计算 delta（基于容器高度），默认 false
