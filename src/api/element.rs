@@ -632,3 +632,40 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// XPath Cache Management API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// XPath cache statistics response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct XPathCacheStatsResponse {
+    pub entry_count: usize,
+    pub total_hits: u64,
+    pub cleared: bool,
+}
+
+/// GET /api/xpath-cache/stats
+/// Returns XPath compilation cache statistics.
+pub async fn get_xpath_cache_stats() -> impl Responder {
+    use crate::core::uia::windows_impl;
+    let (count, hits) = windows_impl::xpath_cache_stats();
+    HttpResponse::Ok().json(XPathCacheStatsResponse {
+        entry_count: count,
+        total_hits: hits,
+        cleared: false,
+    })
+}
+
+/// POST /api/xpath-cache/clear
+/// Clears the XPath compilation cache.
+pub async fn clear_xpath_cache_handler() -> impl Responder {
+    use crate::core::uia::windows_impl;
+    windows_impl::clear_xpath_cache();
+    log::info!("[API] XPath cache cleared");
+    HttpResponse::Ok().json(XPathCacheStatsResponse {
+        entry_count: 0,
+        total_hits: 0,
+        cleared: true,
+    })
+}

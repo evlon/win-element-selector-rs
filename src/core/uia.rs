@@ -8,7 +8,7 @@
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
-use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
+use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo};
 use log::{debug, error, info};
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
 
@@ -17,7 +17,8 @@ use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name,
 // ═══════════════════════════════════════════════════════════════════════════════
 pub mod windows_impl {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
     use windows::core::Interface;
     use windows::{
         core::BSTR,
@@ -63,6 +64,60 @@ pub mod windows_impl {
     /// Check if a class name starts with any known WebView prefix.
     fn is_webview_class(class_name: &str) -> bool {
         WEBVIEW_CLASS_PREFIXES.iter().any(|prefix| class_name.starts_with(prefix))
+    }
+
+    /// Determine the WalkerHint for a hierarchy node based on its class name, framework ID,
+    /// and process ID relative to the window.
+    /// 
+    /// This hint tells the XPath validation engine which UIA TreeWalker to use when
+    /// searching for this node's children, avoiding expensive fallback attempts.
+    fn determine_walker_hint(
+        class_name: &str,
+        framework_id: &str,
+        node_pid: u32,
+        window_pid: u32,
+    ) -> WalkerHint {
+        use crate::core::model::WalkerHint;
+
+        // 1. Cross-process WebView: PID differs from window → ChildHwnd
+        if node_pid != 0 && window_pid != 0 && node_pid != window_pid {
+            // But only if it's actually a WebView class
+            if is_webview_class(class_name) {
+                return WalkerHint::ChildHwnd;
+            }
+        }
+
+        // 2. WebView class (even in same process) → RawView
+        // These elements are typically filtered from ControlView but visible in RawView
+        if is_webview_class(class_name) {
+            return WalkerHint::RawView;
+        }
+
+        // 3. FrameworkId mismatch hints at embedded content
+        // Chrome framework inside Win32 window → RawView may be needed
+        if !framework_id.is_empty() {
+            if framework_id.eq_ignore_ascii_case("Chrome") || framework_id.eq_ignore_ascii_case("WebView") {
+                return WalkerHint::RawView;
+            }
+        }
+
+        // 4. Default: ControlView (fastest, works for most native controls)
+        WalkerHint::ControlView
+    }
+
+    /// Set walker_hint for each node in the hierarchy based on the actual UIA tree structure.
+    /// This is called after the hierarchy is built during capture.
+    fn set_walker_hints(hierarchy: &mut [HierarchyNode], window_pid: u32) {
+        for node in hierarchy.iter_mut() {
+            if node.walker_hint == WalkerHint::Unknown {
+                node.walker_hint = determine_walker_hint(
+                    &node.class_name,
+                    &node.framework_id,
+                    node.process_id,
+                    window_pid,
+                );
+            }
+        }
     }
 
     /// Check if a class name is a known rendering layer (should be skipped when finding content root).
@@ -673,6 +728,10 @@ pub mod windows_impl {
                 }
             }
         }
+
+        // 5. Set walker hints for faster XPath validation
+        let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
+        set_walker_hints(&mut hierarchy, window_pid);
 
         let window_info = extract_window_info(&hierarchy);
 
@@ -1549,6 +1608,8 @@ pub mod windows_impl {
                         last.sibling_count = count_siblings(&hit_elem, &raw_walker).unwrap_or(0);
                     }
                 }
+                let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
+                set_walker_hints(&mut hierarchy, window_pid);
                 let window_info = extract_window_info(&hierarchy);
                 info!("[Enhanced] Fallback hierarchy depth={}", hierarchy.len());
                 return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info });
@@ -1622,6 +1683,10 @@ pub mod windows_impl {
                 last.sibling_count = count_siblings(&target_elem, &raw_walker).unwrap_or(0);
             }
         }
+
+        // Set walker hints for faster XPath validation
+        let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
+        set_walker_hints(&mut hierarchy, window_pid);
 
         let window_info = extract_window_info(&hierarchy);
         let empty = String::new();
@@ -2518,6 +2583,197 @@ pub mod windows_impl {
     /// the entire validation for tens of seconds.
     const XPATH_FALLBACK_BUDGET_MS: u128 = 5000;
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // XPath Compilation Cache
+    //
+    // When an XPath is first executed against a window, the fallback chain tries
+    // multiple strategies (ControlView, RawView BFS, Content Root, child HWNDs, etc.)
+    // until one succeeds. The winning strategy and key parameters are cached so
+    // subsequent executions with the same XPath skip straight to the proven strategy.
+    //
+    // Key: (xpath_hash, window_class_prefix) — window class prefix captures the app
+    //      type (e.g., "Chrome_Widget", "mmui") without tying to a specific window.
+    // Value: CompiledXPathEntry recording the winning strategy, parameters, and stats.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// The strategy that successfully resolved an XPath against a window.
+    #[derive(Debug, Clone)]
+    enum CompiledStrategy {
+        /// Window fast path — XPath targets Window element directly
+        WindowFastPath,
+        /// Strategy 1: uiauto-xpath from window root (ControlViewWalker)
+        ControlViewDirect,
+        /// Strategy 1.5: RawViewWalker BFS from window root
+        RawViewBfs,
+        /// Strategy 2: Search from content root
+        ContentRoot,
+        /// Strategy 2.5: FindAll(Descendants) raw tree search
+        FindAllDescendants,
+        /// Strategy 2.7: EnumChildWindows — found on child HWND
+        /// Contains the index of the matching child HWND (for direct reuse)
+        ChildHwndEnum(usize),
+        /// Strategy 3: Sibling window search
+        SiblingWindow,
+        /// Strategy 3b: Child process window search
+        ChildProcessWindow,
+        /// //XPath descendant: content root
+        DescendantContentRoot,
+        /// //XPath descendant: uiauto-xpath from window root
+        DescendantWindowRoot,
+        /// //XPath descendant: raw descendants
+        DescendantRawWalk,
+        /// //XPath descendant: child HWND
+        DescendantChildHwnd(usize),
+    }
+
+    /// A compiled XPath entry — the winning strategy and performance stats.
+    #[derive(Debug, Clone)]
+    struct CompiledXPathEntry {
+        strategy: CompiledStrategy,
+        /// Average execution time in milliseconds (exponentially weighted)
+        avg_time_ms: u64,
+        /// Number of cache hits
+        hit_count: u64,
+        /// When this entry was created (for eviction decisions)
+        created_at: std::time::Instant,
+        /// When this entry was last used
+        last_used: std::time::Instant,
+    }
+
+    /// Global XPath compilation cache.
+    /// Thread-safe via Mutex. LRU-like eviction when size limit is reached.
+    static XPATH_CACHE: std::sync::LazyLock<Mutex<HashMap<(u64, String), CompiledXPathEntry>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Maximum number of entries in the cache before eviction starts.
+    const XPATH_CACHE_MAX_ENTRIES: usize = 256;
+
+    /// Build a cache key from an XPath string and a window element.
+    /// Uses the window's class name prefix (first 32 chars of the part before any underscore)
+    /// to capture the app type without tying to a specific window instance.
+    fn cache_key(xpath: &str, window: &IUIAutomationElement) -> Option<(u64, String)> {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let class = get_bstr(unsafe { window.CurrentClassName() });
+        // Extract the "app type" prefix: e.g., "Chrome_WidgetWin_0" → "Chrome_Widget"
+        // "mmui::MainWindow" → "mmui"
+        let app_prefix = if let Some(pos) = class.find('_') {
+            class[..pos].to_string()
+        } else if let Some(pos) = class.find("::") {
+            class[..pos].to_string()
+        } else {
+            class
+        };
+
+        // Hash the XPath for compact key storage
+        let mut hasher = DefaultHasher::new();
+        xpath.hash(&mut hasher);
+        let xpath_hash = hasher.finish();
+
+        Some((xpath_hash, app_prefix))
+    }
+
+    /// Look up a cached strategy for the given XPath + window combination.
+    /// Returns `Some(CompiledXPathEntry)` if found and updates last_used.
+    fn cache_lookup(xpath: &str, window: &IUIAutomationElement) -> Option<CompiledXPathEntry> {
+        let key = cache_key(xpath, window)?;
+        let mut cache = XPATH_CACHE.lock().ok()?;
+        if let Some(entry) = cache.get_mut(&key) {
+            entry.hit_count += 1;
+            entry.last_used = std::time::Instant::now();
+            log::info!(
+                "[XPath Cache] HIT: xpath_hash={} app='{}' strategy={:?} avg={}ms hits={}",
+                key.0, key.1, entry.strategy, entry.avg_time_ms, entry.hit_count
+            );
+            Some(entry.clone())
+        } else {
+            log::info!("[XPath Cache] MISS: xpath_hash={} app='{}'", key.0, key.1);
+            None
+        }
+    }
+
+    /// Store a successful strategy in the cache.
+    /// Uses exponential moving average for avg_time_ms to smooth out variance.
+    fn cache_store(
+        xpath: &str,
+        window: &IUIAutomationElement,
+        strategy: CompiledStrategy,
+        elapsed_ms: u64,
+    ) {
+        let key = match cache_key(xpath, window) {
+            Some(k) => k,
+            None => return,
+        };
+
+        let mut cache = match XPATH_CACHE.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        // Evict oldest entries if cache is full
+        if cache.len() >= XPATH_CACHE_MAX_ENTRIES {
+            // Find and remove the least recently used entry
+            if let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_key);
+                log::info!("[XPath Cache] Evicted LRU entry (cache full at {})", XPATH_CACHE_MAX_ENTRIES);
+            }
+        }
+
+        let now = std::time::Instant::now();
+        let entry = if let Some(existing) = cache.get(&key) {
+            // Update existing entry: exponential moving average for time
+            let alpha = 0.3f64; // weight for new sample
+            let new_avg = (existing.avg_time_ms as f64 * (1.0 - alpha) + elapsed_ms as f64 * alpha) as u64;
+            CompiledXPathEntry {
+                strategy,
+                avg_time_ms: new_avg,
+                hit_count: existing.hit_count,
+                created_at: existing.created_at,
+                last_used: now,
+            }
+        } else {
+            CompiledXPathEntry {
+                strategy,
+                avg_time_ms: elapsed_ms,
+                hit_count: 0,
+                created_at: now,
+                last_used: now,
+            }
+        };
+
+        log::info!(
+            "[XPath Cache] STORE: xpath_hash={} app='{}' strategy={:?} time={}ms",
+            key.0, key.1, entry.strategy, elapsed_ms
+        );
+        cache.insert(key, entry);
+    }
+
+    /// Clear the XPath compilation cache. Useful when the app landscape changes
+    /// (windows opened/closed) and cached strategies may become stale.
+    pub fn clear_xpath_cache() {
+        if let Ok(mut cache) = XPATH_CACHE.lock() {
+            let count = cache.len();
+            cache.clear();
+            log::info!("[XPath Cache] Cleared {} entries", count);
+        }
+    }
+
+    /// Get cache statistics: (entry_count, total_hits)
+    pub fn xpath_cache_stats() -> (usize, u64) {
+        if let Ok(cache) = XPATH_CACHE.lock() {
+            let count = cache.len();
+            let total_hits: u64 = cache.values().map(|e| e.hit_count).sum();
+            (count, total_hits)
+        } else {
+            (0, 0)
+        }
+    }
+
     fn find_by_xpath_with_fallback(
         auto: &IUIAutomation,
         window: &IUIAutomationElement,
@@ -2551,12 +2807,127 @@ pub mod windows_impl {
         let xpath = &inner_xpath;
         let is_descendant = xpath.starts_with("//");
         
-        // Helper: apply positional predicate [N] to search results.
-        // When the original XPath was (path)[N], we strip the wrapper before searching,
-        // then use this to select only the Nth match from the results.
-        let apply_position = |mut results: Vec<IUIAutomationElement>, segments: Vec<SegmentValidationResult>| 
-            -> (Vec<IUIAutomationElement>, Vec<SegmentValidationResult>) 
-        {
+        // ═══════════════════════════════════════════════════════════════════════════
+        // XPath Compilation Cache: Check if we already know the winning strategy.
+        //
+        // First execution: cache miss → run full fallback chain → record winner.
+        // Subsequent executions: cache hit → jump directly to winning strategy.
+        // This eliminates the 200-3000ms fallback trial-and-error on repeated calls.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if let Some(cached) = cache_lookup(xpath, window) {
+            let cache_start = Instant::now();
+            let result = match &cached.strategy {
+                CompiledStrategy::WindowFastPath => {
+                    // Window fast path is handled by find_all_elements_detailed caller,
+                    // not here. Fall through to normal execution.
+                    log::info!("[XPath Cache] WindowFastPath cached — should be handled at caller level, falling through");
+                    None
+                }
+                CompiledStrategy::ControlViewDirect => {
+                    log::info!("[XPath Cache] Executing cached: ControlViewDirect");
+                    find_by_xpath_detailed(auto, window, xpath, None).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::RawViewBfs => {
+                    log::info!("[XPath Cache] Executing cached: RawViewBfs");
+                    cached_raw_view_bfs(auto, window, xpath).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::ContentRoot => {
+                    log::info!("[XPath Cache] Executing cached: ContentRoot");
+                    if let Some(cr) = find_content_root(auto, window) {
+                        find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                            .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                    } else { None }
+                }
+                CompiledStrategy::FindAllDescendants => {
+                    log::info!("[XPath Cache] Executing cached: FindAllDescendants");
+                    let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                    find_by_xpath_raw_descendants(auto, window, &desc_xpath).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::ChildHwndEnum(child_idx) => {
+                    log::info!("[XPath Cache] Executing cached: ChildHwndEnum({})", child_idx);
+                    cached_child_hwnd_search(auto, window, xpath, *child_idx).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::SiblingWindow => {
+                    log::info!("[XPath Cache] Executing cached: SiblingWindow");
+                    cached_sibling_search(auto, window, xpath).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::ChildProcessWindow => {
+                    log::info!("[XPath Cache] Executing cached: ChildProcessWindow");
+                    cached_child_process_search(auto, window, xpath).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::DescendantContentRoot => {
+                    log::info!("[XPath Cache] Executing cached: DescendantContentRoot");
+                    if let Some(cr) = find_content_root(auto, window) {
+                        find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                            .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                    } else { None }
+                }
+                CompiledStrategy::DescendantWindowRoot => {
+                    log::info!("[XPath Cache] Executing cached: DescendantWindowRoot");
+                    find_by_xpath_detailed(auto, window, xpath, None).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::DescendantRawWalk => {
+                    log::info!("[XPath Cache] Executing cached: DescendantRawWalk");
+                    find_by_xpath_raw_descendants(auto, window, xpath).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+                CompiledStrategy::DescendantChildHwnd(child_idx) => {
+                    log::info!("[XPath Cache] Executing cached: DescendantChildHwnd({})", child_idx);
+                    cached_descendant_child_hwnd(auto, window, xpath, *child_idx).ok()
+                        .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+                }
+            };
+            
+            if let Some((results, segments)) = result {
+                let cache_elapsed = cache_start.elapsed().as_millis() as u64;
+                log::info!(
+                    "[XPath Cache] ✓ Cached strategy succeeded in {}ms (avg={}ms, hits={})",
+                    cache_elapsed, cached.avg_time_ms, cached.hit_count
+                );
+                // Update avg time with new sample
+                cache_store(xpath, window, cached.strategy.clone(), cache_elapsed);
+                // Apply positional predicate
+                let mut results = results;
+                if let Some(pos) = position_index {
+                    if pos > 0 && results.len() >= pos {
+                        results = vec![results.swap_remove(pos - 1)];
+                    } else if !results.is_empty() {
+                        results.clear();
+                    }
+                }
+                return Ok((results, segments));
+            }
+            
+            // Cached strategy failed (window state changed, element no longer exists, etc.)
+            // Fall through to full fallback chain and re-learn.
+            log::info!("[XPath Cache] Cached strategy failed (stale?), falling back to full chain");
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Helper: Record successful strategy in cache and return results.
+        // Called at every successful return point in the fallback chain.
+        // ═══════════════════════════════════════════════════════════════════════════
+        #[inline(always)]
+        fn record_and_return(
+            strategy: CompiledStrategy,
+            results: Vec<IUIAutomationElement>,
+            segments: Vec<SegmentValidationResult>,
+            xpath: &str,
+            window: &IUIAutomationElement,
+            position_index: Option<usize>,
+            fallback_start: &std::time::Instant,
+        ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+            let elapsed = fallback_start.elapsed().as_millis() as u64;
+            cache_store(xpath, window, strategy, elapsed);
+            // Apply positional predicate
+            let mut results = results;
             if let Some(pos) = position_index {
                 if pos > 0 && results.len() >= pos {
                     log::info!("[XPath Fallback] Positional predicate [{}]: selecting match {} of {}", 
@@ -2568,8 +2939,8 @@ pub mod windows_impl {
                     results.clear();
                 }
             }
-            (results, segments)
-        };
+            Ok((results, segments))
+        }
         
         if is_descendant {
             // ── Descendant XPath (//...): prioritize content root ──
@@ -2595,7 +2966,7 @@ pub mod windows_impl {
                     if !r.is_empty() {
                         log::info!("[XPath Fallback] ✓ Step 1: Found {} results from content root ({}ms)", 
                             r.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r, s));
+                        return record_and_return(CompiledStrategy::DescendantContentRoot, r, s, xpath, window, position_index, &fallback_start);
                     }
                 }
             }
@@ -2624,7 +2995,7 @@ pub mod windows_impl {
                     if !r.is_empty() {
                         log::info!("[XPath Fallback] ✓ Step 2: Found {} results via raw descendants ({}ms)", 
                             r.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r, s));
+                        return record_and_return(CompiledStrategy::DescendantRawWalk, r, s, xpath, window, position_index, &fallback_start);
                     }
                 }
             } else {
@@ -2634,7 +3005,7 @@ pub mod windows_impl {
                     if !r.is_empty() {
                         log::info!("[XPath Fallback] ✓ Step 2: Found {} results via uiauto-xpath ({}ms)", 
                             r.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r, s));
+                        return record_and_return(CompiledStrategy::DescendantWindowRoot, r, s, xpath, window, position_index, &fallback_start);
                     }
                 }
                 // Fallback: try raw descendants
@@ -2642,7 +3013,7 @@ pub mod windows_impl {
                     if !r.is_empty() {
                         log::info!("[XPath Fallback] ✓ Step 2 (fallback): Found {} results via raw descendants ({}ms)", 
                             r.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r, s));
+                        return record_and_return(CompiledStrategy::DescendantRawWalk, r, s, xpath, window, position_index, &fallback_start);
                     }
                 }
             }
@@ -2664,7 +3035,7 @@ pub mod windows_impl {
                                 if !r.is_empty() {
                                     log::info!("[XPath Fallback] ✓ Step 3: Found {} from child HWND[{}] via uiauto-xpath ({}ms)",
                                         r.len(), idx, fallback_start.elapsed().as_millis());
-                                    return Ok(apply_position(r, s));
+                                    return record_and_return(CompiledStrategy::DescendantChildHwnd(idx), r, s, xpath, window, position_index, &fallback_start);
                                 }
                             }
                         }
@@ -2673,7 +3044,7 @@ pub mod windows_impl {
                             if !r.is_empty() {
                                 log::info!("[XPath Fallback] ✓ Step 3: Found {} from child HWND[{}] via raw walk ({}ms)",
                                     r.len(), idx, fallback_start.elapsed().as_millis());
-                                return Ok(apply_position(r, s));
+                                return record_and_return(CompiledStrategy::DescendantChildHwnd(idx), r, s, xpath, window, position_index, &fallback_start);
                             }
                         }
                     }
@@ -2685,14 +3056,54 @@ pub mod windows_impl {
             Ok((vec![], vec![]))
         } else {
             // ── Absolute XPath (/...): optimized multi-strategy approach ──
+
+            // ═══════════════════════════════════════════════════════════════════
+            // Walker Hint: Analyze first XPath step to determine which strategy to try first.
+            // This avoids the most expensive fallback: trying ControlViewWalker on elements
+            // that only exist in the RawView (e.g., Chrome_Widget in WeChat).
+            //
+            // Key insight: If the first XPath step references a WebView class
+            // (Chrome_Widget*, WRY_WEBVIEW*, etc.), Strategy 1 (ControlViewWalker/uiauto-xpath)
+            // will ALWAYS fail because these elements are filtered from the ControlView.
+            // Skip Strategy 1 entirely and go directly to RawView BFS.
+            //
+            // Similarly, if the first step has FrameworkId='Chrome', the element
+            // likely needs RawView or ChildHwnd search.
+            // ═══════════════════════════════════════════════════════════════════
+            let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+            let first_step_parsed = if !xpath_parts.is_empty() {
+                Some(parse_xpath_step(xpath_parts[0]))
+            } else {
+                None
+            };
             
-            // Strategy 1: Try from window root first (most common case, fastest)
-            log::info!("[XPath Fallback] /XPath — Strategy 1: window root (primary)");
-            let (results, segments) = find_by_xpath_detailed(auto, window, xpath, None)?;
-            if !results.is_empty() {
-                log::info!("[XPath Fallback] ✓ Strategy 1: Found {} from window root ({}ms)", 
-                    results.len(), fallback_start.elapsed().as_millis());
-                return Ok(apply_position(results, segments));
+            // Check if first step references a WebView class name
+            let first_step_is_webview = first_step_parsed.as_ref().map_or(false, |parsed| {
+                // Check ClassName predicates
+                let has_webview_class = parsed.required_props.iter().any(|(k, v)| {
+                    k == "ClassName" && is_webview_class(v)
+                }) || parsed.require_starts_with.iter().any(|(k, v)| {
+                    k == "ClassName" && is_webview_class(v)
+                });
+                // Check FrameworkId=Chrome
+                let has_chrome_fwid = parsed.required_props.iter().any(|(k, v)| {
+                    k == "FrameworkId" && (v.eq_ignore_ascii_case("Chrome") || v.eq_ignore_ascii_case("WebView"))
+                });
+                has_webview_class || has_chrome_fwid
+            });
+            
+            // Strategy 1: Try from window root (ControlViewWalker/uiauto-xpath)
+            // SKIP if first step is WebView — ControlViewWalker can't see these elements.
+            if first_step_is_webview {
+                log::info!("[XPath Fallback] /XPath — Strategy 1: SKIPPED (first step has WebView class, ControlViewWalker won't find it)");
+            } else {
+                log::info!("[XPath Fallback] /XPath — Strategy 1: window root (primary)");
+                let (results, segments) = find_by_xpath_detailed(auto, window, xpath, None)?;
+                if !results.is_empty() {
+                    log::info!("[XPath Fallback] ✓ Strategy 1: Found {} from window root ({}ms)", 
+                        results.len(), fallback_start.elapsed().as_millis());
+                    return record_and_return(CompiledStrategy::ControlViewDirect, results, segments, xpath, window, position_index, &fallback_start);
+                }
             }
             
             // Strategy 1.5: RawViewWalker BFS from window root.
@@ -2700,12 +3111,16 @@ pub mod windows_impl {
             // the control view, such as Chrome_Widget Pane in WeChat. Use RawViewWalker
             // to walk the raw tree, find elements matching the first XPath step, then
             // try the remaining path from each match.
-            {
-                let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+            //
+            // SKIP for WebView classes: WebView elements (Chrome_Widget, etc.) live under
+            // child HWNDs, NOT as direct raw-tree children of the window root. The BFS
+            // would waste ~200ms searching the window's raw tree and find nothing.
+            if first_step_is_webview {
+                log::info!("[XPath Fallback] /XPath — Strategy 1.5: SKIPPED (WebView elements are under child HWNDs, not window root)");
+            } else if let Some(ref first_parsed) = first_step_parsed {
                 if !xpath_parts.is_empty() {
                     log::info!("[XPath Fallback] /XPath — Strategy 1.5: RawViewWalker BFS from window root");
                     if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
-                        let first_parsed = parse_xpath_step(xpath_parts[0]);
                         let first_step_end = find_first_step_end(xpath);
                         let remaining_after_first = &xpath[first_step_end..];
                         
@@ -2734,7 +3149,7 @@ pub mod windows_impl {
                                         &fallback_start, "1.5",
                                     ) {
                                         let (r, s) = result;
-                                        return Ok(apply_position(r, s));
+                                        return record_and_return(CompiledStrategy::RawViewBfs, r, s, xpath, window, position_index, &fallback_start);
                                     }
                                 }
                                 
@@ -2749,25 +3164,32 @@ pub mod windows_impl {
             }
             
             // Strategy 2: Try content root if available (handles embedded WebView)
-            log::info!("[XPath Fallback] /XPath — Strategy 2: trying content root...");
-            if let Some(content_root) = find_content_root(auto, window) {
-                // Try direct path from content root
-                if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath, None) {
-                    if !r2.is_empty() {
-                        log::info!("[XPath Fallback] ✓ Strategy 2a: Found {} from content root ({}ms)", 
-                            r2.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r2, s2));
+            // SKIP for WebView classes: content root is INSIDE the WebView, but we're
+            // looking for the WebView container itself (e.g., Chrome_Widget Pane).
+            // Content root can't help find the container — it's below it.
+            if first_step_is_webview {
+                log::info!("[XPath Fallback] /XPath — Strategy 2: SKIPPED (looking for WebView container, content root is below it)");
+            } else {
+                log::info!("[XPath Fallback] /XPath — Strategy 2: trying content root...");
+                if let Some(content_root) = find_content_root(auto, window) {
+                    // Try direct path from content root
+                    if let Ok((r2, s2)) = find_by_xpath_detailed(auto, &content_root, xpath, None) {
+                        if !r2.is_empty() {
+                            log::info!("[XPath Fallback] ✓ Strategy 2a: Found {} from content root ({}ms)", 
+                                r2.len(), fallback_start.elapsed().as_millis());
+                            return record_and_return(CompiledStrategy::ContentRoot, r2, s2, xpath, window, position_index, &fallback_start);
+                        }
                     }
-                }
-                
-                // Try as descendant from content root
-                let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
-                log::info!("[XPath Fallback] /XPath — Strategy 2b: content root descendant");
-                if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, &desc_xpath, None) {
-                    if !r3.is_empty() {
-                        log::info!("[XPath Fallback] ✓ Strategy 2b: Found {} from content root desc ({}ms)", 
-                            r3.len(), fallback_start.elapsed().as_millis());
-                        return Ok(apply_position(r3, s3));
+                    
+                    // Try as descendant from content root
+                    let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+                    log::info!("[XPath Fallback] /XPath — Strategy 2b: content root descendant");
+                    if let Ok((r3, s3)) = find_by_xpath_detailed(auto, &content_root, &desc_xpath, None) {
+                        if !r3.is_empty() {
+                            log::info!("[XPath Fallback] ✓ Strategy 2b: Found {} from content root desc ({}ms)", 
+                                r3.len(), fallback_start.elapsed().as_millis());
+                            return record_and_return(CompiledStrategy::ContentRoot, r3, s3, xpath, window, position_index, &fallback_start);
+                        }
                     }
                 }
             }
@@ -2781,18 +3203,9 @@ pub mod windows_impl {
             // HEURISTIC SKIP: If the first XPath step references a WebView class (e.g., Chrome_Widget),
             // WebView elements are NOT direct raw-tree children of the window — they live under a
             // child HWND. Strategy 2.5's BFS would waste ~200ms finding nothing, so skip to 2.7.
+            // (Reuses first_step_is_webview computed at the top of the /XPath branch.)
             {
-                let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
-                let first_step_has_webview = xpath_parts.first().map_or(false, |step| {
-                    let parsed = parse_xpath_step(step);
-                    parsed.require_starts_with.iter().any(|(k, v)| {
-                        k == "ClassName" && is_webview_class(v)
-                    }) || parsed.required_props.iter().any(|(k, v)| {
-                        k == "ClassName" && is_webview_class(v)
-                    })
-                });
-                
-                if first_step_has_webview {
+                if first_step_is_webview {
                     log::info!("[XPath Fallback] /XPath — Skipping Strategy 2.5: first step has WebView class, going directly to 2.7");
                 } else {
                     log::info!("[XPath Fallback] /XPath — Strategy 2.5: FindAll(Descendants) raw tree search");
@@ -2801,7 +3214,7 @@ pub mod windows_impl {
                         if !r25.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 2.5: Found {} via raw descendant search ({}ms)", 
                                 r25.len(), fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r25, s25));
+                            return record_and_return(CompiledStrategy::FindAllDescendants, r25, s25, xpath, window, position_index, &fallback_start);
                         }
                     }
                 }
@@ -3186,7 +3599,7 @@ pub mod windows_impl {
                                 log::info!("[Strategy 2.7]   ✓ child HWND matches first step!");
                                 if let Some(result) = try_remaining_from_match(auto, &child_elem, remaining_after_first, &xpath_parts, &fallback_start, "2.7a") {
                                     let (r, s) = result;
-                                    return Ok(apply_position(r, s));
+                                    return record_and_return(CompiledStrategy::ChildHwndEnum(idx), r, s, xpath, window, position_index, &fallback_start);
                                 }
                             }
                             
@@ -3200,7 +3613,7 @@ pub mod windows_impl {
                                     if !r.is_empty() {
                                         log::info!("[Strategy 2.7]   ✓ Found {} via uiauto-xpath from child HWND[{}] ({}ms)",
                                             r.len(), idx, fallback_start.elapsed().as_millis());
-                                        return Ok(apply_position(r, s));
+                                        return record_and_return(CompiledStrategy::ChildHwndEnum(idx), r, s, xpath, window, position_index, &fallback_start);
                                     }
                                 }
                             }
@@ -3214,7 +3627,7 @@ pub mod windows_impl {
                                         log::info!("[Strategy 2.7]   ✓ Found first-step match inside child HWND!");
                                         if let Some(result) = try_remaining_from_match(auto, &sub, remaining_after_first, &xpath_parts, &fallback_start, "2.7b") {
                                             let (r, s) = result;
-                                            return Ok(apply_position(r, s));
+                                            return record_and_return(CompiledStrategy::ChildHwndEnum(idx), r, s, xpath, window, position_index, &fallback_start);
                                         }
                                     }
                                     sub_match = unsafe { raw_walker.GetNextSiblingElement(&sub).ok() };
@@ -3259,7 +3672,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3: Found {} from sibling window {} ({}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r, s));
+                            return record_and_return(CompiledStrategy::SiblingWindow, r, s, xpath, window, position_index, &fallback_start);
                         }
                     }
                     // Also try descendant search from sibling (safe for non-WebView)
@@ -3268,7 +3681,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3 (desc): Found {} from sibling window {} ({}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r, s));
+                            return record_and_return(CompiledStrategy::SiblingWindow, r, s, xpath, window, position_index, &fallback_start);
                         }
                     }
                 }
@@ -3313,7 +3726,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (absolute path, {}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r, s));
+                            return record_and_return(CompiledStrategy::ChildProcessWindow, r, s, xpath, window, position_index, &fallback_start);
                         }
                     }
                     
@@ -3322,7 +3735,7 @@ pub mod windows_impl {
                         if !r.is_empty() {
                             log::info!("[XPath Fallback] ✓ Strategy 3b: Found {} from child process window {} (descendant path, {}ms)", 
                                 r.len(), idx + 1, fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r, s));
+                            return record_and_return(CompiledStrategy::ChildProcessWindow, r, s, xpath, window, position_index, &fallback_start);
                         }
                     }
                 }
@@ -3363,7 +3776,8 @@ pub mod windows_impl {
                         if !r4.is_empty() && elapsed < timeout_ms {
                             log::info!("[XPath Fallback] ✓ Strategy 4: Found {} from Desktop root desc ({}ms)", 
                                 r4.len(), fallback_start.elapsed().as_millis());
-                            return Ok(apply_position(r4, s4));
+                            // Strategy 4 is a last resort, not cached by default
+                            return record_and_return(CompiledStrategy::DescendantWindowRoot, r4, s4, xpath, window, position_index, &fallback_start);
                         } else if elapsed >= timeout_ms {
                             log::warn!("[XPath Fallback] Strategy 4 timed out after {}ms, skipping result", elapsed);
                         }
@@ -3373,8 +3787,112 @@ pub mod windows_impl {
             
             log::info!("[XPath Fallback] All /XPath strategies exhausted ({}ms)", 
                 fallback_start.elapsed().as_millis());
-            Ok(apply_position(results, segments))
+            Ok((vec![], vec![]))
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // XPath Cache helper functions — direct strategy executors
+    //
+    // These functions execute a single strategy directly (no fallback chain),
+    // used both by the cache hit fast path and by the first-run fallback chain
+    // (which calls them and then records the winner).
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Execute RawViewWalker BFS strategy from cache.
+    /// Uses find_by_xpath_raw_descendants which covers the same search space.
+    fn cached_raw_view_bfs(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        find_by_xpath_raw_descendants(auto, window, xpath)
+    }
+
+    /// Execute child HWND search for a specific child index (from cache).
+    fn cached_child_hwnd_search(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+        child_idx: usize,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        let hwnd = unsafe { window.CurrentNativeWindowHandle() }?;
+        let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+        if child_idx >= child_hwnds.len() {
+            return Ok((vec![], vec![]));
+        }
+        let child_elem = unsafe { auto.ElementFromHandle(child_hwnds[child_idx]) }?;
+        let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+        if !is_webview_class(&child_class) {
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+        }
+        find_by_xpath_raw_descendants(auto, &child_elem, xpath)
+    }
+
+    /// Execute sibling window search (from cache).
+    fn cached_sibling_search(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        let siblings = find_sibling_windows_same_process(auto, window)?;
+        for sibling in &siblings {
+            let sibling_class = get_bstr(unsafe { sibling.CurrentClassName() });
+            if is_webview_class(&sibling_class) { continue; }
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+            let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, &desc_xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+        }
+        Ok((vec![], vec![]))
+    }
+
+    /// Execute child process window search (from cache).
+    fn cached_child_process_search(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        let child_windows = find_child_process_windows(auto, window)?;
+        let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+        for child_win in &child_windows {
+            let child_class = get_bstr(unsafe { child_win.CurrentClassName() });
+            if is_webview_class(&child_class) { continue; }
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, &desc_xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+        }
+        Ok((vec![], vec![]))
+    }
+
+    /// Execute descendant child HWND search for a specific child index (from cache).
+    fn cached_descendant_child_hwnd(
+        auto: &IUIAutomation,
+        window: &IUIAutomationElement,
+        xpath: &str,
+        child_idx: usize,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        let hwnd = unsafe { window.CurrentNativeWindowHandle() }?;
+        let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+        if child_idx >= child_hwnds.len() {
+            return Ok((vec![], vec![]));
+        }
+        let child_elem = unsafe { auto.ElementFromHandle(child_hwnds[child_idx]) }?;
+        let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+        if !is_webview_class(&child_class) {
+            if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
+                if !r.is_empty() { return Ok((r, s)); }
+            }
+        }
+        find_by_xpath_raw_descendants(auto, &child_elem, xpath)
     }
 
     /// Parsed representation of a single XPath step (e.g., "Pane[starts-with(@ClassName, 'Chrome_Widget') and @FrameworkId='Win32']")
@@ -3937,9 +4455,84 @@ pub mod windows_impl {
         if windows.is_empty() {
             return vec![];
         }
+
+        // ── Fast path: XPath directly targets Window elements ──
+        // When the XPath is //Window[...] or /Window[...], we already have the
+        // matching windows from find_window_by_selector. Instead of running the
+        // expensive fallback chain on each window, apply the XPath predicates
+        // directly to filter the already-enumerated windows.
+        let xpath_trimmed = element_xpath.trim_start_matches('/');
+        let targets_window = xpath_trimmed == "Window"
+            || xpath_trimmed.starts_with("Window[");
+        if targets_window {
+            log::info!("[Fast Path] XPath targets Window, filtering enumerated windows directly");
+            // Parse XPath predicates to filter windows
+            let step_parsed = if xpath_trimmed.starts_with("Window[") {
+                // Extract predicates from "Window[@Name='...' and ...]"
+                let pred_start = xpath_trimmed.find('[').unwrap_or(0);
+                let pred_end = xpath_trimmed.rfind(']').unwrap_or(xpath_trimmed.len());
+                if pred_start < pred_end {
+                    Some(parse_xpath_step(&xpath_trimmed[..=pred_end]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let mut rng = rand::thread_rng();
+            for window in &windows {
+                // If there are predicates, filter
+                if let Some(ref parsed) = step_parsed {
+                    if !element_matches_parsed_step(window, parsed) {
+                        continue;
+                    }
+                }
+                let window_rect = unsafe {
+                    window.CurrentBoundingRectangle().ok().map(|r| {
+                        crate::api::types::Rect {
+                            x: r.left,
+                            y: r.top,
+                            width: r.right - r.left,
+                            height: r.bottom - r.top,
+                        }
+                    })
+                };
+                if let Some(info) = element_info_from_uia(window, window_rect.as_ref(), random_range, &mut rng) {
+                    // Record Window fast path in cache
+                    let _ = cache_store(element_xpath, window, CompiledStrategy::WindowFastPath, 0);
+                    return vec![info];
+                }
+            }
+            return vec![];
+        }
+        // ── End fast path ──
+
+        // Try each matching window until we find elements.
+        // When window_selector is broad (no filter predicates), we may get many windows.
+        // Fallback chain is expensive (~2-6s per window for WebView XPaths), so:
+        // 1. Cap at 3 windows max for broad selectors (covers 99% of cases)
+        // 2. Skip WebView-class windows for /XPath (absolute path) — WebView containers
+        //    are under child HWNDs, not direct children of the window.
+        let is_broad_selector = !window_selector.contains('[');  // No predicates = matches everything
+        let is_absolute_xpath = element_xpath.starts_with('/') && !element_xpath.starts_with("//");
+        let max_windows = if is_broad_selector { 3usize } else { windows.len() };
         
-        // Try each matching window until we find elements
-        for window in &windows {
+        for (win_idx, window) in windows.iter().enumerate() {
+            if win_idx >= max_windows {
+                log::info!("[Find All] Reached max windows limit ({}/{}) for broad selector", win_idx, windows.len());
+                break;
+            }
+            
+            // Skip WebView-class windows for absolute XPath — their children live under child HWNDs
+            if is_absolute_xpath {
+                let win_class = get_bstr(unsafe { window.CurrentClassName() });
+                if is_webview_class(&win_class) {
+                    log::info!("[Find All] Skipping WebView window '{}' for absolute XPath (children under child HWNDs)", win_class);
+                    continue;
+                }
+            }
+            
             // 获取窗口矩形用于计算 visibleRect
             let window_rect = unsafe {
                 window.CurrentBoundingRectangle().ok().map(|r| {

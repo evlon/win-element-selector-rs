@@ -90,6 +90,38 @@ impl std::fmt::Display for Operator {
     }
 }
 
+// ─── WalkerHint ──────────────────────────────────────────────────────────────
+
+/// 提示校验时应该使用哪种 UIA TreeWalker 来查找该节点的子节点。
+/// 
+/// 捕获元素时，我们知道 hierarchy 中每一层在 UIA 树中的实际位置特征。
+/// 将此信息记录到 XPath/HierarchyNode 中，可以避免校验时盲目尝试所有 fallback 策略。
+/// 
+/// **场景说明**：
+/// - 微信主窗口 `mmui::MainWindow` 的子节点在 ControlView 中可见 → ControlView
+/// - 微信内嵌 `Chrome_WidgetWin_0` 子窗口的子节点在 RawView 中才可见 → RawView  
+/// - 跨进程 WebView 子窗口的元素需要通过 EnumChildWindows 找到 → ChildHwnd
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WalkerHint {
+    /// 默认：使用 ControlViewWalker（uiauto-xpath），最快
+    /// 适用于大多数原生控件（Qt、Win32、WPF 等）
+    ControlView,
+    /// 使用 RawViewWalker（tree walk），稍慢但能看到 ControlView 过滤掉的元素
+    /// 适用于 Chrome/WebView 嵌入场景
+    RawView,
+    /// 需要通过 EnumChildWindows 找到子 HWND，然后在其子树中搜索
+    /// 适用于跨进程 WebView（如微信的 WeChatAppEx）
+    ChildHwnd,
+    /// 未知/未设置：使用默认 fallback 策略
+    Unknown,
+}
+
+impl Default for WalkerHint {
+    fn default() -> Self {
+        WalkerHint::Unknown
+    }
+}
+
 // ─── PropertyFilter ──────────────────────────────────────────────────────────
 
 /// A single attribute match condition within a hierarchy node.
@@ -235,6 +267,14 @@ pub struct HierarchyNode {
     /// 窗口节点本身 depth=0，其直接子节点 depth=1，以此类推。
     #[serde(default)]
     pub depth_from_window:     usize,
+    /// 提示校验时应该使用哪种 UIA TreeWalker 来查找该节点的子节点。
+    /// 捕获时自动记录，校验时优先使用此 hint 避免不必要的 fallback 尝试。
+    /// - ControlView: 用 find_by_xpath_detailed（uiauto-xpath）最快
+    /// - RawView: 用 RawViewWalker BFS 遍历
+    /// - ChildHwnd: 需要先 EnumChildWindows 找到子 HWND
+    /// - Unknown: 使用完整 fallback 策略
+    #[serde(default)]
+    pub walker_hint:           WalkerHint,
     // ─── UIA Pattern availability (for element state detection) ─────────────
     #[serde(default)]
     pub is_checkable:          bool,        // TogglePattern available
@@ -315,6 +355,7 @@ impl HierarchyNode {
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture
             depth_from_window: 0,  // 默认值，捕获时会计算真实深度
+            walker_hint: WalkerHint::Unknown,  // 默认值，捕获时会根据实际遍历方式设置
             is_checkable: false,
             is_checked: None,
             is_clickable: false,

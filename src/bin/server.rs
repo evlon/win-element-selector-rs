@@ -139,6 +139,9 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/keyboard/type", web::post().to(keyboard::type_text))
             .route("/api/keyboard/shortcut", web::post().to(keyboard::execute_shortcut_api))
             .route("/api/keyboard/key", web::post().to(keyboard::execute_key_api))
+            // XPath 编译缓存管理
+            .route("/api/xpath-cache/stats", web::get().to(element::get_xpath_cache_stats))
+            .route("/api/xpath-cache/clear", web::post().to(element::clear_xpath_cache_handler))
     })
     .keep_alive(std::time::Duration::from_secs(75))   // 保持连接 75 秒，避免频繁断连
     .client_request_timeout(std::time::Duration::from_secs(30))  // 请求超时 30 秒
