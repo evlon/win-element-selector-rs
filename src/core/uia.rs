@@ -1276,7 +1276,6 @@ pub mod windows_impl {
                                     c_ct_local, c_name, c_fwid);
                                 hit_elem = child_elem;
                                 _hit_ct = c_ct_local;
-                                hit_name = c_name; // tracked for diagnostics
                                 break;
                             }
                         }
@@ -2974,6 +2973,8 @@ pub mod windows_impl {
         type_name: Option<String>,
         required_props: Vec<(String, String)>,
         require_starts_with: Vec<(String, String)>,
+        require_contains: Vec<(String, String)>,
+        require_matches: Vec<(String, regex::Regex)>,
     }
 
     /// Parse an XPath step string into its components.
@@ -2997,11 +2998,15 @@ pub mod windows_impl {
                 type_name,
                 required_props: Vec::new(),
                 require_starts_with: Vec::new(),
+                require_contains: Vec::new(),
+                require_matches: Vec::new(),
             };
         }
 
         let mut required_props: Vec<(String, String)> = Vec::new();
         let mut require_starts_with: Vec<(String, String)> = Vec::new();
+        let mut require_contains: Vec<(String, String)> = Vec::new();
+        let mut require_matches: Vec<(String, regex::Regex)> = Vec::new();
         let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         if let Ok(re) = regex::Regex::new(r#"@(\w+)='([^']*)'"#) {
@@ -3022,15 +3027,43 @@ pub mod windows_impl {
                 }
             }
         }
-        if let Ok(re) = regex::Regex::new(r#"starts-with\(@(\w+),\s*'([^']*)'\)"#) {
+        if let Ok(re) = regex::Regex::new(r#"starts-with\(@(\w+),\s*['\"]([^'\"]*)['\"]\)"#) {
             for cap in re.captures_iter(predicates_str) {
                 if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
                     require_starts_with.push((key.as_str().to_string(), val.as_str().to_string()));
                 }
             }
         }
+        if let Ok(re) = regex::Regex::new(r#"contains\(@(\w+),\s*['\"]([^'\"]*)['\"]\)"#) {
+            for cap in re.captures_iter(predicates_str) {
+                if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
+                    require_contains.push((key.as_str().to_string(), val.as_str().to_string()));
+                }
+            }
+        }
+        if let Ok(re) = regex::Regex::new(r#"(?:matches|match)\(@(\w+),\s*['\"]([^'\"]*)['\"]\)"#) {
+            for cap in re.captures_iter(predicates_str) {
+                if let (Some(key), Some(pattern)) = (cap.get(1), cap.get(2)) {
+                    match regex::Regex::new(pattern.as_str()) {
+                        Ok(compiled) => require_matches.push((key.as_str().to_string(), compiled)),
+                        Err(e) => log::warn!("[parse_xpath_step] Invalid regex '{}': {}", pattern.as_str(), e),
+                    }
+                }
+            }
+        }
 
-        ParsedXPathStep { type_name, required_props, require_starts_with }
+        ParsedXPathStep { type_name, required_props, require_starts_with, require_contains, require_matches }
+    }
+
+    fn get_uia_property_for_xpath(elem: &IUIAutomationElement, key: &str) -> String {
+        match key {
+            "Name" => get_bstr(unsafe { elem.CurrentName() }),
+            "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
+            "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
+            "FrameworkId" => get_bstr(unsafe { elem.CurrentFrameworkId() }),
+            "HelpText" => get_bstr(unsafe { elem.CurrentHelpText() }),
+            _ => String::new(),
+        }
     }
 
     /// Check if an IUIAutomationElement matches a parsed XPath step
@@ -3045,13 +3078,7 @@ pub mod windows_impl {
 
         // Check exact property matches
         for (key, val) in &step.required_props {
-            let actual = match key.as_str() {
-                "Name" => get_bstr(unsafe { elem.CurrentName() }),
-                "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
-                "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                "FrameworkId" => get_bstr(unsafe { elem.CurrentFrameworkId() }),
-                _ => String::new(),
-            };
+            let actual = get_uia_property_for_xpath(elem, key);
             if actual != *val {
                 return false;
             }
@@ -3059,13 +3086,24 @@ pub mod windows_impl {
 
         // Check starts-with predicates
         for (key, prefix) in &step.require_starts_with {
-            let actual = match key.as_str() {
-                "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
-                "Name" => get_bstr(unsafe { elem.CurrentName() }),
-                "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-                _ => String::new(),
-            };
+            let actual = get_uia_property_for_xpath(elem, key);
             if !actual.starts_with(prefix) {
+                return false;
+            }
+        }
+
+        // Check contains predicates
+        for (key, needle) in &step.require_contains {
+            let actual = get_uia_property_for_xpath(elem, key);
+            if !actual.contains(needle) {
+                return false;
+            }
+        }
+
+        // Check regex predicates
+        for (key, pattern) in &step.require_matches {
+            let actual = get_uia_property_for_xpath(elem, key);
+            if !pattern.is_match(&actual) {
                 return false;
             }
         }
@@ -3373,6 +3411,7 @@ pub mod windows_impl {
         let uia_elem = UiaXPathElement::new(root.clone(), auto.clone());
 
         // Compile and execute XPath using uiauto-xpath library
+        let compile_start = Instant::now();
         let compiled_xpath = match XPath::compile(xpath) {
             Ok(xp) => xp,
             Err(e) => {
@@ -3380,8 +3419,10 @@ pub mod windows_impl {
                 return Err(anyhow::anyhow!("XPath compilation error: {}", e));
             }
         };
+        let compile_ms = compile_start.elapsed().as_millis();
 
         // Execute the query
+        let execute_start = Instant::now();
         let matches: Vec<IUIAutomationElement> = match compiled_xpath.select_nodes(&uia_elem) {
             Ok(nodes) => {
                 // Extract raw IUIAutomationElement from each UiElement
@@ -3404,8 +3445,18 @@ pub mod windows_impl {
             }
         };
 
+        let execute_ms = execute_start.elapsed().as_millis();
         let total_duration_ms = total_start.elapsed().as_millis() as u64;
         info!("[XPath Validation] Found {} matches ({}ms total)", matches.len(), total_duration_ms);
+        info!(
+            "[PERF][XPATH] detailed compile_ms={} execute_ms={} total_ms={} matches={} xpath_len={} descendant={}",
+            compile_ms,
+            execute_ms,
+            total_duration_ms,
+            matches.len(),
+            xpath.len(),
+            xpath.starts_with("//") || xpath.contains("//")
+        );
 
         // Generate per-segment validation results for UI display.
         // Since uiauto-xpath executes the entire XPath at once, we split by `/`

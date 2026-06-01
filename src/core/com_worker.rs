@@ -8,9 +8,12 @@
 // 3. 工作线程串行处理所有 UIA 操作
 // 4. 统一的错误处理和状态恢复
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::core::model::{CaptureResult, DetailedValidationResult};
 use crate::api::types::ElementInfo;
@@ -31,6 +34,27 @@ const TIMEOUT_SLOW: Duration = Duration::from_secs(60);
 const TIMEOUT_BATCH: Duration = Duration::from_secs(60);
 /// Inspect 大子树遍历（120s）
 const TIMEOUT_INSPECT: Duration = Duration::from_secs(120);
+
+static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_request_id() -> u64 {
+    REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+fn selector_hash(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn xpath_meta(xpath: &str) -> String {
+    format!(
+        "xpath_hash={:016x} xpath_len={} descendant={}",
+        selector_hash(xpath),
+        xpath.len(),
+        xpath.starts_with("//") || xpath.contains("//")
+    )
+}
 
 /// 计算两个 Rect 的交集，无交集返回 None
 fn intersect_rects(a: &crate::api::types::Rect, b: &crate::api::types::Rect) -> Option<crate::api::types::Rect> {
@@ -69,6 +93,8 @@ pub enum UiaRequest {
 
     /// 查找元素
     FindElement {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         xpath: String,
         random_range: Option<f32>,
@@ -123,6 +149,8 @@ pub enum UiaRequest {
 
     /// 获取元素可视区域位置信息
     GetElementVisibility {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         element_xpath: String,
         container_xpath: Option<String>,
@@ -138,6 +166,8 @@ pub enum UiaRequest {
 
     /// Inspect: 遍历元素子树提取调试信息
     Inspect {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         element_xpath: String,
         max_depth: usize,
@@ -148,6 +178,8 @@ pub enum UiaRequest {
 
     /// Compass 导航：找到基准元素后逐步 TreeWalker 导航
     Navigate {
+        request_id: u64,
+        enqueued_at: Instant,
         window_selector: String,
         base_xpath: String,
         steps: Vec<crate::api::types::NavigateStep>,
@@ -276,11 +308,26 @@ impl ComWorker {
                 log::info!("[PERF] capture_enhanced_at completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
-            UiaRequest::FindElement { window_selector, xpath, random_range, response } => {
-                let start = std::time::Instant::now();
-                log::debug!("[PERF] find_element started");
+            UiaRequest::FindElement { request_id, enqueued_at, window_selector, xpath, random_range, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] find_element start queue_wait_ms={} window_hash={:016x} {}",
+                    request_id,
+                    queue_wait_ms,
+                    selector_hash(&window_selector),
+                    xpath_meta(&xpath)
+                );
                 let result = Self::do_find_element(automation, &window_selector, &xpath, random_range);
-                log::debug!("[PERF] find_element completed in {}ms", start.elapsed().as_millis());
+                let result_count = result.as_ref().map_or(0, |v| v.len());
+                log::info!(
+                    "[PERF][COM][{}] find_element done queue_wait_ms={} exec_ms={} result_count={} error={}",
+                    request_id,
+                    queue_wait_ms,
+                    start.elapsed().as_millis(),
+                    result_count,
+                    result.is_err()
+                );
                 let _ = response.send(result);
             }
             UiaRequest::ValidateXPath { window_selector, element_xpath, hierarchy, response } => {
@@ -335,11 +382,25 @@ impl ComWorker {
                     start.elapsed().as_millis(), result.as_ref().map_or(0, |v| v.len()));
                 let _ = response.send(result);
             }
-            UiaRequest::GetElementVisibility { window_selector, element_xpath, container_xpath, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] get_element_visibility started for {}", element_xpath);
+            UiaRequest::GetElementVisibility { request_id, enqueued_at, window_selector, element_xpath, container_xpath, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] get_element_visibility start queue_wait_ms={} window_hash={:016x} {} container={}",
+                    request_id,
+                    queue_wait_ms,
+                    selector_hash(&window_selector),
+                    xpath_meta(&element_xpath),
+                    container_xpath.as_ref().map_or("none".to_string(), |v| format!("hash={:016x}", selector_hash(v)))
+                );
                 let result = Self::do_get_element_visibility(automation, &window_selector, &element_xpath, container_xpath.as_deref());
-                log::info!("[PERF] get_element_visibility completed in {}ms", start.elapsed().as_millis());
+                log::info!(
+                    "[PERF][COM][{}] get_element_visibility done queue_wait_ms={} exec_ms={} error={}",
+                    request_id,
+                    queue_wait_ms,
+                    start.elapsed().as_millis(),
+                    result.is_err()
+                );
                 let _ = response.send(result);
             }
             UiaRequest::GetElementRectAtPoint { x, y, response } => {
@@ -349,18 +410,50 @@ impl ComWorker {
                 log::debug!("[PERF] get_element_rect_at_point completed in {}ms", start.elapsed().as_millis());
                 let _ = response.send(result);
             }
-            UiaRequest::Inspect { window_selector, element_xpath, max_depth, max_nodes, format, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] inspect started for {} / {}", window_selector, element_xpath);
+            UiaRequest::Inspect { request_id, enqueued_at, window_selector, element_xpath, max_depth, max_nodes, format, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] inspect start queue_wait_ms={} window_hash={:016x} {} max_depth={} max_nodes={} format={}",
+                    request_id,
+                    queue_wait_ms,
+                    selector_hash(&window_selector),
+                    xpath_meta(&element_xpath),
+                    max_depth,
+                    max_nodes,
+                    format
+                );
                 let result = Self::do_inspect(automation, &window_selector, &element_xpath, max_depth, max_nodes, &format);
-                log::info!("[PERF] inspect completed in {}ms", start.elapsed().as_millis());
+                log::info!(
+                    "[PERF][COM][{}] inspect done queue_wait_ms={} exec_ms={} success={} error={}",
+                    request_id,
+                    queue_wait_ms,
+                    start.elapsed().as_millis(),
+                    result.as_ref().map_or(false, |r| r.success),
+                    result.is_err()
+                );
                 let _ = response.send(result);
             }
-            UiaRequest::Navigate { window_selector, base_xpath, steps, response } => {
-                let start = std::time::Instant::now();
-                log::info!("[PERF] navigate started for {} with {} steps", base_xpath, steps.len());
+            UiaRequest::Navigate { request_id, enqueued_at, window_selector, base_xpath, steps, response } => {
+                let start = Instant::now();
+                let queue_wait_ms = enqueued_at.elapsed().as_millis();
+                log::info!(
+                    "[PERF][COM][{}] navigate start queue_wait_ms={} window_hash={:016x} {} steps={}",
+                    request_id,
+                    queue_wait_ms,
+                    selector_hash(&window_selector),
+                    xpath_meta(&base_xpath),
+                    steps.len()
+                );
                 let result = Self::do_navigate(automation, &window_selector, &base_xpath, &steps);
-                log::info!("[PERF] navigate completed in {}ms", start.elapsed().as_millis());
+                log::info!(
+                    "[PERF][COM][{}] navigate done queue_wait_ms={} exec_ms={} found={} error={}",
+                    request_id,
+                    queue_wait_ms,
+                    start.elapsed().as_millis(),
+                    result.as_ref().ok().and_then(|r| r.as_ref().ok()).and_then(|(e, _)| e.as_ref()).is_some(),
+                    result.is_err()
+                );
                 let _ = response.send(result);
             }
             UiaRequest::Shutdown => {
@@ -874,6 +967,8 @@ impl ComWorker {
         
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::FindElement {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 xpath,
                 random_range,
@@ -1044,6 +1139,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::GetElementVisibility {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 element_xpath,
                 container_xpath,
@@ -1092,6 +1189,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::Inspect {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 element_xpath,
                 max_depth,
@@ -1120,6 +1219,8 @@ impl ComWorker {
 
         if let Some(ref sender) = self.sender {
             sender.send(UiaRequest::Navigate {
+                request_id: next_request_id(),
+                enqueued_at: Instant::now(),
                 window_selector,
                 base_xpath,
                 steps,
@@ -1275,7 +1376,14 @@ pub fn global_find_element(
 ) -> anyhow::Result<Vec<ElementInfo>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::FindElement { window_selector, xpath, random_range, response: response_sender })?;
+    sender.send(UiaRequest::FindElement {
+        request_id: next_request_id(),
+        enqueued_at: Instant::now(),
+        window_selector,
+        xpath,
+        random_range,
+        response: response_sender,
+    })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1393,7 +1501,14 @@ pub fn global_get_element_visibility(
 ) -> anyhow::Result<crate::api::types::ElementVisibilityResponse> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::GetElementVisibility { window_selector, element_xpath, container_xpath, response: response_sender })?;
+    sender.send(UiaRequest::GetElementVisibility {
+        request_id: next_request_id(),
+        enqueued_at: Instant::now(),
+        window_selector,
+        element_xpath,
+        container_xpath,
+        response: response_sender,
+    })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1423,7 +1538,14 @@ pub fn global_navigate(
 ) -> anyhow::Result<Result<(Option<crate::api::types::ElementInfo>, String), String>> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::Navigate { window_selector, base_xpath, steps, response: response_sender })?;
+    sender.send(UiaRequest::Navigate {
+        request_id: next_request_id(),
+        enqueued_at: Instant::now(),
+        window_selector,
+        base_xpath,
+        steps,
+        response: response_sender,
+    })?;
     response_receiver
         .recv_timeout(TIMEOUT_STANDARD)
         .map_err(|e| {
@@ -1442,7 +1564,16 @@ pub fn global_inspect(
 ) -> anyhow::Result<InspectResult> {
     let sender = get_worker_sender()?;
     let (response_sender, response_receiver) = mpsc::channel();
-    sender.send(UiaRequest::Inspect { window_selector, element_xpath, max_depth, max_nodes, format, response: response_sender })?;
+    sender.send(UiaRequest::Inspect {
+        request_id: next_request_id(),
+        enqueued_at: Instant::now(),
+        window_selector,
+        element_xpath,
+        max_depth,
+        max_nodes,
+        format,
+        response: response_sender,
+    })?;
     response_receiver
         .recv_timeout(TIMEOUT_INSPECT)
         .map_err(|e| {

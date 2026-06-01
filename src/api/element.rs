@@ -2,11 +2,37 @@
 //
 // 元素查找 API
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo, NavigateRequest, NavigateResponse};
+
+static API_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_api_request_id() -> u64 {
+    API_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+fn selector_hash(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn xpath_meta(xpath: &str) -> String {
+    format!(
+        "xpath_hash={:016x} xpath_len={} descendant={}",
+        selector_hash(xpath),
+        xpath.len(),
+        xpath.starts_with("//") || xpath.contains("//")
+    )
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -50,9 +76,14 @@ pub async fn get_element(
         });
     };
 
+    let request_id = next_api_request_id();
+    let request_start = Instant::now();
+    let window_hash = selector_hash(&element_query.window);
+    let element_meta = xpath_meta(&element_query.element);
+
     info!(
-        "API: /api/element window='{}' element='{}' random_range={}",
-        element_query.window, element_query.element, element_query.random_range
+        "[PERF][HTTP][{}] /api/element start window_hash={:016x} {} random_range={}",
+        request_id, window_hash, element_meta, element_query.random_range
     );
 
     // Clone query for spawn_blocking (需要 'static)
@@ -77,6 +108,12 @@ pub async fn get_element(
                     "Element found: type='{}' name='{}' center={} (total={})",
                     element_info.control_type, element_info.name, center_pos, total
                 );
+                info!(
+                    "[PERF][HTTP][{}] /api/element done status=ok found=true total={} duration_ms={}",
+                    request_id,
+                    total,
+                    request_start.elapsed().as_millis()
+                );
                 HttpResponse::Ok().json(ElementResponse {
                     found: true,
                     element_selector: element_query.element.clone(),
@@ -86,6 +123,11 @@ pub async fn get_element(
                 })
             } else {
                 warn!("Element not found");
+                info!(
+                    "[PERF][HTTP][{}] /api/element done status=ok found=false total=0 duration_ms={}",
+                    request_id,
+                    request_start.elapsed().as_millis()
+                );
                 HttpResponse::Ok().json(ElementResponse {
                     found: false,
                     element_selector: element_query.element.clone(),
@@ -97,6 +139,12 @@ pub async fn get_element(
         }
         Ok(Err(e)) => {
             warn!("COM worker error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element done status=com_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(ElementResponse {
                 found: false,
                 element_selector: element_query.element.clone(),
@@ -107,6 +155,12 @@ pub async fn get_element(
         }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element done status=spawn_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(ElementResponse {
                 found: false,
                 element_selector: element_query.element.clone(),
@@ -138,9 +192,14 @@ pub async fn get_all_elements(
         });
     };
 
+    let request_id = next_api_request_id();
+    let request_start = Instant::now();
+    let window_hash = selector_hash(&element_query.window);
+    let element_meta = xpath_meta(&element_query.element);
+
     info!(
-        "API: /api/element/all window='{}' element='{}' random_range={}",
-        element_query.window, element_query.element, element_query.random_range
+        "[PERF][HTTP][{}] /api/element/all start window_hash={:016x} {} random_range={}",
+        request_id, window_hash, element_meta, element_query.random_range
     );
 
     let window = element_query.window.clone();
@@ -158,6 +217,12 @@ pub async fn get_all_elements(
             let total = elements.len();
             if total > 0 {
                 info!("Found {} elements", total);
+                info!(
+                    "[PERF][HTTP][{}] /api/element/all done status=ok found=true total={} duration_ms={}",
+                    request_id,
+                    total,
+                    request_start.elapsed().as_millis()
+                );
                 let elements_with_selector: Vec<ElementWithSelector> = elements
                     .into_iter()
                     .map(|el_info| ElementWithSelector {
@@ -173,6 +238,11 @@ pub async fn get_all_elements(
                 })
             } else {
                 warn!("No elements found");
+                info!(
+                    "[PERF][HTTP][{}] /api/element/all done status=ok found=false total=0 duration_ms={}",
+                    request_id,
+                    request_start.elapsed().as_millis()
+                );
                 HttpResponse::Ok().json(AllElementsResponse {
                     found: false,
                     elements: vec![],
@@ -183,6 +253,12 @@ pub async fn get_all_elements(
         }
         Ok(Err(e)) => {
             warn!("COM worker error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/all done status=com_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(AllElementsResponse {
                 found: false,
                 elements: vec![],
@@ -192,6 +268,12 @@ pub async fn get_all_elements(
         }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/all done status=spawn_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(AllElementsResponse {
                 found: false,
                 elements: vec![],
@@ -207,9 +289,17 @@ pub async fn get_all_elements(
 pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -> impl Responder {
     let request = body.into_inner();
 
+    let request_id = next_api_request_id();
+    let request_start = Instant::now();
+    let window_hash = selector_hash(&request.window);
+    let element_meta = xpath_meta(&request.element);
+
     info!(
-        "API: /api/element/visibility window='{}' element='{}'",
-        request.window, request.element
+        "[PERF][HTTP][{}] /api/element/visibility start window_hash={:016x} {} container={}",
+        request_id,
+        window_hash,
+        element_meta,
+        request.container.as_ref().map_or("none".to_string(), |v| format!("hash={:016x}", selector_hash(v)))
     );
 
     let window = request.window.clone();
@@ -227,10 +317,23 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
                 "Element visibility: found={} visibility={} position={} scroll_direction={:?}",
                 response.found, response.visibility, response.position, response.scroll_direction
             );
+            info!(
+                "[PERF][HTTP][{}] /api/element/visibility done status=ok found={} visibility={} duration_ms={}",
+                request_id,
+                response.found,
+                response.visibility,
+                request_start.elapsed().as_millis()
+            );
             HttpResponse::Ok().json(response)
         }
         Ok(Err(e)) => {
             warn!("Element visibility check failed: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/visibility done status=com_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::Ok().json(ElementVisibilityResponse {
                 found: false,
                 is_offscreen: None,
@@ -246,6 +349,12 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
         }
         Err(e) => {
             warn!("Element visibility spawn error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/visibility done status=spawn_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(ElementVisibilityResponse {
                 found: false,
                 is_offscreen: None,
@@ -350,9 +459,19 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder {
     let request = body.into_inner();
 
+    let request_id = next_api_request_id();
+    let request_start = Instant::now();
+    let window_hash = selector_hash(&request.window);
+    let element_meta = xpath_meta(&request.element);
+
     info!(
-        "API: /api/element/inspect window='{}' element='{}' max_depth={} max_nodes={} format={}",
-        request.window, request.element, request.max_depth, request.max_nodes, request.format
+        "[PERF][HTTP][{}] /api/element/inspect start window_hash={:016x} {} max_depth={} max_nodes={} format={}",
+        request_id,
+        window_hash,
+        element_meta,
+        request.max_depth,
+        request.max_nodes,
+        request.format
     );
 
     let window = request.window.clone();
@@ -368,6 +487,13 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
 
     match result {
         Ok(Ok(inspect_result)) => {
+            info!(
+                "[PERF][HTTP][{}] /api/element/inspect done status=ok success={} total_children={} duration_ms={}",
+                request_id,
+                inspect_result.success,
+                inspect_result.total_children,
+                request_start.elapsed().as_millis()
+            );
             let api_nodes: Option<InspectNodeInfo> = inspect_result.nodes.map(Into::into);
             let flat_nodes: Vec<FlatInspectNodeInfo> = inspect_result.flat_nodes.into_iter().map(Into::into).collect();
             HttpResponse::Ok().json(InspectResponse {
@@ -383,6 +509,12 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
         }
         Ok(Err(e)) => {
             warn!("Inspect element COM worker error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/inspect done status=com_error success=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::Ok().json(InspectResponse {
                 success: false,
                 root_xpath: request.element.clone(),
@@ -396,6 +528,12 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
         }
         Err(e) => {
             warn!("Inspect element spawn error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/inspect done status=spawn_error success=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(InspectResponse {
                 success: false,
                 root_xpath: request.element.clone(),
@@ -415,9 +553,17 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
 pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responder {
     let request = body.into_inner();
 
+    let request_id = next_api_request_id();
+    let request_start = Instant::now();
+    let window_hash = selector_hash(&request.window);
+    let element_meta = xpath_meta(&request.element);
+
     info!(
-        "API: /api/element/navigate window='{}' element='{}' steps={}",
-        request.window, request.element, request.steps.len()
+        "[PERF][HTTP][{}] /api/element/navigate start window_hash={:016x} {} steps={}",
+        request_id,
+        window_hash,
+        element_meta,
+        request.steps.len()
     );
 
     let window = request.window.clone();
@@ -435,6 +581,11 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
                 "Navigate succeeded: type='{}' name='{}'",
                 element_info.control_type, element_info.name
             );
+            info!(
+                "[PERF][HTTP][{}] /api/element/navigate done status=ok found=true duration_ms={}",
+                request_id,
+                request_start.elapsed().as_millis()
+            );
             HttpResponse::Ok().json(NavigateResponse {
                 found: true,
                 find_selector,
@@ -444,6 +595,11 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
         }
         Ok(Ok(Ok((None, find_selector)))) => {
             warn!("Navigate: element not found at target position");
+            info!(
+                "[PERF][HTTP][{}] /api/element/navigate done status=ok found=false duration_ms={}",
+                request_id,
+                request_start.elapsed().as_millis()
+            );
             HttpResponse::Ok().json(NavigateResponse {
                 found: false,
                 find_selector,
@@ -453,6 +609,12 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
         }
         Ok(Ok(Err(e))) => {
             warn!("Navigate failed: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/navigate done status=navigate_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::Ok().json(NavigateResponse {
                 found: false,
                 find_selector: String::new(),
@@ -462,6 +624,12 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
         }
         Ok(Err(e)) => {
             warn!("Navigate COM worker error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/navigate done status=com_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(NavigateResponse {
                 found: false,
                 find_selector: String::new(),
@@ -471,6 +639,12 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
         }
         Err(e) => {
             warn!("Navigate spawn error: {}", e);
+            warn!(
+                "[PERF][HTTP][{}] /api/element/navigate done status=spawn_error found=false duration_ms={} error={}",
+                request_id,
+                request_start.elapsed().as_millis(),
+                e
+            );
             HttpResponse::InternalServerError().json(NavigateResponse {
                 found: false,
                 find_selector: String::new(),
