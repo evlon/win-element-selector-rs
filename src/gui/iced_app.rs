@@ -236,7 +236,7 @@ impl Default for State {
 }
 
 impl State {
-    fn init() -> (Self, Task<Message>) {
+    pub fn init() -> (Self, Task<Message>) {
         let config = persistence::load_config();
 
         // Try to restore last capture, track source for status message
@@ -1836,9 +1836,9 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 }
 
 fn mouse_hook_subscription() -> Subscription<Message> {
-    Subscription::run_with_id(
+    Subscription::run_with(
         "mouse_hook",
-        stream::channel(100, |mut output| async move {
+        |_id| stream::channel(100, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             loop {
                 if let Some(event) = input_hook::poll_mouse_click() {
                     let _ = output.send(Message::MouseHookEvent(event)).await;
@@ -1852,9 +1852,9 @@ fn mouse_hook_subscription() -> Subscription<Message> {
 /// Poll mouse position directly via Win32 GetCursorPos
 /// Emits on every poll interval so debounce can work even when mouse is stationary
 fn mouse_move_subscription() -> Subscription<Message> {
-    Subscription::run_with_id(
+    Subscription::run_with(
         "mouse_move",
-        stream::channel(10, |mut output| async move {
+        |_id| stream::channel(10, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             use windows::Win32::Foundation::POINT;
             use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
             loop {
@@ -1997,7 +1997,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .padding([4, 8])
         .on_press(Message::LogPanelToggled);
 
-    let mut items = vec![Space::with_width(Length::Fill).into(), validate_btn.into(), capture_group.into()];
+    let mut items = vec![Space::new().width(Length::Fill).into(), validate_btn.into(), capture_group.into()];
     if let Some(btn) = complete_capture_btn {
         items.push(btn.into());
     }
@@ -2043,6 +2043,7 @@ fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style
             },
             text_color: Color::BLACK,
             shadow: Default::default(),
+            snap: false,
         },
         ValidationResult::NotFound => button::Style {
             border: iced::Border {
@@ -2363,7 +2364,7 @@ fn view_element_tree(state: &State) -> Element<'_, Message> {
         let is_selected = state.selected_node == Some(idx);
         let is_target = idx == state.hierarchy.len() - 1;
 
-        let cb = checkbox("", node.included)
+        let cb = checkbox(node.included)
             .on_toggle(move |_| Message::TreeNodeIncludedToggled(idx));
 
         // Label color matching old egui theme
@@ -2457,7 +2458,7 @@ fn view_window_properties(state: &State) -> Element<'_, Message> {
 
     // Column header row
     let header_row = row![
-        Space::with_width(Length::Fixed(22.0)), // space for checkbox
+        Space::new().width(Length::Fixed(22.0)), // space for checkbox
         text("属性名").size(11).color(colors.muted).width(Length::Fixed(90.0)),
         text("运算符").size(11).color(colors.muted).width(Length::Fixed(80.0)),
         text("值").size(11).color(colors.muted),
@@ -2475,7 +2476,7 @@ fn view_window_properties(state: &State) -> Element<'_, Message> {
     filter_rows.push(header_container.into());
 
     for (f_idx, filter) in state.window_filters.iter().enumerate() {
-        let cb = checkbox("", filter.enabled)
+        let cb = checkbox(filter.enabled)
             .on_toggle(move |_| Message::WindowFilterEnabled(f_idx, !filter.enabled));
 
         let label = text(&filter.name).width(Length::Fixed(90.0));
@@ -2648,7 +2649,7 @@ fn view_properties(state: &State) -> Element<'_, Message> {
 
     // Filter column header
     let header_row = row![
-        Space::with_width(Length::Fixed(22.0)),
+        Space::new().width(Length::Fixed(22.0)),
         text("属性名").size(11).color(colors.muted).width(Length::Fixed(90.0)),
         text("运算符").size(11).color(colors.muted).width(Length::Fixed(80.0)),
         text("值").size(11).color(colors.muted),
@@ -2669,7 +2670,7 @@ fn view_properties(state: &State) -> Element<'_, Message> {
     {
         let depth_val = format!("{}", node.depth_from_window);
         let depth_row = row![
-            Space::with_width(Length::Fixed(22.0)),
+            Space::new().width(Length::Fixed(22.0)),
             text("Depth").size(12).color(colors.muted).width(Length::Fixed(90.0)),
             text("—").size(12).color(colors.muted).width(Length::Fixed(76.0)),
             text(depth_val).size(12).color(colors.mono_fg),
@@ -2681,7 +2682,7 @@ fn view_properties(state: &State) -> Element<'_, Message> {
     }
 
     for (f_idx, filter) in node.filters.iter().enumerate() {
-        let cb = checkbox("", filter.enabled)
+        let cb = checkbox(filter.enabled)
             .on_toggle(move |_| Message::FilterEnabledToggled(selected, f_idx, !filter.enabled));
 
         let label = text(&filter.name).width(Length::Fixed(90.0));
@@ -2810,10 +2811,11 @@ fn view_bottom_bar(state: &State) -> Element<'_, Message> {
             },
             shadow: Default::default(),
             text_color: confirm_color,
+            snap: false,
         })
         .on_press(Message::ConfirmAndClose);
 
-    container(row![status, Space::with_width(Length::Fill), history_btn, save_btn, cancel_btn, confirm_btn]
+    container(row![status, Space::new().width(Length::Fill), history_btn, save_btn, cancel_btn, confirm_btn]
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([6, 12]),
@@ -2835,7 +2837,7 @@ fn view_code_dialog(state: &State) -> Element<'_, Message> {
 
     let header = row![
         text("TypeScript 代码生成").size(14),
-        Space::with_width(Length::Fill),
+        Space::new().width(Length::Fill),
         text("格式:").size(11).color(colors.muted),
         format_pick,
     ]
@@ -2864,6 +2866,7 @@ fn view_code_dialog(state: &State) -> Element<'_, Message> {
             },
             text_color: Color::BLACK,
             shadow: Default::default(),
+            snap: false,
         })
         .on_press(Message::CopyAllCode);
 
@@ -2883,7 +2886,7 @@ fn view_code_dialog(state: &State) -> Element<'_, Message> {
 
     let footer = row![
         text(hint_text).size(11).color(colors.muted),
-        Space::with_width(Length::Fill),
+        Space::new().width(Length::Fill),
         copy_btn,
         ok_btn,
     ]
@@ -2917,7 +2920,7 @@ fn view_history_panel(state: &State) -> Element<'_, Message> {
 
     let header = row![
         text("历史记录").size(14).color(colors.text),
-        Space::with_width(Length::Fill),
+        Space::new().width(Length::Fill),
         button(text("×").size(16).color(colors.muted))
             .padding([2, 8])
             .style(move |_, _| button::Style {
@@ -2974,7 +2977,7 @@ fn view_history_panel(state: &State) -> Element<'_, Message> {
 
             let entry_row = row![
                 column![name_text, meta_text].spacing(2),
-                Space::with_width(Length::Fill),
+                Space::new().width(Length::Fill),
                 delete_btn,
             ]
             .spacing(8)
@@ -3001,6 +3004,7 @@ fn view_history_panel(state: &State) -> Element<'_, Message> {
                     background: None,
                     shadow: Default::default(),
                     text_color: colors.text,
+                    snap: false,
                 })
                 .on_press(Message::HistoryEntrySelected(filtered_idx));
 
@@ -3088,7 +3092,7 @@ fn view_naming_dialog(state: &State) -> Element<'_, Message> {
         .on_press(Message::NamingDialogConfirm);
 
     let footer = row![
-        Space::with_width(Length::Fill),
+        Space::new().width(Length::Fill),
         cancel_btn,
         save_btn,
     ]

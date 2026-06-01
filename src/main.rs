@@ -4,7 +4,7 @@
 // GUI 模块
 mod gui;
 
-use gui::iced_app::{update, view, subscription};
+use gui::iced_app::{State, update, view, subscription};
 use gui::input_hook;
 use gui::persistence::load_config;
 
@@ -84,7 +84,8 @@ fn main() -> anyhow::Result<()> {
     let default_font = iced::Font::with_name("Microsoft YaHei");
 
     // Launch iced GUI
-    let mut app = iced::application("Windows 元素选择器 v1.0", update, view)
+    let mut app = iced::application(State::init, update, view)
+        .title("Windows 元素选择器 v1.0")
         .subscription(subscription)
         .window(iced::window::Settings {
             size: iced::Size::new(980.0, 660.0),
