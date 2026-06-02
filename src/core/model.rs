@@ -5,6 +5,63 @@
 use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
 use serde::{Deserialize, Serialize};
 
+// ─── CaptureMode ─────────────────────────────────────────────────────────────
+
+/// 捕获模式：决定使用哪种 UIA TreeWalker 和策略
+///
+/// - `Fast`：性能极致，只用 ControlViewWalker。适合大多数原生应用（Qt、Win32、WPF）
+/// - `Full`：增强捕获，RawViewWalker + 子进程窗口 + 缓存。能捕获所有元素（包括 WebView/Chrome 嵌入），可接受慢一些
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureMode {
+    /// 性能极致模式：只用 ControlViewWalker，XPath 前缀 `[fast]`
+    Fast,
+    /// 增强捕获模式：RawViewWalker + 子进程窗口 + 缓存，XPath 前缀 `[full]`
+    Full,
+}
+
+impl CaptureMode {
+    /// XPath 前缀字符串
+    pub fn xpath_prefix(&self) -> &'static str {
+        match self {
+            CaptureMode::Fast => "[fast]",
+            CaptureMode::Full => "[full]",
+        }
+    }
+
+    /// 从 XPath 前缀解析 CaptureMode
+    /// 返回 None 表示没有前缀（向后兼容，走完整 fallback）
+    pub fn from_xpath_prefix(xpath: &str) -> Option<CaptureMode> {
+        if xpath.starts_with("[fast]") {
+            Some(CaptureMode::Fast)
+        } else if xpath.starts_with("[full]") {
+            Some(CaptureMode::Full)
+        } else {
+            None
+        }
+    }
+
+    /// 剥离 XPath 前缀，返回 (capture_mode, stripped_xpath)
+    /// 如果没有前缀，返回 (None, original_xpath)
+    pub fn strip_xpath_prefix(xpath: &str) -> (Option<CaptureMode>, &str) {
+        if let Some(rest) = xpath.strip_prefix("[fast]") {
+            (Some(CaptureMode::Fast), rest)
+        } else if let Some(rest) = xpath.strip_prefix("[full]") {
+            (Some(CaptureMode::Full), rest)
+        } else {
+            (None, xpath)
+        }
+    }
+}
+
+impl std::fmt::Display for CaptureMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaptureMode::Fast => write!(f, "快速捕获"),
+            CaptureMode::Full => write!(f, "增强捕获"),
+        }
+    }
+}
+
 // ─── Operator ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -368,7 +425,9 @@ impl HierarchyNode {
     /// 在 UIA 捕获阶段填充完扩展字段后调用，将所有有区分度的属性加入 filters
     /// 策略：
     /// - 字符串属性：非空时添加（如 HelpText, AcceleratorKey 等）
-    /// - 布尔属性：特殊值时添加（如 IsPassword=true, IsEnabled=false, IsOffscreen=true）
+    /// - 布尔属性：特殊值时添加（如 IsPassword=true, IsEnabled=false）
+    /// - IsOffscreen 不添加：Chrome/WebView 的中间容器 Group 通常标记为 true，
+    ///   但该属性在不同 UIA 上下文（Walker/树范围）中返回值不稳定，会导致校验失败
     pub fn build_extended_filters(&mut self) {
         // 字符串属性：非空时添加
         if !self.framework_id.is_empty() {
@@ -397,9 +456,7 @@ impl HierarchyNode {
         if !self.is_enabled {
             self.filters.push(PropertyFilter::new("IsEnabled", "false"));
         }
-        if self.is_offscreen {
-            self.filters.push(PropertyFilter::new("IsOffscreen", "true"));
-        }
+        // IsOffscreen 不生成过滤器，原因见上方注释
     }
 
     /// XPath tag name derived from ControlType.
@@ -517,7 +574,8 @@ pub struct WindowInfo {
 pub struct XPathResult {
     /// Window selector in XPath-like format, e.g. "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
     pub window_selector: String,
-    /// Element XPath starting from window root, e.g. "/Group/Button[@Name='发送']" or "/Group//Button[...]"
+    /// Element XPath starting from window root, with capture mode prefix.
+    /// e.g. "[fast]/Group/Button[@Name='发送']" or "[full]/Group//Custom/..."
     pub element_xpath: String,
 }
 
@@ -531,6 +589,8 @@ pub struct CaptureResult {
     pub error:      Option<String>,
     /// Window information extracted from hierarchy (for fast validation).
     pub window_info: Option<WindowInfo>,
+    /// 捕获模式：标识此捕获结果是用哪种策略生成的
+    pub capture_mode: CaptureMode,
 }
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
@@ -900,6 +960,7 @@ mod tests {
                 process_id: 1234,
                 process_name: "notepad".to_string(),
             }),
+            capture_mode: CaptureMode::Fast,
         };
         
         assert!(result.window_info.is_some());
@@ -920,6 +981,7 @@ mod tests {
             cursor_y: 300,
             error: None,
             window_info: None,
+            capture_mode: CaptureMode::Fast,
         };
         
         assert!(result.window_info.is_none());

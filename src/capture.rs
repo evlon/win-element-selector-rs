@@ -28,6 +28,7 @@ pub fn capture() -> CaptureResult {
                 cursor_x: 0, cursor_y: 0,
                 error: Some("GetCursorPos 失败".to_string()),
                 window_info: None,
+                capture_mode: crate::core::model::CaptureMode::Fast,
             };
         }
         p
@@ -40,6 +41,7 @@ pub fn capture() -> CaptureResult {
             cursor_x: pt.x, cursor_y: pt.y,
             error: Some(format!("捕获失败: {}", e)),
             window_info: None,
+            capture_mode: crate::core::model::CaptureMode::Fast,
         },
     }
 }
@@ -55,6 +57,7 @@ pub fn capture_at(x: i32, y: i32) -> CaptureResult {
             cursor_x: x, cursor_y: y,
             error: Some(format!("捕获失败: {}", e)),
             window_info: None,
+            capture_mode: crate::core::model::CaptureMode::Fast,
         },
     }
 }
@@ -69,6 +72,7 @@ pub fn capture_enhanced_at(x: i32, y: i32) -> CaptureResult {
             cursor_x: x, cursor_y: y,
             error: Some(format!("增强捕获失败: {}", e)),
             window_info: None,
+            capture_mode: crate::core::model::CaptureMode::Full,
         },
     }
 }

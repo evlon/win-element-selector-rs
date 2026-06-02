@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// 重导出 CaptureMode 从 core::model
+pub use element_selector::core::model::CaptureMode;
+
 /// XPath 来源状态（替代双重 bool 标志）
 #[derive(Debug, Clone)]
 pub enum XPathSource {
@@ -53,24 +56,6 @@ pub enum CaptureState {
     Capturing,
 }
 
-/// 捕获模式
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CaptureMode {
-    /// 普通捕获：ElementFromPoint + ControlViewWalker
-    Normal,
-    /// 增强捕获：RawViewWalker + RECT 命中测试（适用于 WebView 等复杂场景）
-    Enhanced,
-}
-
-impl std::fmt::Display for CaptureMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CaptureMode::Normal => write!(f, "普通捕获"),
-            CaptureMode::Enhanced => write!(f, "增强捕获"),
-        }
-    }
-}
-
 /// 持久化捕获数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCapture {
@@ -86,6 +71,9 @@ pub struct PersistedCapture {
     pub optimization_summary:   Option<OptimizationSummaryPersisted>,
     /// 结果序号（选择第N个匹配元素）
     pub result_index:           Option<String>,
+    /// 捕获模式（快速捕获 vs 增强捕获）
+    #[serde(default)]
+    pub capture_mode:           Option<CaptureMode>,
 }
 
 /// 优化摘要持久化格式

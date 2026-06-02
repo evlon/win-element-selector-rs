@@ -623,6 +623,7 @@ impl ComWorker {
                     cursor_y: node.rect.y,
                     error: None,
                     window_info,
+                    capture_mode: crate::core::model::CaptureMode::Fast,
                 });
                 
                 log::debug!("[ComWorker] 添加样本 {} 到结果集", i + 1);
@@ -649,6 +650,7 @@ impl ComWorker {
                     cursor_y: node.rect.y,
                     error: None,
                     window_info,
+                    capture_mode: crate::core::model::CaptureMode::Fast,
                 });
                 
                 log::debug!("[ComWorker] 添加样本 {} 到结果集", j + 1);

@@ -3,14 +3,14 @@
 // XPath generation and validation utilities.
 // Shared between GUI and HTTP API.
 
-use super::model::{HierarchyNode, XPathResult, WindowInfo};
+use super::model::{HierarchyNode, XPathResult, WindowInfo, CaptureMode};
 
 /// Build the complete XPath result from the captured hierarchy.
 /// The hierarchy now starts from the Window node.
 /// Returns:
 ///   - window_selector: XPath-like string for the window (first node)
-///   - element_xpath: XPath for elements inside the window (starts with /)
-pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>) -> XPathResult {
+///   - element_xpath: XPath for elements inside the window, with capture mode prefix (e.g. "[fast]/Group/Button")
+pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>, capture_mode: CaptureMode) -> XPathResult {
     if nodes.is_empty() {
         panic!("Hierarchy must not be empty");
     }
@@ -23,7 +23,10 @@ pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>) -> XP
     // Element XPath should start from nodes[1] (after the window root)
     // 元素 XPath 从窗口节点之后开始，跳过窗口根节点
     let element_nodes = &nodes[1..];
-    let element_xpath = generate_element_xpath(element_nodes);
+    let element_xpath_inner = generate_element_xpath(element_nodes);
+    
+    // 添加捕获模式前缀
+    let element_xpath = format!("{}{}", capture_mode.xpath_prefix(), element_xpath_inner);
     
     XPathResult {
         window_selector,
@@ -133,6 +136,7 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
 /// Validate that `xpath` is syntactically well-formed enough to attempt a search.
 /// Returns `None` if valid, or an error string describing the problem.
 /// Supports both old format (//ControlType) and new format (Window[...], /ControlType).
+/// Also supports capture mode prefix: [fast]/Group/... or [full]/Group/...
 pub fn lint(xpath: &str) -> Option<String> {
     let s = xpath.trim();
     if s.is_empty() {
@@ -152,16 +156,25 @@ pub fn lint(xpath: &str) -> Option<String> {
             return Some("窗口选择器必须以 Window/Pane/Document 等类型开头".into());
         }
         
-        // Validate element XPath (should start with / or ( for indexed expression)
-        let inner_xpath = if element_part.starts_with('(') {
+        // Validate element XPath (should start with /, ( for indexed, or [fast]/[full] prefix)
+        // Strip capture mode prefix first
+        let element_stripped = if element_part.starts_with("[fast]") {
+            &element_part[6..]
+        } else if element_part.starts_with("[full]") {
+            &element_part[6..]
+        } else {
+            element_part
+        };
+        
+        let inner_xpath = if element_stripped.starts_with('(') {
             // Indexed form: (//xpath)[N] — validate the inner part
-            if let Some(end) = element_part.find(')') {
-                &element_part[1..end]
+            if let Some(end) = element_stripped.find(')') {
+                &element_stripped[1..end]
             } else {
                 return Some("索引格式错误：缺少右括号 ')'".into());
             }
         } else {
-            element_part
+            element_stripped
         };
         if !inner_xpath.starts_with('/') {
             return Some("元素 XPath 必须以 / 开头".into());
@@ -177,8 +190,15 @@ pub fn lint(xpath: &str) -> Option<String> {
         return None;
     }
     
-    // Old format: must start with //
-    if !s.starts_with("//") {
+    // Old format: must start with // (or [fast]// / [full]//)
+    let s_stripped = if s.starts_with("[fast]") {
+        &s[6..]
+    } else if s.starts_with("[full]") {
+        &s[6..]
+    } else {
+        s
+    };
+    if !s_stripped.starts_with("//") {
         return Some("XPath 必须以 // 开头（或使用新格式：窗口选择器, 元素XPath）".into());
     }
     
@@ -230,7 +250,7 @@ mod tests {
             node("Window", "main", ""),
             node("Button", "btnOk", "OK")
         ];
-        let result = generate(&nodes, None);
+        let result = generate(&nodes, None, CaptureMode::Fast);
         
         // Window selector should not start with //
         assert!(!result.window_selector.starts_with("//"));
@@ -301,7 +321,7 @@ mod tests {
             HierarchyNode::new("Button", "", "mmui::XImage", "", 1, ElementRect::default(), 0),
         ];
 
-        let result = generate(&nodes, None);
+        let result = generate(&nodes, None, CaptureMode::Fast);
         
         println!("Window selector:\n{}", result.window_selector);
         println!("Element XPath:\n{}", result.element_xpath);
@@ -341,7 +361,7 @@ mod tests {
         let mut nodes = nodes;
         nodes[2].included = false;
         
-        let result = generate(&nodes, None);
+        let result = generate(&nodes, None, CaptureMode::Fast);
         
         // Should have // because Pane was skipped
         assert!(result.element_xpath.contains("//Button"), "Should use // when intermediate node skipped");
@@ -360,7 +380,7 @@ mod tests {
             HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0),
         ];
 
-        let result = generate(&nodes, None);
+        let result = generate(&nodes, None, CaptureMode::Fast);
         
         // Check that first() is used for position 1
         assert!(result.element_xpath.contains("first()"), "Should use first() for position 1");
@@ -494,7 +514,7 @@ mod tests {
             );
         }
 
-        let result = generate(&nodes, None);
+        let result = generate(&nodes, None, CaptureMode::Fast);
         
         // Count / vs // to verify optimization
         let single_slash_count = result.element_xpath.matches('/').count();

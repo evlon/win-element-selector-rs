@@ -8,7 +8,7 @@
 // Allow non-upper-case globals for UIA constants from windows crate.
 #![allow(non_upper_case_globals)]
 
-use super::model::{CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo};
+use super::model::{CaptureMode, CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo};
 use log::{debug, error, info};
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
 
@@ -563,6 +563,7 @@ pub mod windows_impl {
                     cursor_x: 0, cursor_y: 0,
                     error: Some("GetCursorPos 失败".to_string()),
                     window_info: None,
+                    capture_mode: CaptureMode::Fast,
                 };
             }
             p
@@ -581,6 +582,7 @@ pub mod windows_impl {
                     cursor_x: x, cursor_y: y,
                     error: Some(format!("捕获失败: {}", e)),
                     window_info: None,
+                    capture_mode: CaptureMode::Fast,
                 }
             }
         }
@@ -681,12 +683,11 @@ pub mod windows_impl {
         let target_ct = unsafe { target.CurrentControlType().map(control_type_name).unwrap_or_default() };
         debug!("[Normal] ElementFromPoint: type='{}' name='{}'", target_ct, target_name);
 
-        // 2. Build ancestor chain using RawViewWalker
-        // Always use RawViewWalker (not FindAll(Ancestors)) because FindAll uses
-        // Control View which filters out intermediate elements (e.g. Qt Group nodes),
-        // causing hierarchy gaps (depth 7 jumping to depth 13).
-        let walker = unsafe { auto.RawViewWalker() }
-            .or_else(|_| unsafe { auto.ControlViewWalker() })?;
+        // 2. Build ancestor chain using ControlViewWalker.
+        // Use ControlViewWalker to match the [fast] validation path (strict ControlView only).
+        // This ensures the captured hierarchy is exactly what ControlView sees,
+        // avoiding mismatch between capture (RawView) and validation (ControlView).
+        let walker = unsafe { auto.ControlViewWalker() }?;
         let desktop = unsafe { auto.GetRootElement()? };
 
         let mut chain: Vec<IUIAutomationElement> = vec![target.clone()];
@@ -715,8 +716,7 @@ pub mod windows_impl {
         // 4. Compute sibling index for the target element
         if let Some(last) = hierarchy.last_mut() {
             last.is_target = true;
-            let walker = unsafe { auto.RawViewWalker().ok() }
-                .or_else(|| unsafe { auto.ControlViewWalker().ok() });
+            let walker = unsafe { auto.ControlViewWalker().ok() };
             if let Some(ref w) = walker {
                 last.index = sibling_index(&target, w).unwrap_or(0);
                 if last.index > 0 {
@@ -744,6 +744,7 @@ pub mod windows_impl {
             cursor_y: y,
             error: None,
             window_info,
+            capture_mode: CaptureMode::Fast,
         })
     }
 
@@ -1228,6 +1229,7 @@ pub mod windows_impl {
                     hierarchy: vec![], cursor_x: x, cursor_y: y,
                     error: Some(format!("COM 初始化失败: {}", e)),
                     window_info: None,
+                    capture_mode: CaptureMode::Full,
                 };
             }
         };
@@ -1239,6 +1241,7 @@ pub mod windows_impl {
                     hierarchy: vec![], cursor_x: x, cursor_y: y,
                     error: Some(format!("增强捕获失败: {}", e)),
                     window_info: None,
+                    capture_mode: CaptureMode::Full,
                 }
             }
         }
@@ -1272,7 +1275,7 @@ pub mod windows_impl {
                 let walker = match unsafe { auto.RawViewWalker().ok() }
                     .or_else(|| unsafe { auto.ControlViewWalker().ok() }) {
                     Some(w) => w,
-                    None => { info!("[Enhanced] No walker available, skipping self-process fix"); return Ok(CaptureResult { hierarchy: vec![], cursor_x: x, cursor_y: y, error: Some("无法获取 TreeWalker".into()), window_info: None }); }
+                    None => { info!("[Enhanced] No walker available, skipping self-process fix"); return Ok(CaptureResult { hierarchy: vec![], cursor_x: x, cursor_y: y, error: Some("无法获取 TreeWalker".into()), window_info: None, capture_mode: CaptureMode::Full }); }
                 };
                 // Enumerate Desktop children to find the topmost non-self window containing the point
                 let mut child = unsafe { walker.GetFirstChildElement(&desktop).ok() };
@@ -1612,7 +1615,7 @@ pub mod windows_impl {
                 set_walker_hints(&mut hierarchy, window_pid);
                 let window_info = extract_window_info(&hierarchy);
                 info!("[Enhanced] Fallback hierarchy depth={}", hierarchy.len());
-                return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info });
+                return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Full });
             }
         };
 
@@ -1698,7 +1701,7 @@ pub mod windows_impl {
         info!("[Enhanced] hierarchy depth={} target='{}' name='{}' | ElementFromPoint type='{}' name='{}'",
             hierarchy.len(), target_ct, target_name, normal_ct, normal_name);
 
-        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info })
+        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Full })
     }
 
     /// Enumerate all top-level windows on desktop.
@@ -2804,7 +2807,25 @@ pub mod windows_impl {
             (xpath.to_string(), None)
         };
         
-        let xpath = &inner_xpath;
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Capture Mode Prefix Detection: strip [fast]/[full] prefix from XPath.
+        //
+        // - [fast]: Strict ControlViewWalker only — fastest, no fallback.
+        //   Used for native apps (Qt, Win32, WPF). If ControlView fails, return empty.
+        // - [full]: Complete fallback chain (RawViewWalker + child HWND + cache).
+        //   Used for complex apps (WebView/Chrome embedded). Can be slow but comprehensive.
+        // - No prefix: Legacy behavior — full fallback chain (backward compatible).
+        // ═══════════════════════════════════════════════════════════════════════════
+        let (capture_mode, stripped_xpath) = CaptureMode::strip_xpath_prefix(&inner_xpath);
+        let xpath = stripped_xpath;
+        let is_fast_mode = matches!(capture_mode, Some(CaptureMode::Fast));
+        
+        if is_fast_mode {
+            log::info!("[XPath Fallback] [fast] prefix detected — strict ControlView only, no fallback");
+        } else if capture_mode.is_some() {
+            log::info!("[XPath Fallback] [full] prefix detected — full fallback chain enabled");
+        }
+        
         let is_descendant = xpath.starts_with("//");
         
         // ═══════════════════════════════════════════════════════════════════════════
@@ -2940,6 +2961,33 @@ pub mod windows_impl {
                 }
             }
             Ok((results, segments))
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Fast Mode ([fast] prefix): Strict ControlViewWalker only.
+        // No fallback, no child HWND, no cache warming — just direct find_by_xpath_detailed.
+        // Returns empty immediately if ControlView doesn't find the element.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if is_fast_mode {
+            log::info!("[XPath Fallback] [fast] — strict ControlView only");
+            if let Ok((r, s)) = find_by_xpath_detailed_strict(auto, window, xpath) {
+                if !r.is_empty() {
+                    let elapsed = fallback_start.elapsed().as_millis() as u64;
+                    log::info!("[XPath Fallback] ✓ [fast] Found {} results via ControlView ({}ms)", r.len(), elapsed);
+                    // Apply positional predicate
+                    let mut results = r;
+                    if let Some(pos) = position_index {
+                        if pos > 0 && results.len() >= pos {
+                            results = vec![results.swap_remove(pos - 1)];
+                        } else if !results.is_empty() {
+                            results.clear();
+                        }
+                    }
+                    return Ok((results, s));
+                }
+            }
+            log::info!("[XPath Fallback] ✗ [fast] ControlView not found — strict mode, returning empty");
+            return Ok((vec![], vec![]));
         }
         
         if is_descendant {
@@ -4346,6 +4394,25 @@ pub mod windows_impl {
         xpath: &str,
         visibility_filter: Option<uiauto_xpath::xpath::VisibilityFilter>,
     ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        find_by_xpath_detailed_impl(auto, root, xpath, visibility_filter, false)
+    }
+
+    /// Strict ControlView version: no RawViewWalker fallback.
+    fn find_by_xpath_detailed_strict(
+        auto: &IUIAutomation,
+        root: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        find_by_xpath_detailed_impl(auto, root, xpath, None, true)
+    }
+
+    fn find_by_xpath_detailed_impl(
+        auto: &IUIAutomation,
+        root: &IUIAutomationElement,
+        xpath: &str,
+        visibility_filter: Option<uiauto_xpath::xpath::VisibilityFilter>,
+        strict: bool,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
         use std::time::Instant;
 
         let total_start = Instant::now();
@@ -4367,30 +4434,45 @@ pub mod windows_impl {
 
         // Execute the query with optional visibility filter
         let execute_start = Instant::now();
-        let matches: Vec<IUIAutomationElement> = match visibility_filter {
-            Some(filter) => {
-                match compiled_xpath.select_nodes_with_visibility(&uia_elem, filter) {
-                    Ok(nodes) => {
-                        nodes.into_iter()
-                            .map(|n| n.raw_element().clone())
-                            .collect()
-                    },
-                    Err(e) => {
-                        error!("[XPath Validation] XPath execution with visibility filter failed: {}", e);
-                        return Err(anyhow::anyhow!("XPath execution error: {}", e));
-                    }
+        let matches: Vec<IUIAutomationElement> = if strict {
+            // Strict ControlView mode: no RawViewWalker fallback
+            match compiled_xpath.select_nodes_strict(&uia_elem) {
+                Ok(nodes) => {
+                    nodes.into_iter()
+                        .map(|n| n.raw_element().clone())
+                        .collect()
+                },
+                Err(e) => {
+                    error!("[XPath Validation] XPath strict execution failed: {}", e);
+                    return Err(anyhow::anyhow!("XPath execution error: {}", e));
                 }
-            },
-            None => {
-                match compiled_xpath.select_nodes(&uia_elem) {
-                    Ok(nodes) => {
-                        nodes.into_iter()
-                            .map(|n| n.raw_element().clone())
-                            .collect()
-                    },
-                    Err(e) => {
-                        error!("[XPath Validation] XPath execution failed: {}", e);
-                        return Err(anyhow::anyhow!("XPath execution error: {}", e));
+            }
+        } else {
+            match visibility_filter {
+                Some(filter) => {
+                    match compiled_xpath.select_nodes_with_visibility(&uia_elem, filter) {
+                        Ok(nodes) => {
+                            nodes.into_iter()
+                                .map(|n| n.raw_element().clone())
+                                .collect()
+                        },
+                        Err(e) => {
+                            error!("[XPath Validation] XPath execution with visibility filter failed: {}", e);
+                            return Err(anyhow::anyhow!("XPath execution error: {}", e));
+                        }
+                    }
+                },
+                None => {
+                    match compiled_xpath.select_nodes(&uia_elem) {
+                        Ok(nodes) => {
+                            nodes.into_iter()
+                                .map(|n| n.raw_element().clone())
+                                .collect()
+                        },
+                        Err(e) => {
+                            error!("[XPath Validation] XPath execution failed: {}", e);
+                            return Err(anyhow::anyhow!("XPath execution error: {}", e));
+                        }
                     }
                 }
             }
@@ -4456,12 +4538,15 @@ pub mod windows_impl {
             return vec![];
         }
 
+        // ── Strip capture mode prefix [fast]/[full] for fast path check ──
+        let (_, element_xpath_stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
+
         // ── Fast path: XPath directly targets Window elements ──
         // When the XPath is //Window[...] or /Window[...], we already have the
         // matching windows from find_window_by_selector. Instead of running the
         // expensive fallback chain on each window, apply the XPath predicates
         // directly to filter the already-enumerated windows.
-        let xpath_trimmed = element_xpath.trim_start_matches('/');
+        let xpath_trimmed = element_xpath_stripped.trim_start_matches('/');
         let targets_window = xpath_trimmed == "Window"
             || xpath_trimmed.starts_with("Window[");
         if targets_window {
@@ -6234,5 +6319,6 @@ pub fn mock() -> CaptureResult {
             process_id: 12345,
             process_name: "MyApp".to_string(),
         }),
+        capture_mode: CaptureMode::Fast,
     }
 }
