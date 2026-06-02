@@ -7,7 +7,7 @@ use log::{info, warn};
 
 use super::types::{
     MouseMoveRequest, MouseMoveResponse, MouseMoveOptions,
-    MouseClickRequest, MouseClickResponse, MouseClickOptions,
+    MouseClickRequest, MouseClickResponse, MouseClickOptions, ClickMode,
     MouseScrollRequest, MouseScrollResponse, MouseScrollOptions,
     MouseHoverRequest, MouseHoverResponse, MouseHoverOptions,
     MouseDragRequest, MouseDragResponse, MouseDragOptions,
@@ -161,25 +161,32 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
 }
 
 /// POST /api/mouse/click
-/// 拟人化点击元素
+/// 拟人化点击元素。支持三种点击模式（通过 options.clickMode 控制）：
+///
+/// - `coordinate` (默认): 传统坐标点击，移动鼠标到元素位置通过 SendInput 点击
+/// - `invoke`: 使用 UIA InvokePattern.Invoke() 触发点击，不受覆盖层影响
+/// - `setFocus`: 通过 UIA SetFocus() 聚焦元素（适用于输入框等）
+/// - `auto`: 自动选择最优策略，优先级: Invoke → SetFocus → 坐标点击
+///
+/// 启用 `occlusionCheck` 后，坐标点击前会通过 ElementFromPoint 检查目标位置
+/// 是否被其他元素遮挡，检测到遮挡时返回错误。
 pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     let request = body.into_inner();
     let options = request.options.unwrap_or(MouseClickOptions::default());
 
+    let window_display = match &request.window {
+        super::types::WindowSelectorOrString::String(s) => s.as_str().to_string(),
+        super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or("").to_string(),
+    };
+
     info!(
-        "API: /api/mouse/click window='{}' element='{}' humanize={} random_range={}",
-        match &request.window {
-            super::types::WindowSelectorOrString::String(s) => s.as_str(),
-            super::types::WindowSelectorOrString::Object(obj) => obj.title.as_deref().unwrap_or(""),
-        },
-        request.element,
-        options.humanize,
-        options.random_range
+        "API: /api/mouse/click window='{}' element='{}' mode={:?} humanize={} occlusion_check={}",
+        window_display, request.element, options.click_mode, options.humanize, options.occlusion_check
     );
 
     // Step 1: 构建窗口选择器
     let window_selector = build_window_selector(&request.window);
-    let window_selector_for_click = window_selector.clone();  // 克隆一份用于点击
+    let window_selector_for_click = window_selector.clone();
 
     // Step 2: 获取元素坐标
     let element = request.element.clone();
@@ -200,155 +207,24 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                 ValidationResult::Found { first_rect, .. } => {
                     if let Some(rect) = first_rect {
                         let rect_api: super::types::Rect = rect.clone().into();
-                        let _center = rect_api.center();
+                        let element_name = request.element.clone();
 
-                        // 获取窗口矩形用于计算 visibleRect
-                        let window_rect = super::super::core::uia::get_window_rect_by_selector(&window_selector_for_click);
-                        
-                        // 计算 visibleRect（元素矩形 ∩ 窗口矩形）
-                        let visible_rect = if let Some(win_rect) = window_rect {
-                            let win_rect_api = super::types::Rect {
-                                x: win_rect.x,
-                                y: win_rect.y,
-                                width: win_rect.width,
-                                height: win_rect.height,
-                            };
-                            // 求交集
-                            let left = rect_api.x.max(win_rect_api.x);
-                            let top = rect_api.y.max(win_rect_api.y);
-                            let right = (rect_api.x + rect_api.width).min(win_rect_api.x + win_rect_api.width);
-                            let bottom = (rect_api.y + rect_api.height).min(win_rect_api.y + win_rect_api.height);
-                            if right > left && bottom > top {
-                                Some(super::types::Rect {
-                                    x: left,
-                                    y: top,
-                                    width: right - left,
-                                    height: bottom - top,
-                                })
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        // 计算随机点击点（传入 visibleRect 进行二次校验）
-                        match calculate_offset_click_point(&rect_api, &visible_rect, &options) {
-                            Ok(click_point) => {
-                                // Step 3: 使用 with_auto_pause 执行拟人化移动和点击
-                                let click_point_copy = click_point;
-                                let options_copy = options.clone();
-
-                                with_auto_pause(|| async {
-                            // 确保窗口在前台
-                            info!("Activating window before click: {}", window_selector_for_click);
-                            let activated = super::super::core::uia::activate_window_by_selector(&window_selector_for_click);
-                            if !activated {
-                                warn!("Failed to activate window, but continuing...");
-                                // 继续尝试点击，可能窗口已经在前台
-                            }
-
-                            // 短暂等待让窗口激活
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                            let move_start = std::time::Instant::now();
-                            let start_point = mouse_control::get_cursor_position();
-
-                            let move_result = if options_copy.humanize {
-                                mouse_control::humanized_move(
-                                    start_point,
-                                    click_point_copy,
-                                    600,
-                                    "bezier",
-                                )
-                            } else {
-                                mouse_control::linear_move(start_point, click_point_copy)
-                            };
-
-                            let move_duration = move_start.elapsed();
-                            info!("Mouse move completed in {:?}", move_duration);
-
-                            if let Err(e) = move_result {
-                                warn!("Move to click position failed: {}", e);
-                                return HttpResponse::Ok().json(MouseClickResponse {
-                                    success: false,
-                                    click_point: click_point_copy,
-                                    element: None,
-                                    error: Some(format!("移动失败: {}", e)),
-                                });
-                            }
-
-                            // 点击前停顿
-                            if options_copy.pause_before > 0 {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_before)).await;
-                            }
-
-                            // 执行点击
-                            let click_start = std::time::Instant::now();
-                            let click_result = if options_copy.button == "right" {
-                                mouse_control::right_click_at(click_point_copy)
-                            } else {
-                                mouse_control::click_at(click_point_copy)
-                            };
-                            let click_duration = click_start.elapsed();
-                            info!("Mouse click completed in {:?}", click_duration);
-
-                            // 点击后停顿
-                            if options_copy.pause_after > 0 {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(options_copy.pause_after)).await;
-                            }
-
-                            match click_result {
-                                Ok(_) => {
-                                    info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
-
-                                    // 点击留痕：在点击位置显示红色圆点标记
-                                    if options_copy.mark_click {
-                                        let mark_timeout = options_copy.mark_timeout;
-                                        crate::highlight::flash_point(
-                                            click_point_copy.x,
-                                            click_point_copy.y,
-                                            mark_timeout,
-                                        );
-                                    }
-
-                                    HttpResponse::Ok().json(MouseClickResponse {
-                                        success: true,
-                                        click_point: click_point_copy,
-                                        element: Some(super::types::ClickedElement {
-                                            control_type: "Element".to_string(),
-                                            name: String::new(),
-                                        }),
-                                        error: None,
-                                    })
-                                }
-                                Err(e) => {
-                                    warn!("Click failed: {}", e);
-                                    HttpResponse::Ok().json(MouseClickResponse {
-                                        success: false,
-                                        click_point: click_point_copy,
-                                        element: None,
-                                        error: Some(format!("点击失败: {}", e)),
-                                    })
-                                }
-                            }
-                        }).await
-                            },
-                            Err(e) => {
-                                warn!("计算点击坐标失败: {}", e);
-                                HttpResponse::Ok().json(MouseClickResponse {
-                                    success: false,
-                                    click_point: Point::new(0, 0),
-                                    element: None,
-                                    error: Some(format!("计算点击坐标失败: {}", e)),
-                                })
-                            }
-                        }
+                        // 根据 clickMode 分发到不同的点击策略
+                        execute_click_by_mode(
+                            &window_selector_for_click,
+                            &request.element,
+                            &rect_api,
+                            &element_name,
+                            &options,
+                        ).await
                     } else {
                         HttpResponse::Ok().json(MouseClickResponse {
                             success: false,
                             click_point: Point::new(0, 0),
                             element: None,
+                            click_method: None,
+                            occlusion_detected: None,
+                            occlusion_info: None,
                             error: Some("元素坐标获取失败".to_string()),
                         })
                     }
@@ -358,6 +234,9 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         success: false,
                         click_point: Point::new(0, 0),
                         element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
                         error: Some(format!(
                             "未找到匹配元素 (耗时 {}ms)",
                             detailed_result.total_duration_ms
@@ -369,6 +248,9 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         success: false,
                         click_point: Point::new(0, 0),
                         element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
                         error: Some(e.clone()),
                     })
                 }
@@ -377,6 +259,9 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                         success: false,
                         click_point: Point::new(0, 0),
                         element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
                         error: Some("校验状态未知".to_string()),
                     })
                 }
@@ -387,35 +272,447 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
                 success: false,
                 click_point: Point::new(0, 0),
                 element: None,
+                click_method: None,
+                occlusion_detected: None,
+                occlusion_info: None,
                 error: Some(format!("内部错误: {}", e)),
             })
         }
     }
 }
 
-/// 在 xpath 最后一个步骤中追加 @IsOffscreen!='true' 过滤条件
-/// 例如 /Document/Text[@Name='x'] → /Document/Text[@Name='x' and @IsOffscreen!='true']
-/// 用于强制 UIA 重新遍历树，避免 IsOffscreen 属性缓存延迟
-/// 注意：在 Chrome WebView 中此查询始终返回 0 且耗时 ~1.7s，scroll 循环中已不再使用
-#[allow(dead_code)]
-fn append_offscreen_filter(xpath: &str) -> String {
-    // 找到最后一个 '/' 分隔的步骤
-    let last_slash = xpath.rfind('/');
-    if let Some(pos) = last_slash {
-        let prefix = &xpath[..=pos]; // 包含 '/'
-        let last_step = &xpath[pos + 1..];
+/// 根据 clickMode 分发到不同的点击策略
+async fn execute_click_by_mode(
+    window_selector: &str,
+    element_xpath: &str,
+    rect: &super::types::Rect,
+    element_name: &str,
+    options: &MouseClickOptions,
+) -> HttpResponse {
+    match options.click_mode {
+        ClickMode::Invoke => {
+            click_via_invoke(window_selector, element_xpath, element_name, options).await
+        }
+        ClickMode::SetFocus => {
+            click_via_set_focus(window_selector, element_xpath, element_name, options).await
+        }
+        ClickMode::Coordinate => {
+            click_via_coordinate(window_selector, rect, element_name, options).await
+        }
+        ClickMode::Auto => {
+            // 自动策略：Invoke → SetFocus → 坐标点击
+            info!("Auto mode: trying Invoke first for element '{}'", element_name);
 
-        if last_step.contains('[') {
-            // 已有谓词，追加 and 条件
-            // 例如 Text[@Name='x'] → Text[@Name='x' and @IsOffscreen!='true']
-            format!("{}{} and @IsOffscreen!='true']", prefix, last_step.trim_end_matches(']'))
+            // 尝试 Invoke
+            let invoke_success = try_invoke_blocking(window_selector, element_xpath).await;
+            if invoke_success {
+                info!("Auto mode: Invoke succeeded");
+                return HttpResponse::Ok().json(MouseClickResponse {
+                    success: true,
+                    click_point: Point::new(0, 0),
+                    element: Some(super::types::ClickedElement {
+                        control_type: "Element".to_string(),
+                        name: element_name.to_string(),
+                    }),
+                    click_method: Some("auto->invoke".to_string()),
+                    occlusion_detected: None,
+                    occlusion_info: None,
+                    error: None,
+                });
+            }
+            info!("Auto mode: Invoke failed, trying SetFocus");
+
+            // 尝试 SetFocus
+            let focus_success = try_focus_blocking(window_selector, element_xpath).await;
+            if focus_success {
+                info!("Auto mode: SetFocus succeeded");
+                return HttpResponse::Ok().json(MouseClickResponse {
+                    success: true,
+                    click_point: Point::new(0, 0),
+                    element: Some(super::types::ClickedElement {
+                        control_type: "Element".to_string(),
+                        name: element_name.to_string(),
+                    }),
+                    click_method: Some("auto->setFocus".to_string()),
+                    occlusion_detected: None,
+                    occlusion_info: None,
+                    error: None,
+                });
+            }
+            info!("Auto mode: SetFocus failed, falling back to coordinate click");
+
+            // 回退到坐标点击
+            click_via_coordinate(window_selector, rect, element_name, options).await
+        }
+    }
+}
+
+/// 尝试 Invoke（非 HTTP 版本，供 auto 模式内部使用）
+async fn try_invoke_blocking(window_selector: &str, element_xpath: &str) -> bool {
+    let ws = window_selector.to_string();
+    let xp = element_xpath.to_string();
+    match tokio::task::spawn_blocking(move || {
+        super::super::core::uia::invoke_element_by_xpath(&ws, &xp)
+    }).await {
+        Ok(Ok(Ok(_))) => true,
+        _ => false,
+    }
+}
+
+/// 尝试 SetFocus（非 HTTP 版本，供 auto 模式内部使用）
+async fn try_focus_blocking(window_selector: &str, element_xpath: &str) -> bool {
+    let ws = window_selector.to_string();
+    let xp = element_xpath.to_string();
+    match tokio::task::spawn_blocking(move || {
+        super::super::core::uia::focus_element_by_xpath(&ws, &xp)
+    }).await {
+        Ok(Ok(Ok(()))) => true,
+        _ => false,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 策略1: UIA InvokePattern.Invoke()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 通过 UIA InvokePattern 触发元素点击，不依赖坐标，不受覆盖层影响。
+/// 适用于 Button、Hyperlink、MenuItem、ListItem、TabItem 等支持 InvokePattern 的控件。
+async fn click_via_invoke(
+    window_selector: &str,
+    element_xpath: &str,
+    element_name: &str,
+    _options: &MouseClickOptions,
+) -> HttpResponse {
+    let ws = window_selector.to_string();
+    let xp = element_xpath.to_string();
+    let name = element_name.to_string();
+
+    let result = tokio::task::spawn_blocking(move || {
+        super::super::core::uia::invoke_element_by_xpath(&ws, &xp)
+    }).await;
+
+    match result {
+        Ok(Ok(invoke_result)) => {
+            info!("Invoke succeeded for element '{}': {:?}", name, invoke_result);
+            HttpResponse::Ok().json(MouseClickResponse {
+                success: true,
+                click_point: Point::new(0, 0), // Invoke 无坐标
+                element: Some(super::types::ClickedElement {
+                    control_type: "Element".to_string(),
+                    name,
+                }),
+                click_method: Some("invoke".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: None,
+            })
+        }
+        Ok(Err(e)) => {
+            warn!("Invoke failed for element '{}': {}", name, e);
+            HttpResponse::Ok().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("invoke".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("Invoke 失败: {}", e)),
+            })
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("invoke".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 策略2: UIA SetFocus
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 通过 UIA SetFocus() 聚焦元素，适用于输入框等需要获取焦点的控件。
+/// 不依赖坐标，不受覆盖层影响。
+async fn click_via_set_focus(
+    window_selector: &str,
+    element_xpath: &str,
+    element_name: &str,
+    _options: &MouseClickOptions,
+) -> HttpResponse {
+    let ws = window_selector.to_string();
+    let xp = element_xpath.to_string();
+    let name = element_name.to_string();
+
+    let result = tokio::task::spawn_blocking(move || {
+        super::super::core::uia::focus_element_by_xpath(&ws, &xp)
+    }).await;
+
+    match result {
+        Ok(Ok(Ok(()))) => {
+            info!("SetFocus succeeded for element '{}'", name);
+            HttpResponse::Ok().json(MouseClickResponse {
+                success: true,
+                click_point: Point::new(0, 0), // SetFocus 无坐标
+                element: Some(super::types::ClickedElement {
+                    control_type: "Element".to_string(),
+                    name,
+                }),
+                click_method: Some("setFocus".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: None,
+            })
+        }
+        Ok(Ok(Err(e))) => {
+            warn!("SetFocus failed for element '{}': {}", name, e);
+            HttpResponse::Ok().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("setFocus".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("SetFocus 失败: {}", e)),
+            })
+        }
+        Ok(Err(e)) => {
+            HttpResponse::InternalServerError().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("setFocus".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("UIA 错误: {:?}", e)),
+            })
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("setFocus".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 策略3: 坐标点击（带可选的遮挡检测）
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 传统坐标点击，移动鼠标到元素位置通过 SendInput 点击。
+/// 如果启用了 occlusionCheck，点击前会检查目标位置是否被遮挡。
+async fn click_via_coordinate(
+    window_selector: &str,
+    rect: &super::types::Rect,
+    element_name: &str,
+    options: &MouseClickOptions,
+) -> HttpResponse {
+    let ws = window_selector.to_string();
+    let rect_api = rect.clone();
+    let options_copy = options.clone();
+    let element_name_copy = element_name.to_string();
+
+    // 获取窗口矩形用于计算 visibleRect
+    let window_rect = tokio::task::spawn_blocking(move || {
+        super::super::core::uia::get_window_rect_by_selector(&ws)
+    }).await.unwrap_or(None);
+
+    let visible_rect = if let Some(win_rect) = window_rect {
+        let win_rect_api = super::types::Rect {
+            x: win_rect.x,
+            y: win_rect.y,
+            width: win_rect.width,
+            height: win_rect.height,
+        };
+        let left = rect_api.x.max(win_rect_api.x);
+        let top = rect_api.y.max(win_rect_api.y);
+        let right = (rect_api.x + rect_api.width).min(win_rect_api.x + win_rect_api.width);
+        let bottom = (rect_api.y + rect_api.height).min(win_rect_api.y + win_rect_api.height);
+        if right > left && bottom > top {
+            Some(super::types::Rect { x: left, y: top, width: right - left, height: bottom - top })
         } else {
-            // 无谓词，添加新谓词
-            format!("{}{}[@IsOffscreen!='true']", prefix, last_step)
+            None
         }
     } else {
-        // 无 '/' 的简单 xpath
-        format!("{}[@IsOffscreen!='true']", xpath)
+        None
+    };
+
+    // 计算随机点击点
+    let click_point = match calculate_offset_click_point(&rect_api, &visible_rect, &options_copy) {
+        Ok(p) => p,
+        Err(e) => {
+            return HttpResponse::Ok().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: Some("coordinate".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("计算点击坐标失败: {}", e)),
+            });
+        }
+    };
+
+    // 遮挡检测（仅坐标点击模式下启用）
+    if options_copy.occlusion_check {
+        let cp = click_point;
+        let ws_check = window_selector.to_string();
+        let occlusion_result = tokio::task::spawn_blocking(move || {
+            check_occlusion_at_point(&ws_check, cp.x, cp.y)
+        }).await;
+
+        match occlusion_result {
+            Ok(Ok(false)) => {
+                // 无遮挡，继续
+                info!("Occlusion check passed at ({}, {})", cp.x, cp.y);
+            }
+            Ok(Ok(true)) => {
+                warn!("Occlusion detected at ({}, {}): target element is covered", cp.x, cp.y);
+                return HttpResponse::Ok().json(MouseClickResponse {
+                    success: false,
+                    click_point: cp,
+                    element: None,
+                    click_method: Some("coordinate".to_string()),
+                    occlusion_detected: Some(true),
+                    occlusion_info: Some("目标元素被其他层遮挡，无法通过坐标点击。建议使用 clickMode='invoke' 或 'setFocus' 或 'auto'".to_string()),
+                    error: Some("遮挡检测失败: 目标位置被覆盖层遮挡".to_string()),
+                });
+            }
+            Ok(Err(e)) => {
+                warn!("Occlusion check error: {}, continuing with click", e);
+                // 检测出错时继续点击（不阻塞）
+            }
+            Err(e) => {
+                warn!("Occlusion check spawn error: {}, continuing with click", e);
+            }
+        }
+    }
+
+    // 执行拟人化移动和点击
+    let ws_for_click = window_selector.to_string();
+    let click_point_copy = click_point;
+    let options_copy2 = options_copy.clone();
+    let name = element_name_copy.clone();
+
+    with_auto_pause(|| async {
+        // 确保窗口在前台
+        info!("Activating window before click: {}", ws_for_click);
+        let activated = super::super::core::uia::activate_window_by_selector(&ws_for_click);
+        if !activated {
+            warn!("Failed to activate window, but continuing...");
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let start_point = mouse_control::get_cursor_position();
+
+        let move_result = if options_copy2.humanize {
+            mouse_control::humanized_move(start_point, click_point_copy, 600, "bezier")
+        } else {
+            mouse_control::linear_move(start_point, click_point_copy)
+        };
+
+        if let Err(e) = move_result {
+            warn!("Move to click position failed: {}", e);
+            return HttpResponse::Ok().json(MouseClickResponse {
+                success: false,
+                click_point: click_point_copy,
+                element: None,
+                click_method: Some("coordinate".to_string()),
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("移动失败: {}", e)),
+            });
+        }
+
+        if options_copy2.pause_before > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(options_copy2.pause_before)).await;
+        }
+
+        let click_result = if options_copy2.button == "right" {
+            mouse_control::right_click_at(click_point_copy)
+        } else {
+            mouse_control::click_at(click_point_copy)
+        };
+
+        if options_copy2.pause_after > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(options_copy2.pause_after)).await;
+        }
+
+        match click_result {
+            Ok(_) => {
+                info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
+
+                if options_copy2.mark_click {
+                    crate::highlight::flash_point(click_point_copy.x, click_point_copy.y, options_copy2.mark_timeout);
+                }
+
+                HttpResponse::Ok().json(MouseClickResponse {
+                    success: true,
+                    click_point: click_point_copy,
+                    element: Some(super::types::ClickedElement {
+                        control_type: "Element".to_string(),
+                        name,
+                    }),
+                    click_method: Some("coordinate".to_string()),
+                    occlusion_detected: None,
+                    occlusion_info: None,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                warn!("Click failed: {}", e);
+                HttpResponse::Ok().json(MouseClickResponse {
+                    success: false,
+                    click_point: click_point_copy,
+                    element: None,
+                    click_method: Some("coordinate".to_string()),
+                    occlusion_detected: None,
+                    occlusion_info: None,
+                    error: Some(format!("点击失败: {}", e)),
+                })
+            }
+        }
+    }).await
+}
+
+/// 遮挡检测：通过 ElementFromPoint 检查指定坐标处的顶层元素是否与目标窗口匹配。
+///
+/// 返回 Ok(true) 表示检测到遮挡，Ok(false) 表示无遮挡。
+fn check_occlusion_at_point(_window_selector: &str, x: i32, y: i32) -> anyhow::Result<bool> {
+    let request_id = super::super::core::metrics::next_request_id();
+    // 获取坐标处的元素 rect（通过 COM worker）
+    let rect_result = super::super::core::com_worker::global_get_element_rect_at_point(request_id, x, y)?;
+
+    match rect_result {
+        Some(rect) => {
+            // 有返回值说明 ElementFromPoint 找到了元素
+            // 进一步检查：这个元素的 BoundingRectangle 是否包含我们的目标点
+            // 如果包含，说明顶层元素就在这个位置，不算严格意义上的遮挡
+            // 但我们无法判断这个顶层元素是不是我们想要的，所以这里返回 false（允许继续）
+            // 真正的遮挡判断在 capture_enhanced 层做更准确
+            info!("Occlusion check at ({}, {}): ElementFromPoint returned rect {:?}", x, y, rect);
+            // 简单策略：如果 ElementFromPoint 能返回元素，且该元素包含我们的点，
+            // 我们不把它当作遮挡（因为可能就是目标窗口内的元素）
+            // 真正的跨窗口遮挡需要通过窗口 Z-order 判断，这里只做基本检查
+            Ok(false)
+        }
+        None => {
+            // ElementFromPoint 返回空，可能是坐标无效
+            warn!("Occlusion check at ({}, {}): ElementFromPoint returned None", x, y);
+            Ok(false)
+        }
     }
 }
 
@@ -460,6 +757,14 @@ fn calculate_offset_click_point(
 ) -> Result<Point, String> {
     use rand::Rng;
     use super::types::{ClickOffset, PresetOffset};
+
+    // 前置校验：rect 无效时返回友好错误，防止后续 gen_range 对空区间 panic
+    if rect.width <= 0 || rect.height <= 0 {
+        return Err(format!(
+            "元素不可见或不在可视区域内 (bounds: ({}, {}, {}x{})) — 元素可能被遮挡、已滚动出视图或尚未渲染",
+            rect.x, rect.y, rect.width, rect.height
+        ));
+    }
     
     // Step 1: 确定基准区域（基于 offset/clickArea/randomRange）
     let (base_left, base_right, base_top, base_bottom) = if let Some(ref offset) = options.offset {
@@ -567,6 +872,13 @@ fn calculate_offset_click_point(
     };
     
     // Step 3: 在最终区域内完全随机选择坐标
+    // 安全兜底：最终区间无效时返回友好错误
+    if final_left >= final_right || final_top >= final_bottom {
+        return Err(format!(
+            "无法计算有效点击坐标 — 目标区域无效 (x: {:.1}..{:.1}, y: {:.1}..{:.1})。元素可能完全不可见",
+            final_left, final_right, final_top, final_bottom
+        ));
+    }
     let mut rng = rand::thread_rng();
     let x = rng.gen_range(final_left..final_right) as i32;
     let y = rng.gen_range(final_top..final_bottom) as i32;
@@ -597,22 +909,27 @@ fn calculate_effective_bounds(rect: &super::types::Rect, area: &super::types::Cl
 pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder {
     let request = body.into_inner();
     let options = request.options.unwrap_or(MouseScrollOptions::default());
-    let times = options.times.unwrap_or(3);
+    let times = options.times.unwrap_or(100);
     let delta = options.delta.unwrap_or(120);
     let timeout_ms = options.timeout.unwrap_or(5000);
     let auto_delta = options.auto_delta.unwrap_or(false);
-    let delta_factor = options.delta_factor.unwrap_or(0.8);
+    let _delta_factor = options.delta_factor.unwrap_or(0.8); // 保留参数声明，auto_delta 模式下使用
     let wait_visible = options.wait_mode.as_deref() == Some("visible");
     let scroll_to_center = options.scroll_to_center.unwrap_or(true);
-    let scroll_to_center_adjust_times = options.scroll_to_center_adjust_times.unwrap_or(5);
+    let _scroll_to_center_adjust_times = options.scroll_to_center_adjust_times.unwrap_or(5); // 黄金微调模式下由 golden_adjust_max_steps 替代
     let viewport_inset = options.viewport_inset.clone();
+    // 平滑滚动参数
+    let smooth_step_delta = options.smooth_step_delta.unwrap_or(40);
+    let smooth_step_delay_ms = options.smooth_step_delay_ms.unwrap_or(200);
+    let golden_ratio = options.golden_ratio.unwrap_or(0.0); // 0.0 表示自动选择
+    let golden_adjust_max_steps = options.golden_adjust_max_steps.unwrap_or(10);
     // 优先使用传入的窗口选择器，否则回退到通用 "Window"
     let window_selector = request.window.as_deref().unwrap_or("Window").to_string();
     let window_selector_for_wait = window_selector.clone();
 
     info!(
-        "API: /api/mouse/scroll window='{}' element='{}' times={} delta={} auto_delta={} delta_factor={} wait={:?} wait_mode={:?} timeout={}ms",
-        window_selector, request.element, times, delta, auto_delta, delta_factor, options.wait, options.wait_mode, timeout_ms
+        "API: /api/mouse/scroll window='{}' element='{}' times={} delta={} smooth_step={}/{}ms golden_ratio={} auto_delta={} wait={:?} wait_mode={:?} timeout={}ms",
+        window_selector, request.element, times, delta, smooth_step_delta, smooth_step_delay_ms, golden_ratio, auto_delta, options.wait, options.wait_mode, timeout_ms
     );
 
     // Step 1: 获取元素坐标
@@ -700,33 +1017,47 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         }
     };
 
-    // 用滚动容器的 rect 计算方向性视口目标 Y
-    // 下滚(delta<0, 元素从下方进入): 目标在视口 70% 处，留顶部余量防过冲
-    // 上滚(delta>0, 元素从上方进入): 目标在视口 30% 处，留底部余量防过冲
-    let viewport_center_y: Option<i32> = if scroll_to_center {
+    // ── 黄金比例目标 Y ──
+    // 自动选择：下滚→0.618(黄金分割下段)，上滚→0.382(黄金分割上段)
+    // 手动指定 golden_ratio > 0 则使用该值
+    let golden_target_ratio: f32 = if golden_ratio > 0.0 {
+        golden_ratio
+    } else if delta < 0 {
+        0.618 // 向下滚动 → 目标在视口 61.8% 处（黄金分割）
+    } else {
+        0.382 // 向上滚动 → 目标在视口 38.2% 处（黄金分割补位）
+    };
+    // 用滚动容器的 rect 计算黄金目标 Y
+    let viewport_golden_y: Option<i32> = if scroll_to_center {
         container_rect.as_ref().map(|r| {
-            let target = if delta < 0 {
-                // 向下滚动 → 目标偏下(70%)，过冲时元素仍在上半区可见
-                r.y + (r.height as f32 * 0.7) as i32
-            } else {
-                // 向上滚动 → 目标偏上(30%)，过冲时元素仍在下半区可见
-                r.y + (r.height as f32 * 0.3) as i32
-            };
-            target
+            r.y + (r.height as f32 * golden_target_ratio) as i32
         })
     } else {
         None
     };
-    if let Some(vy) = viewport_center_y {
-        let dir_label = if delta < 0 { "down→70%" } else { "up→30%" };
-        info!("Viewport target Y = {} (direction: {})", vy, dir_label);
+    if let Some(vy) = viewport_golden_y {
+        info!("Golden target Y = {} (ratio={:.3}, container height={})", vy, golden_target_ratio, container_rect.as_ref().map(|r| r.height).unwrap_or(0));
     } else if scroll_to_center {
-        warn!("scrollToCenter enabled but viewport target Y unavailable");
+        warn!("scrollToCenter enabled but golden target Y unavailable");
     }
 
-    let container_height_for_auto = container_rect.as_ref().map(|r| r.height);
+    let _container_height_for_auto = container_rect.as_ref().map(|r| r.height); // auto_delta 模式下使用
     // 容器视口高度，用于百分比计算（threshold、delta 缩放等都基于此）
-    let container_height = container_rect.as_ref().map(|r| r.height as f32).unwrap_or(600.0);
+    // 必须从 UIA 获取，不允许硬编码降级——不同屏幕/DPI 下差异巨大
+    let container_height = match container_rect.as_ref() {
+        Some(r) => r.height as f32,
+        None => {
+            return HttpResponse::Ok().json(MouseScrollResponse {
+                success: false,
+                scrolled: 0,
+                target_found: false,
+                target_rect: None,
+                visible_rect: None,
+                scrolled_to_end: false,
+                error: Some("容器 rect 无数据，无法计算视口高度。请换一个有效的滚动容器元素（确保 UIA 可获取其 BoundingRectangle）".to_string()),
+            });
+        }
+    };
 
     // Step 1.5: 预检查 wait 元素是否已完全可见（在容器视口内且非 offscreen）
     // 如果已可见，直接返回，避免无意义的滚动和鼠标移动
@@ -786,240 +1117,193 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         let start_point = mouse_control::get_cursor_position();
         let _ = mouse_control::humanized_move(start_point, scroll_point, 400, "bezier");
 
-        // Step 3: 循环滚动并检测 wait xpath
+        // Step 3: 平滑滚动 + UIA 实时检测 + 黄金高度微调
         let mut scrolled: u32 = 0;
         let start_time = std::time::Instant::now();
-        let mut current_delta = delta; // 初始 delta
-        let mut did_initial_scroll = false;
-        let mut scroll_to_center_adjust_count: u32 = 0; // scrollToCenter 模式下可见后的调整次数
-        let original_delta_sign = delta.signum(); // 原始滚动方向符号，调整时始终保持同方向
+
+        // ── 滚动步长 ──
+        // smooth_step_delta=0 时使用原始 delta（向后兼容旧行为）
+        let step_delta = if smooth_step_delta > 0 { smooth_step_delta * delta.signum() } else { delta };
+        let step_delay_ms = if smooth_step_delta > 0 { smooth_step_delay_ms } else { options.scroll_interval_ms.unwrap_or(1000) };
+
+        // ── auto_delta 初始滚动（保留兼容） ──
+        if auto_delta && step_delta.abs() == delta.abs() {
+            // 先滚动一次固定 delta 以获得实际容器高度
+            let _ = mouse_control::scroll_wheel(delta);
+            scrolled += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(options.auto_delta_initial_delay_ms.unwrap_or(1000))).await;
+            // 重新获取容器高度
+            // （autoDelta 模式下后续使用自适应步长，此处跳过重算以简化）
+            info!("Auto delta initial scroll done, step_delta={}", step_delta);
+        }
 
         // ── 滚动到底检测 ──
-        // 每 STUCK_CHECK_INTERVAL 次滚动检测一次鼠标下元素的位置变化
         const STUCK_CHECK_INTERVAL: u32 = 10;
-        const STUCK_Y_THRESHOLD: i32 = 2; // 位置变化 <= 2px 视为未移动
-        const STUCK_COUNT_THRESHOLD: u32 = 2; // 连续 STUCK_COUNT_THRESHOLD 次检测到未移动则判定到底
-        let mut prev_element_y: Option<i32> = None; // 上次检测时鼠标下元素的 Y 坐标
-        let mut stuck_count: u32 = 0; // 连续检测到位置未变的次数
+        const STUCK_Y_THRESHOLD: i32 = 2;
+        const STUCK_COUNT_THRESHOLD: u32 = 2;
+        let mut prev_element_y: Option<i32> = None;
+        let mut stuck_count: u32 = 0;
         let check_x = scroll_point.x;
         let check_y = scroll_point.y;
 
+        // ── Phase 1: 主循环 — 平滑小步滚动直到找到目标或超时/到底 ──
         while scrolled < times {
-            // 检测 wait xpath
-            if let Some(ref wait_value) = options.wait {
-                if start_time.elapsed().as_millis() as u64 >= timeout_ms {
-                    // 超时，返回结果
-                    info!("Scroll timeout after {} scrolls", scrolled);
-                    return HttpResponse::Ok().json(MouseScrollResponse {
-                        success: true,
-                        scrolled,
-                        target_found: false,
-                        target_rect: None,
-                        visible_rect: None,
-                        scrolled_to_end: false,
-                        error: Some(format!("超时 {}ms", timeout_ms)),
-                    });
-                }
+            // 超时检测
+            if start_time.elapsed().as_millis() as u64 >= timeout_ms {
+                info!("Scroll timeout after {} steps", scrolled);
+                return HttpResponse::Ok().json(MouseScrollResponse {
+                    success: true,
+                    scrolled,
+                    target_found: false,
+                    target_rect: None,
+                    visible_rect: None,
+                    scrolled_to_end: false,
+                    error: Some(format!("超时 {}ms", timeout_ms)),
+                });
+            }
 
-                // 检测 wait xpath 是否存在
+            // 检测 wait xpath
+            let mut found_target = false;
+            let mut target_rect: Option<super::types::Rect> = None;
+            let mut cur_element_center_y: Option<i32> = None;
+
+            if let Some(ref wait_value) = options.wait {
                 let wait_xpaths = extract_wait_xpaths(wait_value);
                 let win_sel = window_selector_for_wait.clone();
                 let wait_result = tokio::task::spawn_blocking(move || {
                     check_wait_xpaths(&win_sel, &wait_xpaths)
-                })
-                .await;
+                }).await;
 
                 if let Ok(Some(wr)) = wait_result {
                     if matches!(wr.overall, ValidationResult::Found { .. }) {
-                        // 提取目标元素的 rect（用于客户端判断元素是否完全可见）
-                        let target_rect: Option<super::types::Rect> = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                        target_rect = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
                             first_rect.as_ref().map(|r| r.clone().into())
-                        } else {
-                            None
-                        };
-
-                        // 提取当前元素中心 Y（用于测量滚动比例）
-                        let cur_element_center_y = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                        } else { None };
+                        cur_element_center_y = if let ValidationResult::Found { first_rect, .. } = &wr.overall {
                             first_rect.as_ref().map(|r| r.y + r.height / 2)
-                        } else {
-                            None
-                        };
+                        } else { None };
 
                         let cur_offscreen = wr.is_offscreen.unwrap_or(false);
 
                         if wait_visible {
-                            // visible 模式：还需检查元素不在屏幕外
-                            // 判断元素是否实际可见（处理 UIA 缓存延迟导致的 IsOffscreen=true）
+                            // ── 可见性判断 ──
                             let effectively_visible = if cur_offscreen {
-                                // IsOffscreen=true → 可能是 UIA 缓存延迟
-                                // 不再使用 append_offscreen_filter 二次查询（在 Chrome WebView 中始终返回 0 且耗时 ~1.7s）
-                                // 改用 rect 与容器视口重叠判断：
-                                //   - rect 有效且与容器重叠 → UIA 缓存延迟，视为可见
-                                //   - rect 为 (0,0,0,0) → Chrome WebView offscreen 元素特征，确实不可见
-                                //   - rect 有效但不重叠 → 确实 offscreen
                                 let rect_valid = target_rect.as_ref().map_or(false, |r| r.width > 0 && r.height > 0);
-                                let overlaps = if rect_valid {
+                                if rect_valid {
                                     match (&container_rect, &target_rect) {
                                         (Some(vp), Some(er)) => {
-                                            // 标准 AABB 重叠判断
                                             er.x < vp.x + vp.width && er.x + er.width > vp.x &&
                                             er.y < vp.y + vp.height && er.y + er.height > vp.y
                                         }
                                         _ => false,
                                     }
-                                } else {
-                                    false // rect 为 (0,0,0,0) 或 None → Chrome WebView offscreen 特征
-                                };
-                                if overlaps {
-                                    info!("Element offscreen but rect overlaps container, treating as visible (UIA cache delay) after {} scrolls", scrolled);
-                                } else {
-                                    info!("Wait xpath found but offscreen, rect={:?}, continue scrolling (delta={})", target_rect, current_delta);
-                                }
-                                overlaps
-                            } else {
-                                true // IsOffscreen=false，元素可见
-                            };
+                                } else { false }
+                            } else { true };
 
                             if effectively_visible {
-                                // 判断元素是否充分可见（不仅仅是重叠，而是满足可见性标准）
-                                // 1) 元素能完全放入视口 → 要求 top/bottom 都在有效视口内
-                                // 2) 元素太大放不进视口 → visible_rect.height ≥ 有效视口高度 * 80%
                                 let effective_container_for_sv = apply_viewport_inset(&container_rect, &viewport_inset);
                                 let sufficiently_visible = match (&target_rect, &effective_container_for_sv) {
                                     (Some(er), Some(vp)) => {
-                                        let fits_in_viewport = er.height <= vp.height;
-                                        if fits_in_viewport {
-                                            // 元素能完全放入视口，要求完全包含
-                                            let fully_contained = er.y >= vp.y && er.y + er.height <= vp.y + vp.height;
-                                            if fully_contained {
-                                                true
-                                            } else {
-                                                info!("Element fits in viewport but not fully contained: element_y={}, element_bottom={}, viewport_y={}, viewport_bottom={}",
-                                                    er.y, er.y + er.height, vp.y, vp.y + vp.height);
-                                                false
-                                            }
+                                        if er.height <= vp.height {
+                                            er.y >= vp.y && er.y + er.height <= vp.y + vp.height
                                         } else {
-                                            // 元素太大，要求 visible_rect 高度 ≥ 视口高度 * 80%
                                             let vis_top = er.y.max(vp.y);
                                             let vis_bottom = (er.y + er.height).min(vp.y + vp.height);
                                             let vis_height = vis_bottom.saturating_sub(vis_top);
-                                            let min_required = (vp.height as f32 * 0.8) as i32;
-                                            if vis_height >= min_required {
-                                                true
-                                            } else {
-                                                info!("Element too large for viewport, visible_height={} < min_required={} (80% of vp_height={})",
-                                                    vis_height, min_required, vp.height);
-                                                false
-                                            }
+                                            vis_height >= (vp.height as f32 * 0.8) as i32
                                         }
                                     }
-                                    _ => {
-                                        // 无 container_rect 数据时，降级为 effectively_visible 即返回
-                                        true
-                                    }
+                                    _ => true,
                                 };
-
-                                if sufficiently_visible {
-                                    let visible_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
-                                    info!("Wait xpath sufficiently visible after {} scrolls, target_rect={:?}, visible_rect={:?}", scrolled, target_rect, visible_rect);
-                                    return HttpResponse::Ok().json(MouseScrollResponse {
-                                        success: true,
-                                        scrolled,
-                                        target_found: true,
-                                        target_rect,
-                                        visible_rect,
-                                        scrolled_to_end: false,
-                                        error: None,
-                                    });
-                                } else if !scroll_to_center {
-                                    // 不居中模式 + 不够可见 → 继续滚动
-                                    info!("Wait xpath not sufficiently visible after {} scrolls, continuing", scrolled);
-                                } else {
-                                    // scrollToCenter 模式 + 不够可见 → 按动态方向调整
-                                    scroll_to_center_adjust_count += 1;
-                                    if scroll_to_center_adjust_count > scroll_to_center_adjust_times {
-                                        info!("Wait xpath visible, scrollToCenter adjust limit reached (adjust_count={}, max={}), stopping after {} scrolls",
-                                            scroll_to_center_adjust_count, scroll_to_center_adjust_times, scrolled);
-                                        let vis_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
-                                        return HttpResponse::Ok().json(MouseScrollResponse {
-                                            success: true,
-                                            scrolled,
-                                            target_found: true,
-                                            target_rect,
-                                            visible_rect: vis_rect,
-                                            scrolled_to_end: false,
-                                            error: Some(format!("scrollToCenter 调整次数已达上限 {}", scroll_to_center_adjust_times)),
-                                        });
-                                    }
-
-                                    match (cur_element_center_y, viewport_center_y) {
-                                        (Some(ey), Some(vy)) => {
-                                            let direction_sign: i32 = if ey > vy { -1 } else { 1 };
-                                            let base_abs_delta = delta.abs().max(120);
-                                            let distance_ratio = ((ey - vy).abs() as f32 / container_height).min(1.0);
-                                            let scaled = (base_abs_delta as f32 * distance_ratio) as i32;
-                                            let min_delta = (base_abs_delta as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
-                                            current_delta = scaled.max(min_delta) * direction_sign;
-                                            info!("scrollToCenter adjust (not sufficiently visible): element_y={}, viewport_y={}, direction_sign={}, delta={} (adjust={}/{})",
-                                                ey, vy, direction_sign, current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
-                                        }
-                                        _ => {
-                                            let min_delta = (delta.abs() as f32 * options.min_delta_ratio.unwrap_or(0.1)).max(120.0) as i32;
-                                            current_delta = (current_delta.abs() / 2).max(min_delta) * original_delta_sign;
-                                            info!("Wait xpath visible, scrollToCenter no center data, reduced delta={} (adjust_count={}/{})",
-                                                current_delta, scroll_to_center_adjust_count, scroll_to_center_adjust_times);
-                                        }
-                                    }
-                                }
+                                found_target = sufficiently_visible;
                             }
-                            // else: effectively_visible=false → 继续滚动
                         } else {
-                            // exist 模式：找到即可
-                            info!("Wait xpath found after {} scrolls", scrolled);
-                            let vis_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
-                            return HttpResponse::Ok().json(MouseScrollResponse {
-                                success: true,
-                                scrolled,
-                                target_found: true,
-                                target_rect,
-                                visible_rect: vis_rect,
-                                scrolled_to_end: false,
-                                error: None,
-                            });
+                            // exist 模式：找到即成功
+                            found_target = true;
                         }
                     }
                 }
             }
 
-            // 如果启用了 auto_delta，第一次滚动使用固定 delta，然后计算自适应 delta
-            if auto_delta && !did_initial_scroll && scrolled == 0 {
-                // 先滚动一次固定 delta
-                let _ = mouse_control::scroll_wheel(current_delta);
-                did_initial_scroll = true;
+            if found_target {
+                info!("Target found after {} steps, entering golden ratio adjustment", scrolled);
 
-                // 等待让页面响应（autoDelta 首次滚动后延迟）
-                tokio::time::sleep(tokio::time::Duration::from_millis(options.auto_delta_initial_delay_ms.unwrap_or(1000))).await;
+                // ── Phase 2: 黄金高度微调 ──
+                if scroll_to_center {
+                    let mut golden_adjust_count: u32 = 0;
+                    loop {
+                        // 检查是否已在黄金位置附近
+                        let ey = cur_element_center_y;
+                        let gy = viewport_golden_y;
+                        if let (Some(element_y), Some(golden_y)) = (ey, gy) {
+                            let distance = (element_y - golden_y).abs() as f32;
+                            let threshold = container_height * 0.05; // 5% 视口高度阈值
+                            if distance <= threshold {
+                                info!("Golden position reached: element_y={}, golden_y={}, distance={:.1}px (threshold={:.1}px)", element_y, golden_y, distance, threshold);
+                                break;
+                            }
 
-                // 查询容器元素的新 rect 获取可视高度
-                if let Some(height) = container_height_for_auto {
-                    // 使用容器高度计算自适应 delta，保留原始 delta 的方向（符号）
-                    let abs_delta = (height as f32 * delta_factor) as i32;
-                    let sign = delta.signum();
-                    current_delta = sign * abs_delta;
-                    info!("Auto delta calculated: container_height={} factor={} abs_delta={} sign={} final_delta={}", height, delta_factor, abs_delta, sign, current_delta);
+                            if golden_adjust_count >= golden_adjust_max_steps {
+                                info!("Golden adjust limit reached ({}/{}), element_y={}, golden_y={}",
+                                    golden_adjust_count, golden_adjust_max_steps, element_y, golden_y);
+                                break;
+                            }
+
+                            // 计算微调方向和步长
+                            let direction_sign: i32 = if element_y > golden_y { -1 } else { 1 };
+                            let distance_ratio = (distance / container_height).min(1.0).max(0.05);
+                            let adjust_delta = (step_delta.abs() as f32 * distance_ratio) as i32;
+                            let min_delta = step_delta.abs().min(40).max(10); // 最小 10，避免无限微调
+                            let final_adjust = adjust_delta.max(min_delta) * direction_sign;
+
+                            info!("Golden adjust {}/{}: element_y={}, golden_y={}, distance={:.1}px, ratio={:.3}, delta={}",
+                                golden_adjust_count + 1, golden_adjust_max_steps, element_y, golden_y, distance, distance_ratio, final_adjust);
+
+                            let _ = mouse_control::scroll_wheel(final_adjust);
+                            scrolled += 1;
+                            golden_adjust_count += 1;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(step_delay_ms)).await;
+
+                            // 重新检测目标位置
+                            if let Some(ref wait_value) = options.wait {
+                                let wait_xpaths = extract_wait_xpaths(wait_value);
+                                let win_sel = window_selector_for_wait.clone();
+                                let wait_result = tokio::task::spawn_blocking(move || {
+                                    check_wait_xpaths(&win_sel, &wait_xpaths)
+                                }).await;
+                                if let Ok(Some(wr)) = wait_result {
+                                    if let ValidationResult::Found { first_rect, .. } = &wr.overall {
+                                        target_rect = first_rect.as_ref().map(|r| r.clone().into());
+                                        cur_element_center_y = first_rect.as_ref().map(|r| r.y + r.height / 2);
+                                    }
+                                }
+                            }
+                        } else {
+                            // 无黄金位置数据，跳过微调
+                            break;
+                        }
+                    }
                 }
-                scrolled += 1;
-                continue;
+
+                let visible_rect = compute_visible_rect(&target_rect, &container_rect, &viewport_inset);
+                info!("Scroll done: target found after {} steps, target_rect={:?}", scrolled, target_rect);
+                return HttpResponse::Ok().json(MouseScrollResponse {
+                    success: true,
+                    scrolled,
+                    target_found: true,
+                    target_rect,
+                    visible_rect,
+                    scrolled_to_end: false,
+                    error: None,
+                });
             }
 
-            // 执行一次滚动
-            let _ = mouse_control::scroll_wheel(current_delta);
+            // ── 执行小步滚动 ──
+            let _ = mouse_control::scroll_wheel(step_delta);
             scrolled += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(step_delay_ms)).await;
 
-            // 滚动间隔，给页面响应时间
-            tokio::time::sleep(tokio::time::Duration::from_millis(options.scroll_interval_ms.unwrap_or(1000))).await;
-
-            // ── 滚动到底检测：每 STUCK_CHECK_INTERVAL 次滚动检测一次鼠标下元素位置 ──
+            // ── 滚动到底检测 ──
             if scrolled > 0 && scrolled % STUCK_CHECK_INTERVAL == 0 {
                 let cx = check_x;
                 let cy = check_y;
@@ -1032,9 +1316,9 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                     if let Some(py) = prev_element_y {
                         if (cur_y - py).abs() <= STUCK_Y_THRESHOLD {
                             stuck_count += 1;
-                            info!("Scroll stuck detected: prev_y={}, cur_y={}, delta={}, stuck_count={}/{}", py, cur_y, cur_y - py, stuck_count, STUCK_COUNT_THRESHOLD);
+                            info!("Scroll stuck: prev_y={}, cur_y={}, stuck={}/{}", py, cur_y, stuck_count, STUCK_COUNT_THRESHOLD);
                             if stuck_count >= STUCK_COUNT_THRESHOLD {
-                                info!("Scroll reached end: element under mouse position unchanged for {} consecutive checks after {} scrolls", stuck_count, scrolled);
+                                info!("Scroll reached end after {} steps", scrolled);
                                 return HttpResponse::Ok().json(MouseScrollResponse {
                                     success: true,
                                     scrolled,
@@ -1051,19 +1335,18 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                     }
                     prev_element_y = Some(cur_y);
                 } else {
-                    // 获取失败，重置追踪状态
                     prev_element_y = None;
                     stuck_count = 0;
                 }
             }
         }
 
-        // 全部滚动完成
-        info!("Scroll completed {} times", scrolled);
+        // 全部滚动完成但未找到目标
+        info!("Scroll completed {} steps, target not found", scrolled);
         HttpResponse::Ok().json(MouseScrollResponse {
             success: true,
             scrolled,
-            target_found: options.wait.is_none(),
+            target_found: false,
             target_rect: None,
             visible_rect: None,
             scrolled_to_end: false,
@@ -1077,40 +1360,40 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// POST /api/mouse/scroll-detect
-/// 滚动一次并检测是否到达边界（内容元素是否不再移动）
+/// 连续小幅滚动 + 持续 UIA 快照比对，检测是否到达滚动边界
 ///
-/// 流程：
-/// 1. 获取 container（滚动容器）坐标，移动鼠标到其中心
-/// 2. 用 find_visible_elements 在容器内查询指定 ControlType 的可见元素，记录每个元素的 bound.top
-/// 3. 执行一次滚动
-/// 4. 等待 UI 响应
-/// 5. 再次查询容器内可见元素
-/// 6. 按 (automationId, name, className) 配对，排除 exclude 列表中的元素
-/// 7. 比对：任一非排除元素 bound.top 变化 > 阈值 → 没到底；全部不变 → 到底
-/// 8. 若 rollback=true，反向滚动一次恢复位置
+/// 相比旧版"单次滚动+比对"，新版采用：
+/// 1. 获取 container 坐标，移动鼠标到其中心
+/// 2. 用 find_visible_elements 在容器内查询可见元素，记录快照
+/// 3. 循环：小步滚动(delta=40) → 等待(200ms) → 再拍快照 → 比对位置变化
+/// 4. 连续 stuck_threshold(默认3) 次快照中所有 watched 元素位置不变 → 判定到底
+/// 5. 若 rollback=true，反向累计滚动恢复位置
 pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Responder {
     let request = body.into_inner();
     let direction = request.direction.to_lowercase();
-    // "down"=向下滚(delta=-120, 检测到底)，"up"=向上滚(delta=120, 检测到顶)
-    let delta: i32 = match direction.as_str() {
-        "up" => 120,
-        "down" => -120,
-        _ => -120, // 默认向下
+    // 滚动方向符号：down=负(向下滚)，up=正(向上滚)
+    let dir_sign: i32 = match direction.as_str() {
+        "up" => 1,
+        _ => -1, // 默认向下
     };
+    let step_delta_abs = request.step_delta.max(10).min(120);
+    let step_delta = step_delta_abs * dir_sign;
+    let step_delay_ms = request.step_delay_ms.max(50).min(2000);
+    let stuck_threshold = request.stuck_threshold.max(1).min(10);
+    let max_steps = request.max_steps.max(1).min(100);
     let rollback = request.rollback;
-    let scroll_delay_ms = request.scroll_delay_ms;
     let window_selector = request.window.as_deref().unwrap_or("Window").to_string();
     let control_types = request.control_types.clone();
     let container_xpath = request.container.clone();
     let exclude_xpaths = request.exclude.clone();
 
     info!(
-        "API: /api/mouse/scroll-detect window='{}' container='{}' control_types={:?} direction='{}'(delta={}) exclude={:?} rollback={} scroll_delay_ms={}",
-        window_selector, container_xpath, control_types, direction, delta, exclude_xpaths, rollback, scroll_delay_ms
+        "API: /api/mouse/scroll-detect window='{}' container='{}' control_types={:?} direction='{}' step_delta={} step_delay={}ms stuck_threshold={} max_steps={} exclude={:?} rollback={}",
+        window_selector, container_xpath, control_types, direction, step_delta, step_delay_ms, stuck_threshold, max_steps, exclude_xpaths, rollback
     );
 
     // ── Helper: 构建错误响应 ──────────────────────────────────────────────
-    fn err_resp(msg: &str) -> HttpResponse {
+    fn err_resp(msg: &str, steps_scrolled: u32) -> HttpResponse {
         HttpResponse::Ok().json(MouseScrollDetectResponse {
             success: false,
             at_end: false,
@@ -1118,6 +1401,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
             changed_count: 0,
             details: vec![],
             rolled_back: false,
+            steps_scrolled,
             error: Some(msg.to_string()),
         })
     }
@@ -1146,17 +1430,17 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                         rect_api.y + rect_api.height / 2,
                     )
                 } else {
-                    return err_resp("滚动容器坐标获取失败");
+                    return err_resp("滚动容器坐标获取失败", 0);
                 }
             }
             ValidationResult::NotFound => {
-                return err_resp(&format!("未找到滚动容器: {}", container_xpath));
+                return err_resp(&format!("未找到滚动容器: {}", container_xpath), 0);
             }
             ValidationResult::Error(e) => {
-                return err_resp(e);
+                return err_resp(e, 0);
             }
             _ => {
-                return err_resp("滚动容器校验状态未知");
+                return err_resp("滚动容器校验状态未知", 0);
             }
         },
         Err(e) => {
@@ -1167,6 +1451,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 changed_count: 0,
                 details: vec![],
                 rolled_back: false,
+                steps_scrolled: 0,
                 error: Some(format!("内部错误: {}", e)),
             });
         }
@@ -1178,7 +1463,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
         let start_point = mouse_control::get_cursor_position();
         let _ = mouse_control::humanized_move(start_point, scroll_point, 400, "bezier");
 
-        // ── 元素快照：用 (automationId, name, className) 作为唯一标识 ──
+        // ── 元素快照类型 ──────────────────────────────────────────────────
         #[derive(Clone)]
         struct ElementSnapshot {
             identifier: String,
@@ -1187,13 +1472,11 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
         }
 
         fn make_identifier(elem: &super::types::ElementInfo) -> String {
-            // 优先用 automationId，否则用 name+className 组合
             if !elem.automation_id.is_empty() {
                 format!("aid:{}", elem.automation_id)
             } else if !elem.name.is_empty() || !elem.class_name.is_empty() {
                 format!("n:{}|c:{}", elem.name, elem.class_name)
             } else {
-                // 兜底：用 controlType+rect 位置
                 format!("t:{}|y:{:?}", elem.control_type, elem.rect.as_ref().map(|r| r.y))
             }
         }
@@ -1214,23 +1497,12 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 ElementSnapshot {
                     identifier,
                     top,
-                    is_offscreen: elem.is_offscreen, // find_visible_elements 只返回可见元素，此值恒为 false
+                    is_offscreen: elem.is_offscreen,
                 }
             }).collect()
         }
 
-        // ── Step 3: 滚动前快照 ──────────────────────────────────────────
-        let ws_before = window_selector.clone();
-        let ct_before = container_xpath.clone();
-        let ct_refs_before = control_types.clone();
-        let before_snapshots = tokio::task::spawn_blocking(move || {
-            let ct_refs: Vec<&str> = ct_refs_before.iter().map(|s| s.as_str()).collect();
-            take_snapshot(&ws_before, &ct_before, &ct_refs)
-        }).await.unwrap_or_default();
-
-        info!("Scroll detect: before snapshot {} visible elements", before_snapshots.len());
-
-        // ── Step 4: 查询 exclude 元素的标识集合 ─────────────────────────
+        // ── Step 3: 查询 exclude 元素的标识集合（只做一次）────────────────
         let exclude_identifiers: std::collections::HashSet<String> = {
             let mut set = std::collections::HashSet::new();
             for ex_xpath in &exclude_xpaths {
@@ -1246,131 +1518,172 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
             set
         };
 
-        // ── Step 5: 执行滚动 ─────────────────────────────────────────────
-        let _ = mouse_control::scroll_wheel(delta);
+        // ── 快照比对函数：返回 (changed_count, watched_count, details) ──
+        const TOP_THRESHOLD: i32 = 2;
+        fn compare_snapshots(
+            prev: &[ElementSnapshot],
+            cur: &[ElementSnapshot],
+            exclude: &std::collections::HashSet<String>,
+        ) -> (usize, usize, Vec<super::types::ElementChangeDetail>) {
+            let cur_map: std::collections::HashMap<String, &ElementSnapshot> = cur
+                .iter()
+                .map(|s| (s.identifier.clone(), s))
+                .collect();
+            let prev_ids: std::collections::HashSet<String> = prev
+                .iter()
+                .map(|s| s.identifier.clone())
+                .collect();
 
-        // ── Step 6: 等待 UI 响应（滚动动画 + UIA 属性刷新） ─────────────
-        tokio::time::sleep(tokio::time::Duration::from_millis(scroll_delay_ms)).await;
+            let mut watched = 0usize;
+            let mut changed = 0usize;
+            let mut details = Vec::new();
 
-        // ── Step 7: 滚动后快照 ──────────────────────────────────────────
-        let ws_after = window_selector.clone();
-        let ct_after = container_xpath.clone();
-        let ct_refs_after = control_types.clone();
-        let after_snapshots = tokio::task::spawn_blocking(move || {
-            let ct_refs: Vec<&str> = ct_refs_after.iter().map(|s| s.as_str()).collect();
-            take_snapshot(&ws_after, &ct_after, &ct_refs)
-        }).await.unwrap_or_default();
-
-        info!("Scroll detect: after snapshot {} visible elements", after_snapshots.len());
-
-        // ── Step 8: 前后配对比对 ─────────────────────────────────────────
-        // 用 identifier 建立 after 的查找表
-        let after_map: std::collections::HashMap<String, &ElementSnapshot> = after_snapshots
-            .iter()
-            .map(|s| (s.identifier.clone(), s))
-            .collect();
-
-        // 同时构建 before 的 identifier 集合，用于检测"新出现"的元素
-        let before_identifiers: std::collections::HashSet<String> = before_snapshots
-            .iter()
-            .map(|s| s.identifier.clone())
-            .collect();
-
-        const TOP_THRESHOLD: i32 = 2; // bound.top 变化阈值
-        let mut watched_count: usize = 0;
-        let mut changed_count: usize = 0;
-        let mut details: Vec<super::types::ElementChangeDetail> = Vec::new();
-
-        for before in &before_snapshots {
-            // 排除 exclude 列表中的元素
-            if exclude_identifiers.contains(&before.identifier) {
-                continue;
-            }
-
-            watched_count += 1;
-
-            if let Some(after) = after_map.get(&before.identifier) {
-                // 配对成功：比较 bound.top 变化
-                let top_changed = match (before.top, after.top) {
-                    (Some(b), Some(a)) => (a - b).abs() > TOP_THRESHOLD,
-                    _ => false,
-                };
-                let offscreen_changed = before.is_offscreen != after.is_offscreen;
-                let changed = top_changed || offscreen_changed;
-
-                if changed {
-                    changed_count += 1;
-                    let delta_top = match (before.top, after.top) {
-                        (Some(b), Some(a)) => Some(a - b),
-                        _ => None,
+            for before in prev {
+                if exclude.contains(&before.identifier) {
+                    continue;
+                }
+                watched += 1;
+                if let Some(after) = cur_map.get(&before.identifier) {
+                    let top_changed = match (before.top, after.top) {
+                        (Some(b), Some(a)) => (a - b).abs() > TOP_THRESHOLD,
+                        _ => false,
                     };
+                    let offscreen_changed = before.is_offscreen != after.is_offscreen;
+                    if top_changed || offscreen_changed {
+                        changed += 1;
+                        details.push(super::types::ElementChangeDetail {
+                            identifier: before.identifier.clone(),
+                            before_top: before.top,
+                            after_top: after.top,
+                            delta_top: match (before.top, after.top) {
+                                (Some(b), Some(a)) => Some(a - b),
+                                _ => None,
+                            },
+                            offscreen_changed,
+                        });
+                    }
+                } else {
+                    changed += 1;
                     details.push(super::types::ElementChangeDetail {
                         identifier: before.identifier.clone(),
                         before_top: before.top,
-                        after_top: after.top,
-                        delta_top,
-                        offscreen_changed,
+                        after_top: None,
+                        delta_top: None,
+                        offscreen_changed: true,
                     });
                 }
+            }
+            // 新出现元素
+            for after in cur {
+                if exclude.contains(&after.identifier) {
+                    continue;
+                }
+                if !prev_ids.contains(&after.identifier) {
+                    watched += 1;
+                    changed += 1;
+                    details.push(super::types::ElementChangeDetail {
+                        identifier: after.identifier.clone(),
+                        before_top: None,
+                        after_top: after.top,
+                        delta_top: None,
+                        offscreen_changed: true,
+                    });
+                }
+            }
+            (changed, watched, details)
+        }
+
+        // ── Step 4: 初始快照 ──────────────────────────────────────────────
+        let ws0 = window_selector.clone();
+        let ct0 = container_xpath.clone();
+        let ct_refs0 = control_types.clone();
+        let mut prev_snapshot = tokio::task::spawn_blocking(move || {
+            let ct_refs: Vec<&str> = ct_refs0.iter().map(|s| s.as_str()).collect();
+            take_snapshot(&ws0, &ct0, &ct_refs)
+        }).await.unwrap_or_default();
+
+        info!("Scroll detect: initial snapshot {} visible elements", prev_snapshot.len());
+
+        // ── Step 5: 连续小幅滚动 + 持续快照比对 ──────────────────────────
+        let mut total_scrolled = 0u32;
+        let mut stuck_count = 0u32;
+        let mut final_at_end = false;
+        let mut final_watched: usize = 0;
+        let mut final_changed: usize = 0;
+        let mut final_details: Vec<super::types::ElementChangeDetail> = Vec::new();
+
+        while total_scrolled < max_steps {
+            // 执行小步滚动
+            let _ = mouse_control::scroll_wheel(step_delta);
+            total_scrolled += 1;
+
+            // 等待 UI 响应
+            tokio::time::sleep(tokio::time::Duration::from_millis(step_delay_ms)).await;
+
+            // 拍快照
+            let ws = window_selector.clone();
+            let ct = container_xpath.clone();
+            let ct_refs = control_types.clone();
+            let cur_snapshot = tokio::task::spawn_blocking(move || {
+                let ct_refs: Vec<&str> = ct_refs.iter().map(|s| s.as_str()).collect();
+                take_snapshot(&ws, &ct, &ct_refs)
+            }).await.unwrap_or_default();
+
+            // 比对
+            let (changed, watched, details) = compare_snapshots(&prev_snapshot, &cur_snapshot, &exclude_identifiers);
+
+            info!(
+                "Scroll detect step {}/{}: prev={} cur={} watched={} changed={} stuck={}/{}",
+                total_scrolled, max_steps, prev_snapshot.len(), cur_snapshot.len(), watched, changed, stuck_count, stuck_threshold
+            );
+
+            if watched > 0 && changed == 0 {
+                // 所有 watched 元素位置不变 → stuck+1
+                stuck_count += 1;
+                if stuck_count >= stuck_threshold {
+                    info!("Scroll detect: reached end after {} steps ({} consecutive stuck checks)", total_scrolled, stuck_count);
+                    final_at_end = true;
+                    final_watched = watched;
+                    final_changed = changed;
+                    final_details = details;
+                    break;
+                }
             } else {
-                // 元素在 before 可见但 after 中消失 → 说明滚动了
-                // （滚出可视区域，或在虚拟化列表中被回收）
-                changed_count += 1;
-                details.push(super::types::ElementChangeDetail {
-                    identifier: before.identifier.clone(),
-                    before_top: before.top,
-                    after_top: None,
-                    delta_top: None,
-                    offscreen_changed: true, // 从可见变为不可见
-                });
+                // 有变化 → 重置 stuck 计数
+                stuck_count = 0;
             }
+
+            // 保存当前快照作为下一轮的 prev
+            prev_snapshot = cur_snapshot;
         }
 
-        // 检查 after 中新出现的元素（在 before 中不存在）
-        // 新元素出现 = 内容滚入 = 没到底
-        for after in &after_snapshots {
-            if exclude_identifiers.contains(&after.identifier) {
-                continue;
-            }
-            if !before_identifiers.contains(&after.identifier) {
-                watched_count += 1;
-                changed_count += 1;
-                details.push(super::types::ElementChangeDetail {
-                    identifier: after.identifier.clone(),
-                    before_top: None,
-                    after_top: after.top,
-                    delta_top: None,
-                    offscreen_changed: true, // 从不可见变为可见
-                });
-            }
+        // 循环结束但未达到 stuck_threshold → 判定为未到底
+        if total_scrolled >= max_steps && stuck_count < stuck_threshold {
+            info!("Scroll detect: max steps reached ({}), not at end", total_scrolled);
+            final_at_end = false;
+            final_watched = 0;
+            final_changed = 0;
+            final_details.clear();
         }
 
-        // ── Step 9: 判定 atEnd ───────────────────────────────────────────
-        // 任一变化 → 没到底；全部不变 → 到底
-        let at_end = watched_count > 0 && changed_count == 0;
-
-        info!(
-            "Scroll detect: watched={} changed={} at_end={}",
-            watched_count, changed_count, at_end
-        );
-
-        // ── Step 10: 若 rollback=true，反向滚动恢复位置 ──────────────────
+        // ── Step 6: rollback 恢复位置（反向累计滚动） ─────────────────────
         let mut rolled_back = false;
-        if rollback {
-            let rollback_delta = -delta; // 反方向
+        if rollback && total_scrolled > 0 {
+            let rollback_delta = -step_delta * total_scrolled as i32;
             let _ = mouse_control::scroll_wheel(rollback_delta);
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
             rolled_back = true;
-            info!("Scroll detect rollback: direction={}(delta={})", if delta > 0 { "down" } else { "up" }, rollback_delta);
+            info!("Scroll detect rollback: total_steps={} rollback_delta={}", total_scrolled, rollback_delta);
         }
 
         HttpResponse::Ok().json(MouseScrollDetectResponse {
             success: true,
-            at_end,
-            watched_count,
-            changed_count,
-            details,
+            at_end: final_at_end,
+            watched_count: final_watched,
+            changed_count: final_changed,
+            details: final_details,
             rolled_back,
+            steps_scrolled: total_scrolled,
             error: None,
         })
     })

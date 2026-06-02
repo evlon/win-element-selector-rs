@@ -74,6 +74,8 @@ pub enum Operator {
     NotStartsWith,    // 开头不为: not(starts-with(@Name, 'value'))
     EndsWith,         // 结尾为: substring(@Name, ...)='value'
     NotEndsWith,      // 结尾不为: not(substring(@Name, ...)='value')
+    Matches,          // 正则匹配: matches(@Name, 'pattern')
+    NotMatches,       // 正则不匹配: not(matches(@Name, 'pattern'))
     GreaterThan,      // 大于: @Index > value (numeric)
     GreaterThanOrEq,  // 大于等于: @Index >= value
     LessThan,         // 小于: @Index < value
@@ -91,6 +93,8 @@ impl Operator {
             Self::NotStartsWith   => "开头不为",
             Self::EndsWith        => "结尾为",
             Self::NotEndsWith     => "结尾不为",
+            Self::Matches         => "正则匹配",
+            Self::NotMatches      => "正则不匹配",
             Self::GreaterThan     => "大于",
             Self::GreaterThanOrEq => "大于等于",
             Self::LessThan        => "小于",
@@ -108,6 +112,8 @@ impl Operator {
             Operator::NotStartsWith,
             Operator::EndsWith,
             Operator::NotEndsWith,
+            Operator::Matches,
+            Operator::NotMatches,
             Operator::GreaterThan,
             Operator::GreaterThanOrEq,
             Operator::LessThan,
@@ -132,6 +138,8 @@ impl Operator {
                 let val_len = value.chars().count();
                 format!("not(substring(@{0}, string-length(@{0})-{1}+1)='{2}')", attr, val_len, value)
             }
+            Self::Matches         => format!("matches(@{}, '{}')", attr, value),
+            Self::NotMatches      => format!("not(matches(@{}, '{}'))", attr, value),
             // Numeric comparisons (for Index, etc.)
             Self::GreaterThan     => format!("@{} > {}", attr, value),
             Self::GreaterThanOrEq => format!("@{} >= {}", attr, value),

@@ -247,7 +247,7 @@ fn level_to_xpath_segment(level: &CommonLevel) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::ElementRect;
+    use crate::core::model::{ElementRect, WalkerHint};
 
     fn make_node(control_type: &str, automation_id: &str, name: &str) -> HierarchyNode {
         HierarchyNode {
@@ -275,6 +275,7 @@ mod tests {
             position_mode: String::new(),
             sibling_count: 1,
             depth_from_window: 0,
+            walker_hint: WalkerHint::Unknown,
             is_checkable: false,
             is_checked: None,
             is_clickable: false,
@@ -309,6 +310,7 @@ mod tests {
             position_mode: String::new(),
             sibling_count: 1,
             depth_from_window: 0,
+            walker_hint: WalkerHint::Unknown,
             is_checkable: false,
             is_checked: None,
             is_clickable: false,

@@ -10,6 +10,7 @@
 
 use super::model::{CaptureMode, CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo};
 use log::{debug, error, info};
+use regex::Regex;
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1163,6 +1164,12 @@ pub mod windows_impl {
                                     Operator::NotStartsWith => !act.starts_with(&f.value),
                                     Operator::EndsWith => act.ends_with(&f.value),
                                     Operator::NotEndsWith => !act.ends_with(&f.value),
+                                    Operator::Matches => {
+                                        Regex::new(&f.value).map_or(false, |re| re.is_match(act))
+                                    }
+                                    Operator::NotMatches => {
+                                        Regex::new(&f.value).map_or(true, |re| !re.is_match(act))
+                                    }
                                     _ => act == &f.value,
                                 }
                             });
@@ -1896,7 +1903,6 @@ pub mod windows_impl {
             // Find target element using find_by_xpath_detailed
             if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window_element, xpath) {
                 if !elements.is_empty() {
-                    // Focus the first matching element
                     if unsafe { elements[0].SetFocus() }.ok().is_some() {
                         return true;
                     }
@@ -1905,6 +1911,204 @@ pub mod windows_impl {
         }
         
         false
+    }
+
+    /// 通过 UIA InvokePattern 触发元素点击。
+    /// 不依赖鼠标坐标，不受覆盖层影响。
+    /// 返回 Ok(description) 表示成功，Err(error) 表示失败。
+    pub fn invoke_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Result<Result<String, String>> {
+        let auto = get_automation()?;
+
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return Ok(Err(format!("窗口未找到: {}", window_selector)));
+        }
+
+        for window_element in &windows {
+            match find_by_xpath_with_fallback(&auto, window_element, xpath) {
+                Ok((elements, _)) => {
+                    if elements.is_empty() {
+                        continue;
+                    }
+
+                    let elem = &elements[0];
+                    let elem_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                    let elem_name = get_bstr(unsafe { elem.CurrentName() });
+
+                    // 尝试获取 InvokePattern
+                    use windows::Win32::UI::Accessibility::{
+                        IUIAutomationInvokePattern, UIA_InvokePatternId,
+                    };
+
+                    let invoke: IUIAutomationInvokePattern = match unsafe {
+                        elem.GetCurrentPattern(UIA_InvokePatternId)
+                    } {
+                        Ok(pat) => match pat.cast() {
+                            Ok(inv) => inv,
+                            Err(e) => {
+                                return Ok(Err(format!(
+                                    "元素 '{}' (type={}) 不支持 InvokePattern: {}",
+                                    elem_name, elem_ct, e
+                                )));
+                            }
+                        },
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "元素 '{}' (type={}) 不支持 InvokePattern (GetCurrentPattern 失败): {:?}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    };
+
+                    // 执行 Invoke
+                    match unsafe { invoke.Invoke() } {
+                        Ok(()) => {
+                            info!("UIA Invoke succeeded: element='{}' type={}", elem_name, elem_ct);
+                            return Ok(Ok(format!("Invoke {} ({})", elem_name, elem_ct)));
+                        }
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "Invoke 执行失败: element='{}' type={} error={:?}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("XPath search failed on window: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        Ok(Err("所有窗口均未找到匹配元素".to_string()))
+    }
+
+    /// 通过 UIA SetFocus 聚焦元素。
+    /// 不依赖鼠标坐标，不受覆盖层影响。
+    /// 适用于 Edit、Document 等需要获取键盘焦点的控件。
+    pub fn focus_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Result<Result<(), String>> {
+        let auto = get_automation()?;
+
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return Ok(Err(format!("窗口未找到: {}", window_selector)));
+        }
+
+        for window_element in &windows {
+            // 先激活窗口
+            if unsafe { window_element.SetFocus() }.is_err() {
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            match find_by_xpath_with_fallback(&auto, window_element, xpath) {
+                Ok((elements, _)) => {
+                    if elements.is_empty() {
+                        continue;
+                    }
+
+                    let elem = &elements[0];
+                    let elem_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                    let elem_name = get_bstr(unsafe { elem.CurrentName() });
+
+                    match unsafe { elem.SetFocus() } {
+                        Ok(()) => {
+                            info!("UIA SetFocus succeeded: element='{}' type={}", elem_name, elem_ct);
+                            return Ok(Ok(()));
+                        }
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "SetFocus 执行失败: element='{}' type={} error={:?}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("XPath search failed on window: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        Ok(Err("所有窗口均未找到匹配元素".to_string()))
+    }
+
+    /// 通过 UIA ValuePattern.SetValue() 直接设置控件的文本值。
+    /// 不依赖键盘模拟，不需要元素可见/聚焦。
+    /// 适用于 Edit、Document 等支持 ValuePattern 的输入控件。
+    /// 返回 Ok(Ok(chars_count)) 表示成功写入的字符数，Ok(Err(msg)) 表示业务错误。
+    pub fn set_value_by_xpath(window_selector: &str, xpath: &str, value: &str) -> anyhow::Result<Result<usize, String>> {
+        use windows::Win32::UI::Accessibility::{UIA_ValuePatternId, IValueProvider};
+        use windows::core::BSTR;
+
+        let auto = get_automation()?;
+
+        let windows = find_window_by_selector(&auto, window_selector);
+        if windows.is_empty() {
+            return Ok(Err(format!("窗口未找到: {}", window_selector)));
+        }
+
+        for window_element in &windows {
+            match find_by_xpath_with_fallback(&auto, window_element, xpath) {
+                Ok((elements, _)) => {
+                    if elements.is_empty() {
+                        continue;
+                    }
+
+                    let elem = &elements[0];
+                    let elem_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+                    let elem_name = get_bstr(unsafe { elem.CurrentName() });
+
+                    // 获取 ValuePattern
+                    let pattern = match unsafe { elem.GetCurrentPattern(UIA_ValuePatternId) } {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "元素 '{}' (type={}) 不支持 ValuePattern: {:?}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    };
+
+                    let value_provider: IValueProvider = match pattern.cast() {
+                        Ok(vp) => vp,
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "元素 '{}' (type={}) 无法转为 IValueProvider: {}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    };
+
+                    // 调用 SetValue
+                    let bstr_value = BSTR::from(value);
+                    let char_count = value.chars().count();
+                    match unsafe { value_provider.SetValue(&bstr_value) } {
+                        Ok(()) => {
+                            info!(
+                                "UIA ValuePattern.SetValue succeeded: '{}' → element='{}' type={}",
+                                value, elem_name, elem_ct
+                            );
+                            return Ok(Ok(char_count));
+                        }
+                        Err(e) => {
+                            return Ok(Err(format!(
+                                "SetValue 执行失败: element='{}' type={} error={:?}",
+                                elem_name, elem_ct, e
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("XPath search failed on window: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        Ok(Err("所有窗口均未找到匹配元素".to_string()))
     }
 
     /// 获取窗口的 BoundingRectangle
@@ -4600,7 +4804,7 @@ pub mod windows_impl {
         // 2. Skip WebView-class windows for /XPath (absolute path) — WebView containers
         //    are under child HWNDs, not direct children of the window.
         let is_broad_selector = !window_selector.contains('[');  // No predicates = matches everything
-        let is_absolute_xpath = element_xpath.starts_with('/') && !element_xpath.starts_with("//");
+        let is_absolute_xpath = element_xpath_stripped.starts_with('/') && !element_xpath_stripped.starts_with("//");
         let max_windows = if is_broad_selector { 3usize } else { windows.len() };
         
         for (win_idx, window) in windows.iter().enumerate() {

@@ -794,10 +794,10 @@ impl State {
         let result = optimizer.optimize(&self.hierarchy);
         self.hierarchy = result.optimized_hierarchy.clone();
         let window_selector = self.build_window_selector_from_info();
-        let element_xpath_inner = xpath::generate_elements(&self.hierarchy);
+        // Use optimizer's output XPath directly, adding capture mode prefix
         let prefix = self.capture_mode.xpath_prefix();
         self.window_selector = window_selector;
-        self.element_xpath = format!("{}{}", prefix, element_xpath_inner);
+        self.element_xpath = format!("{}{}", prefix, result.optimized_xpath);
         self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation = ValidationResult::Idle;
@@ -934,7 +934,7 @@ impl State {
         match self.code_format {
             CodeFormat::FullChain => {
                 format!(
-                    "const sdk = new SDK();\nconst flow = sdk.flow();\n\n// 激活窗口\nawait flow.window({});\n\n// 查找元素\nconst element = await flow.find(`{}`);",
+                    "const sdk = new SDK();\nconst flow = sdk.flow();\n\n// 激活窗口\nawait flow.window({});\n\n// 查找元素\nconst element = await flow.findOne(`{}`);",
                     window_obj,
                     escape_backtick(&element_xpath)
                 )
@@ -1173,7 +1173,9 @@ impl State {
                     match result {
                         Some(opt_result) => {
                             self.hierarchy = opt_result.optimized_hierarchy.clone();
-                            self.element_xpath = opt_result.optimized_xpath.clone();
+                            // Add capture mode prefix to the optimized XPath
+                            let prefix = self.capture_mode.xpath_prefix();
+                            self.element_xpath = format!("{}{}", prefix, opt_result.optimized_xpath);
                             self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
                             self.xpath_error = xpath::lint(&self.xpath_text);
                             self.validation = ValidationResult::Idle;
@@ -2462,12 +2464,12 @@ fn view_window_properties(state: &State) -> Element<'_, Message> {
 
     let mut filter_rows = Vec::new();
 
-    // Column header row
+    // Column header row — use FillPortion for proportional widths
     let header_row = row![
         Space::new().width(Length::Fixed(22.0)), // space for checkbox
-        text("属性名").size(11).color(colors.muted).width(Length::Fixed(90.0)),
-        text("运算符").size(11).color(colors.muted).width(Length::Fixed(80.0)),
-        text("值").size(11).color(colors.muted),
+        text("属性名").size(11).color(colors.muted).width(Length::FillPortion(3)),
+        text("运算符").size(11).color(colors.muted).width(Length::FillPortion(3)),
+        text("值").size(11).color(colors.muted).width(Length::FillPortion(4)),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
@@ -2485,16 +2487,16 @@ fn view_window_properties(state: &State) -> Element<'_, Message> {
         let cb = checkbox(filter.enabled)
             .on_toggle(move |_| Message::WindowFilterEnabled(f_idx, !filter.enabled));
 
-        let label = text(&filter.name).width(Length::Fixed(90.0));
+        let label = text(&filter.name).width(Length::FillPortion(3));
 
         let operators: Vec<_> = Operator::all().iter().cloned().collect();
         let pick = pick_list(operators, Some(filter.operator.clone()), move |op| {
             Message::WindowFilterOperatorChanged(f_idx, op)
-        }).width(Length::Fixed(76.0));
+        }).width(Length::FillPortion(3));
 
         let input = text_input("值", &filter.value)
             .on_input(move |v| Message::WindowFilterValueChanged(f_idx, v))
-            .width(Length::Fill);
+            .width(Length::FillPortion(4));
 
         let r = row![cb, label, pick, input]
             .spacing(4)
@@ -2653,12 +2655,12 @@ fn view_properties(state: &State) -> Element<'_, Message> {
             ..Default::default()
         });
 
-    // Filter column header
+    // Filter column header — use FillPortion for proportional widths
     let header_row = row![
         Space::new().width(Length::Fixed(22.0)),
-        text("属性名").size(11).color(colors.muted).width(Length::Fixed(90.0)),
-        text("运算符").size(11).color(colors.muted).width(Length::Fixed(80.0)),
-        text("值").size(11).color(colors.muted),
+        text("属性名").size(11).color(colors.muted).width(Length::FillPortion(3)),
+        text("运算符").size(11).color(colors.muted).width(Length::FillPortion(3)),
+        text("值").size(11).color(colors.muted).width(Length::FillPortion(4)),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
@@ -2677,9 +2679,9 @@ fn view_properties(state: &State) -> Element<'_, Message> {
         let depth_val = format!("{}", node.depth_from_window);
         let depth_row = row![
             Space::new().width(Length::Fixed(22.0)),
-            text("Depth").size(12).color(colors.muted).width(Length::Fixed(90.0)),
-            text("—").size(12).color(colors.muted).width(Length::Fixed(76.0)),
-            text(depth_val).size(12).color(colors.mono_fg),
+            text("Depth").size(12).color(colors.muted).width(Length::FillPortion(3)),
+            text("—").size(12).color(colors.muted).width(Length::FillPortion(3)),
+            text(depth_val).size(12).color(colors.mono_fg).width(Length::FillPortion(4)),
         ]
         .spacing(4)
         .align_y(Alignment::Center)
@@ -2691,16 +2693,16 @@ fn view_properties(state: &State) -> Element<'_, Message> {
         let cb = checkbox(filter.enabled)
             .on_toggle(move |_| Message::FilterEnabledToggled(selected, f_idx, !filter.enabled));
 
-        let label = text(&filter.name).width(Length::Fixed(90.0));
+        let label = text(&filter.name).width(Length::FillPortion(3));
 
         let operators: Vec<_> = Operator::all().iter().cloned().collect();
         let pick = pick_list(operators, Some(filter.operator.clone()), move |op| {
             Message::FilterOperatorChanged(selected, f_idx, op)
-        }).width(Length::Fixed(76.0));
+        }).width(Length::FillPortion(3));
 
         let input = text_input("值", &filter.value)
             .on_input(move |v| Message::FilterValueChanged(selected, f_idx, v))
-            .width(Length::Fill);
+            .width(Length::FillPortion(4));
 
         let r = row![cb, label, pick, input]
             .spacing(4)

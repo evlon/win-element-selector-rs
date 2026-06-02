@@ -160,6 +160,7 @@ mod tests {
                 position_mode: "position".to_string(),
                 sibling_count: 0,
                 depth_from_window: 0,
+                walker_hint: crate::core::model::WalkerHint::Unknown,
                 is_checkable: false,
                 is_checked: None,
                 is_clickable: false,

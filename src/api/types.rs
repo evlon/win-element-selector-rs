@@ -298,6 +298,31 @@ pub struct MouseMoveResponse {
     pub error: Option<String>,
 }
 
+/// 点击模式：控制如何对目标元素执行点击操作
+///
+/// - `coordinate` (默认): 传统的坐标点击，移动鼠标到元素位置通过 SendInput 点击
+/// - `invoke`: 优先使用 UIA InvokePattern.Invoke() 触发点击（不受覆盖层影响）
+/// - `setFocus`: 通过 UIA SetFocus() 聚焦元素（适用于输入框等）
+/// - `auto`: 自动选择最优策略：先尝试 Invoke，失败则尝试 SetFocus，最后回退到坐标点击
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ClickMode {
+    /// 坐标点击（默认）
+    Coordinate,
+    /// UIA InvokePattern
+    Invoke,
+    /// UIA SetFocus
+    SetFocus,
+    /// 自动选择最优策略
+    Auto,
+}
+
+impl Default for ClickMode {
+    fn default() -> Self {
+        ClickMode::Coordinate
+    }
+}
+
 /// 鼠标点击选项
 #[derive(Debug, Clone, Deserialize)]
 pub struct MouseClickOptions {
@@ -328,6 +353,13 @@ pub struct MouseClickOptions {
     /// 留痕超时时间（毫秒），默认 3000
     #[serde(rename = "markTimeout", default = "default_mark_timeout")]
     pub mark_timeout: u64,
+    /// 点击模式（默认 coordinate 保持向后兼容）
+    #[serde(rename = "clickMode", default)]
+    pub click_mode: ClickMode,
+    /// 是否启用遮挡检测（仅坐标点击时生效），默认 false 保持向后兼容
+    /// 启用后，点击前会通过 ElementFromPoint 检查目标位置是否被其他元素遮挡
+    #[serde(rename = "occlusionCheck", default)]
+    pub occlusion_check: bool,
 }
 
 impl Default for MouseClickOptions {
@@ -342,6 +374,8 @@ impl Default for MouseClickOptions {
             offset: None,
             mark_click: false,
             mark_timeout: default_mark_timeout(),
+            click_mode: ClickMode::Coordinate,
+            occlusion_check: false,
         }
     }
 }
@@ -533,6 +567,15 @@ pub struct MouseClickResponse {
     #[serde(rename = "clickPoint")]
     pub click_point: Point,
     pub element: Option<ClickedElement>,
+    /// 实际使用的点击方式: "invoke" | "setFocus" | "coordinate" | "auto->invoke" 等
+    #[serde(rename = "clickMethod", skip_serializing_if = "Option::is_none")]
+    pub click_method: Option<String>,
+    /// 遮挡检测结果（仅 occlusionCheck=true 时有值）
+    #[serde(rename = "occlusionDetected", skip_serializing_if = "Option::is_none")]
+    pub occlusion_detected: Option<bool>,
+    /// 遮挡元素信息（检测到遮挡时有值）
+    #[serde(rename = "occlusionInfo", skip_serializing_if = "Option::is_none")]
+    pub occlusion_info: Option<String>,
     pub error: Option<String>,
 }
 
@@ -582,6 +625,19 @@ pub struct MouseScrollOptions {
     /// 视口内边距（从容器视口向内扣除固定遮挡区域，支持像素和百分比）
     #[serde(rename = "viewportInset", default)]
     pub viewport_inset: Option<ViewportInset>,
+    /// 平滑滚动步长（每次小步滚动的 delta），默认 40。设为 0 则使用原有 delta 逻辑
+    #[serde(rename = "smoothStepDelta", default = "default_smooth_step_delta")]
+    pub smooth_step_delta: Option<i32>,
+    /// 平滑滚动每步等待时间（毫秒），默认 200
+    #[serde(rename = "smoothStepDelayMs", default = "default_smooth_step_delay_ms")]
+    pub smooth_step_delay_ms: Option<u64>,
+    /// 黄金比例目标位置（元素中心在视口中的目标比例），默认根据方向自动选择：
+    /// 下滚→0.618，上滚→0.382。手动指定则使用该值
+    #[serde(rename = "goldenRatio", default)]
+    pub golden_ratio: Option<f32>,
+    /// 黄金微调最大步数（防止死循环），默认 10
+    #[serde(rename = "goldenAdjustMaxSteps", default = "default_golden_adjust_max_steps")]
+    pub golden_adjust_max_steps: Option<u32>,
 }
 
 fn default_scroll_to_center() -> Option<bool> { Some(true) }
@@ -592,6 +648,9 @@ fn default_scroll_interval_ms() -> Option<u64> { Some(1000) }
 fn default_auto_delta_initial_delay_ms() -> Option<u64> { Some(1000) }
 fn default_min_delta_ratio() -> Option<f32> { Some(0.1) }
 fn default_scroll_to_center_threshold() -> Option<f32> { Some(0.10) }
+fn default_smooth_step_delta() -> Option<i32> { Some(40) }
+fn default_smooth_step_delay_ms() -> Option<u64> { Some(200) }
+fn default_golden_adjust_max_steps() -> Option<u32> { Some(10) }
 
 /// 滚动请求
 #[derive(Debug, Clone, Deserialize)]
@@ -654,11 +713,27 @@ pub struct MouseScrollDetectRequest {
     /// true: 检测完后往反方向滚一次，恢复原始位置
     #[serde(default)]
     pub rollback: bool,
+    /// 每次小步滚动的 delta（默认 40，比之前 120 更平滑）
+    #[serde(rename = "stepDelta", default = "default_step_delta")]
+    pub step_delta: i32,
+    /// 每步滚动后等待 UI 响应时间（毫秒），默认 200
+    #[serde(rename = "stepDelayMs", default = "default_step_delay_ms")]
+    pub step_delay_ms: u64,
+    /// 连续 stuck 次数阈值，达到后判定为到底（默认 3）
+    #[serde(rename = "stuckThreshold", default = "default_stuck_threshold")]
+    pub stuck_threshold: u32,
+    /// 最大滚动步数（防止死循环），默认 30
+    #[serde(rename = "maxSteps", default = "default_max_steps")]
+    pub max_steps: u32,
 }
 
 fn default_control_types() -> Vec<String> { vec!["Text".to_string()] }
 fn default_detect_direction() -> String { "down".to_string() }
 fn default_scroll_delay_ms() -> u64 { 500 }
+fn default_step_delta() -> i32 { 40 }
+fn default_step_delay_ms() -> u64 { 200 }
+fn default_stuck_threshold() -> u32 { 3 }
+fn default_max_steps() -> u32 { 30 }
 
 /// 滚动边界检测响应
 #[derive(Debug, Clone, Serialize)]
@@ -679,6 +754,9 @@ pub struct MouseScrollDetectResponse {
     /// 是否执行了反向回滚
     #[serde(rename = "rolledBack")]
     pub rolled_back: bool,
+    /// 实际执行的滚动步数
+    #[serde(rename = "stepsScrolled")]
+    pub steps_scrolled: u32,
     pub error: Option<String>,
 }
 

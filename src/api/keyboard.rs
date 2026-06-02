@@ -1,6 +1,6 @@
 // src/api/keyboard.rs
 //
-// 键盘操作 API - 拟人化打字
+// 键盘操作 API - 拟人化打字，支持多种输入模式
 
 use actix_web::{web, HttpResponse, Responder};
 use log::{info, warn};
@@ -9,11 +9,16 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 
 use windows::Win32::{
+    System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+    System::DataExchange::{OpenClipboard, CloseClipboard, EmptyClipboard, SetClipboardData},
     UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
         KEYEVENTF_UNICODE, KEYEVENTF_KEYUP, VIRTUAL_KEY, KEYBD_EVENT_FLAGS,
     },
 };
+
+/// CF_UNICODETEXT 常量值 (windows 0.62 中此常量可能未被导出)
+const CF_UNICODETEXT: u32 = 13;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 快捷键请求类型
@@ -197,11 +202,33 @@ pub struct CharDelayConfig {
 fn default_min_delay() -> u64 { 50 }
 fn default_max_delay() -> u64 { 150 }
 
+/// 输入模式枚举
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TypeMode {
+    /// 键盘模拟输入（默认）：SendInput 逐字击键，支持 {Enter} 等虚拟键
+    #[default]
+    Keyboard,
+    /// UIA ValuePattern.SetValue：直接通过 UIA 设置控件文本值，无需焦点/可见
+    Value,
+    /// 剪贴板粘贴：复制到剪贴板后 Ctrl+V 粘贴，适合长文本
+    Clipboard,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TypeRequest {
     pub text: String,
     #[serde(default, rename = "charDelay")]
     pub char_delay: Option<CharDelayConfig>,
+    /// 输入模式，默认 keyboard
+    #[serde(default, rename = "typeMode")]
+    pub type_mode: Option<TypeMode>,
+    /// Value/Clipboard 模式需要的窗口选择器
+    #[serde(default)]
+    pub window: Option<String>,
+    /// Value/Clipboard 模式需要的元素 XPath
+    #[serde(default)]
+    pub element: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,12 +550,19 @@ pub fn humanized_type(text: &str, min_delay: u64, max_delay: u64) -> anyhow::Res
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// POST /api/keyboard/type
+/// 支持三种输入模式（通过 typeMode 字段控制）：
+///
+/// - `keyboard` (默认): 键盘模拟逐字输入，支持 {Enter} 等虚拟键，支持 charDelay 拟人化延迟
+/// - `value`: 通过 UIA ValuePattern.SetValue() 直接设置控件文本，无需焦点/可见
+/// - `clipboard`: 通过系统剪贴板 + Ctrl+V 粘贴，适合长文本
 pub async fn type_text(body: web::Json<TypeRequest>) -> impl Responder {
     let request = body.into_inner();
+    let mode = request.type_mode.unwrap_or_default();
     
     info!(
-        "API: /api/keyboard/type text_len={} chars",
-        request.text.chars().count()
+        "API: /api/keyboard/type text_len={} chars mode={:?}",
+        request.text.chars().count(),
+        mode,
     );
     
     if request.text.is_empty() {
@@ -539,51 +573,283 @@ pub async fn type_text(body: web::Json<TypeRequest>) -> impl Responder {
             error: None,
         });
     }
-    
-    let char_delay = request.char_delay.unwrap_or(CharDelayConfig {
-        min: default_min_delay(),
-        max: default_max_delay(),
-    });
-    
-    // 在阻塞线程中执行打字
-    let text = request.text.clone();
-    let min_delay = char_delay.min;
-    let max_delay = char_delay.max;
-    
-    let result = tokio::task::spawn_blocking(move || {
-        humanized_type(&text, min_delay, max_delay)
-    })
-    .await;
-    
-    match result {
-        Ok(Ok((chars_typed, duration_ms))) => {
-            info!("Type completed: {} chars in {}ms", chars_typed, duration_ms);
-            HttpResponse::Ok().json(TypeResponse {
-                success: true,
-                chars_typed,
-                duration_ms,
-                error: None,
-            })
+
+    match mode {
+        TypeMode::Value => {
+            // UIA ValuePattern.SetValue 模式 — 委托给 uia 模块
+            let window = match &request.window {
+                Some(w) => w.clone(),
+                None => {
+                    return HttpResponse::Ok().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some("Value 模式需要提供 window 参数".to_string()),
+                    });
+                }
+            };
+            let element = match &request.element {
+                Some(e) => e.clone(),
+                None => {
+                    return HttpResponse::Ok().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some("Value 模式需要提供 element 参数".to_string()),
+                    });
+                }
+            };
+            let text = request.text.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                super::super::core::uia::set_value_by_xpath(&window, &element, &text)
+            }).await;
+
+            match result {
+                Ok(Ok(Ok(chars))) => {
+                    let chars_typed = chars as u32;
+                    info!("ValuePattern.SetValue succeeded: {} chars", chars_typed);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: true,
+                        chars_typed,
+                        duration_ms: 0,
+                        error: None,
+                    })
+                }
+                Ok(Ok(Err(e))) => {
+                    warn!("ValuePattern.SetValue failed: {}", e);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(e),
+                    })
+                }
+                Ok(Err(e)) => {
+                    warn!("Spawn blocking inner error: {}", e);
+                    HttpResponse::InternalServerError().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(e.to_string()),
+                    })
+                }
+                Err(e) => {
+                    warn!("Spawn blocking error: {}", e);
+                    HttpResponse::InternalServerError().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(format!("内部错误: {}", e)),
+                    })
+                }
+            }
         }
-        Ok(Err(e)) => {
-            warn!("Type failed: {}", e);
-            HttpResponse::Ok().json(TypeResponse {
-                success: false,
-                chars_typed: 0,
-                duration_ms: 0,
-                error: Some(e.to_string()),
-            })
+        TypeMode::Clipboard => {
+            let text = request.text.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                paste_via_clipboard(&text)
+            }).await;
+
+            match result {
+                Ok(Ok(Ok(chars))) => {
+                    let chars_typed = chars as u32;
+                    info!("Clipboard paste succeeded: {} chars", chars_typed);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: true,
+                        chars_typed,
+                        duration_ms: 0,
+                        error: None,
+                    })
+                }
+                Ok(Ok(Err(e))) => {
+                    warn!("Clipboard paste failed: {}", e);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(e),
+                    })
+                }
+                Ok(Err(e)) => {
+                    warn!("Spawn blocking inner error: {}", e);
+                    HttpResponse::InternalServerError().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(e.to_string()),
+                    })
+                }
+                Err(e) => {
+                    warn!("Spawn blocking error: {}", e);
+                    HttpResponse::InternalServerError().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(format!("内部错误: {}", e)),
+                    })
+                }
+            }
         }
-        Err(e) => {
-            warn!("Spawn blocking error: {}", e);
-            HttpResponse::InternalServerError().json(TypeResponse {
-                success: false,
-                chars_typed: 0,
-                duration_ms: 0,
-                error: Some(format!("内部错误: {}", e)),
-            })
+        TypeMode::Keyboard => {
+            // 键盘模拟模式（默认）- 保持原有逻辑
+            let char_delay = request.char_delay.unwrap_or(CharDelayConfig {
+                min: default_min_delay(),
+                max: default_max_delay(),
+            });
+        
+            let text = request.text.clone();
+            let min_delay = char_delay.min;
+            let max_delay = char_delay.max;
+            
+            let result = tokio::task::spawn_blocking(move || {
+                humanized_type(&text, min_delay, max_delay)
+            }).await;
+            
+            match result {
+                Ok(Ok((chars_typed, duration_ms))) => {
+                    info!("Type completed: {} chars in {}ms", chars_typed, duration_ms);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: true,
+                        chars_typed,
+                        duration_ms,
+                        error: None,
+                    })
+                }
+                Ok(Err(e)) => {
+                    warn!("Type failed: {}", e);
+                    HttpResponse::Ok().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(e.to_string()),
+                    })
+                }
+                Err(e) => {
+                    warn!("Spawn blocking error: {}", e);
+                    HttpResponse::InternalServerError().json(TypeResponse {
+                        success: false,
+                        chars_typed: 0,
+                        duration_ms: 0,
+                        error: Some(format!("内部错误: {}", e)),
+                    })
+                }
+            }
         }
     }
+}
+
+/// 通过系统剪贴板 + Ctrl+V 粘贴文本
+fn paste_via_clipboard(text: &str) -> anyhow::Result<Result<usize, String>> {
+    use windows::Win32::Foundation::HANDLE;
+
+    let char_count = text.chars().count();
+
+    // Step 1: 将文本写入剪贴板 (UTF-16)
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let byte_size = utf16.len() * 2;
+
+    unsafe {
+        let h_mem = GlobalAlloc(GMEM_MOVEABLE, byte_size)
+            .map_err(|e| anyhow::anyhow!("GlobalAlloc 失败: {:?}", e))?;
+
+        let ptr = GlobalLock(h_mem);
+        if ptr.is_null() {
+            return Ok(Err("GlobalLock 失败".to_string()));
+        }
+
+        std::ptr::copy_nonoverlapping(utf16.as_ptr() as *const _, ptr as *mut u16, utf16.len());
+        let _ = GlobalUnlock(h_mem);
+
+        // 打开/清空/设置剪贴板
+        if OpenClipboard(None).is_err() {
+            return Ok(Err("无法打开剪贴板（可能被其他程序占用）".to_string()));
+        }
+
+        EmptyClipboard().ok();
+
+        // HGLOBAL → HANDLE 转换 (两者都是 *mut c_void 的包装)
+        let handle = HANDLE(h_mem.0);
+        if SetClipboardData(CF_UNICODETEXT, Some(handle)).is_err() {
+            CloseClipboard().ok();
+            return Ok(Err("SetClipboardData 失败".to_string()));
+        }
+
+        CloseClipboard().ok();
+        // 注意：h_mem 所有权已转交给剪贴板
+    }
+
+    // Step 2: 发送 Ctrl+V
+    match send_ctrl_v() {
+        Ok(()) => Ok(Ok(char_count)),
+        Err(e) => Ok(Err(format!("剪贴板粘贴失败: {}", e))),
+    }
+}
+
+/// 发送 Ctrl+V 组合键
+fn send_ctrl_v() -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_V};
+
+    unsafe {
+        let ctrl_down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_CONTROL,
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let v_down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_V,
+                    wScan: 0,
+                    dwFlags: KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let v_up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_V,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let ctrl_up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_CONTROL,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let inputs = [ctrl_down, v_down, v_up, ctrl_up];
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        if sent != 4 {
+            return Err(format!("SendInput 返回 {} (期望 4)", sent));
+        }
+    }
+
+    Ok(())
 }
 
 /// POST /api/keyboard/shortcut
@@ -772,6 +1038,9 @@ mod tests {
         let request = TypeRequest {
             text: String::new(),
             char_delay: None,
+            type_mode: None,
+            window: None,
+            element: None,
         };
         assert!(request.text.is_empty());
     }
@@ -782,6 +1051,9 @@ mod tests {
         let request = TypeRequest {
             text: "中文测试🎉".to_string(),
             char_delay: None,
+            type_mode: None,
+            window: None,
+            element: None,
         };
         assert_eq!(request.text.chars().count(), 5);
     }

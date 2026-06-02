@@ -258,7 +258,8 @@ mod tests {
         // Note: window_selector only includes ClassName and Name, not AutomationId
         
         // Element XPath should start with / (first element is window's direct child)
-        assert!(result.element_xpath.starts_with("/Button"));
+        // With Fast capture mode prefix: [fast]/Button
+        assert!(result.element_xpath.starts_with("[fast]/Button"));
         assert!(result.element_xpath.contains("AutomationId='btnOk'"));
         
         // Verify that @ControlType predicate is NOT included (redundant with tag name)
@@ -331,7 +332,7 @@ mod tests {
         assert!(result.window_selector.contains("ClassName='mmui::MainWindow'"));
         
         // Verify element XPath starts with / (first element is window's direct child)
-        assert!(result.element_xpath.starts_with("/Group"), "Element XPath must start with /Group");
+        assert!(result.element_xpath.starts_with("[fast]/Group"), "Element XPath must start with [fast]/Group");
         assert!(result.element_xpath.contains("Custom"), "Should have Custom");
         assert!(result.element_xpath.contains("Group["), "Should have Group");
         assert!(result.element_xpath.contains("ToolBar["), "Should have ToolBar");
@@ -365,7 +366,7 @@ mod tests {
         
         // Should have // because Pane was skipped
         assert!(result.element_xpath.contains("//Button"), "Should use // when intermediate node skipped");
-        assert!(result.element_xpath.contains("/Group"), "Should start with /Group");
+        assert!(result.element_xpath.contains("[fast]/Group"), "Should start with [fast]/Group");
         
         println!("XPath with skipped node:\n{}", result.element_xpath);
     }
@@ -520,8 +521,8 @@ mod tests {
         let single_slash_count = result.element_xpath.matches('/').count();
         let double_slash_count = result.element_xpath.matches("//").count();
         
-        // Should start with /
-        assert!(result.element_xpath.starts_with("/"), "First element uses /");
+        // Should start with [fast] prefix
+        assert!(result.element_xpath.starts_with("[fast]"), "Element XPath should start with [fast] prefix");
         
         // Note: Since test nodes don't have depth_from_window set, consecutive nodes may use //
         // This is expected for test data. The important thing is that @ControlType is not included.
