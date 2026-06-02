@@ -11,12 +11,18 @@ use serde::{Deserialize, Serialize};
 ///
 /// - `Fast`：性能极致，只用 ControlViewWalker。适合大多数原生应用（Qt、Win32、WPF）
 /// - `Full`：增强捕获，RawViewWalker + 子进程窗口 + 缓存。能捕获所有元素（包括 WebView/Chrome 嵌入），可接受慢一些
+/// - `FastChild`：目标在子窗口内，从子窗口 Root 开始查找。跳过主窗口 UI 树遍历。XPath 前缀 `[fast-child]`
+/// - `FullChild`：增强捕获 + 子窗口。XPath 前缀 `[full-child]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CaptureMode {
     /// 性能极致模式：只用 ControlViewWalker，XPath 前缀 `[fast]`
     Fast,
     /// 增强捕获模式：RawViewWalker + 子进程窗口 + 缓存，XPath 前缀 `[full]`
     Full,
+    /// 快速捕获 + 子窗口：目标在子 HWND 内，XPath 前缀 `[fast-child]`
+    FastChild,
+    /// 增强捕获 + 子窗口：目标在子 HWND 内，XPath 前缀 `[full-child]`
+    FullChild,
 }
 
 impl CaptureMode {
@@ -25,13 +31,24 @@ impl CaptureMode {
         match self {
             CaptureMode::Fast => "[fast]",
             CaptureMode::Full => "[full]",
+            CaptureMode::FastChild => "[fast-child]",
+            CaptureMode::FullChild => "[full-child]",
         }
+    }
+
+    /// 是否是子窗口模式
+    pub fn is_child_mode(&self) -> bool {
+        matches!(self, CaptureMode::FastChild | CaptureMode::FullChild)
     }
 
     /// 从 XPath 前缀解析 CaptureMode
     /// 返回 None 表示没有前缀（向后兼容，走完整 fallback）
     pub fn from_xpath_prefix(xpath: &str) -> Option<CaptureMode> {
-        if xpath.starts_with("[fast]") {
+        if xpath.starts_with("[fast-child]") {
+            Some(CaptureMode::FastChild)
+        } else if xpath.starts_with("[full-child]") {
+            Some(CaptureMode::FullChild)
+        } else if xpath.starts_with("[fast]") {
             Some(CaptureMode::Fast)
         } else if xpath.starts_with("[full]") {
             Some(CaptureMode::Full)
@@ -43,7 +60,11 @@ impl CaptureMode {
     /// 剥离 XPath 前缀，返回 (capture_mode, stripped_xpath)
     /// 如果没有前缀，返回 (None, original_xpath)
     pub fn strip_xpath_prefix(xpath: &str) -> (Option<CaptureMode>, &str) {
-        if let Some(rest) = xpath.strip_prefix("[fast]") {
+        if let Some(rest) = xpath.strip_prefix("[fast-child]") {
+            (Some(CaptureMode::FastChild), rest)
+        } else if let Some(rest) = xpath.strip_prefix("[full-child]") {
+            (Some(CaptureMode::FullChild), rest)
+        } else if let Some(rest) = xpath.strip_prefix("[fast]") {
             (Some(CaptureMode::Fast), rest)
         } else if let Some(rest) = xpath.strip_prefix("[full]") {
             (Some(CaptureMode::Full), rest)
@@ -58,6 +79,8 @@ impl std::fmt::Display for CaptureMode {
         match self {
             CaptureMode::Fast => write!(f, "快速捕获"),
             CaptureMode::Full => write!(f, "增强捕获"),
+            CaptureMode::FastChild => write!(f, "快速捕获(子窗口)"),
+            CaptureMode::FullChild => write!(f, "增强捕获(子窗口)"),
         }
     }
 }
@@ -284,6 +307,33 @@ impl ElementRect {
     }
 }
 
+// ─── ChildPredicate ──────────────────────────────────────────────────────────
+
+/// 子元素谓词：描述当前节点下的一个子元素特征。
+/// 用于生成 `Button[Text[@Name='确认']]` 这样的嵌套谓词。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildPredicate {
+    /// 子元素的 ControlType（如 "Text"）
+    pub control_type: String,
+    /// 子元素的属性过滤条件
+    pub filters: Vec<PropertyFilter>,
+}
+
+impl ChildPredicate {
+    /// 构建 XPath 子谓词字符串，如 `Text[@Name='确认']`
+    pub fn to_xpath(&self) -> String {
+        let preds: Vec<String> = self.filters
+            .iter()
+            .filter_map(|f| f.predicate())
+            .collect();
+        if preds.is_empty() {
+            format!("{}", self.control_type)
+        } else {
+            format!("{}[{}]", self.control_type, preds.join(" and "))
+        }
+    }
+}
+
 // ─── HierarchyNode ───────────────────────────────────────────────────────────
 
 /// One level in the ancestor chain from root window to target element.
@@ -340,6 +390,11 @@ pub struct HierarchyNode {
     /// - Unknown: 使用完整 fallback 策略
     #[serde(default)]
     pub walker_hint:           WalkerHint,
+    /// 子元素谓词：捕获时为 target 节点收集的有意义子元素特征。
+    /// 用于生成 `Button[Text[@Name='确认']]` 这种更精确的 XPath。
+    /// 仅在 target 节点上非空。
+    #[serde(default)]
+    pub child_predicates:      Vec<ChildPredicate>,
     // ─── UIA Pattern availability (for element state detection) ─────────────
     #[serde(default)]
     pub is_checkable:          bool,        // TogglePattern available
@@ -421,6 +476,7 @@ impl HierarchyNode {
             sibling_count: 0,  // Will be computed during capture
             depth_from_window: 0,  // 默认值，捕获时会计算真实深度
             walker_hint: WalkerHint::Unknown,  // 默认值，捕获时会根据实际遍历方式设置
+            child_predicates: Vec::new(),  // 默认空，捕获时为目标节点填充
             is_checkable: false,
             is_checked: None,
             is_clickable: false,
@@ -474,6 +530,7 @@ impl HierarchyNode {
 
     /// Build the XPath segment for this node.
     /// Supports position(), first(), last() functions for better XPath standard compatibility.
+    /// Also supports child element predicates like `Button[Text[@Name='确认']]`.
     pub fn xpath_segment(&self) -> String {
         let predicates: Vec<String> = self.filters
             .iter()
@@ -489,6 +546,10 @@ impl HierarchyNode {
                 // Regular property filter
                 f.predicate()
             })
+            .chain(
+                // Append child predicates: Text[@Name='xxx'], etc.
+                self.child_predicates.iter().map(|cp| cp.to_xpath())
+            )
             .collect();
 
         // Note: The prefix (// or /) is determined by the caller based on position.
@@ -1062,6 +1123,7 @@ pub enum OptimizationStepStatus {
     Done,
     InProgress,
     Skipped,
+    Failed(String),
 }
 
 #[cfg(test)]

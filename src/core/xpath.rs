@@ -23,7 +23,7 @@ pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>, captu
     // Element XPath should start from nodes[1] (after the window root)
     // 元素 XPath 从窗口节点之后开始，跳过窗口根节点
     let element_nodes = &nodes[1..];
-    let element_xpath_inner = generate_element_xpath(element_nodes);
+    let element_xpath_inner = generate_element_xpath(element_nodes, capture_mode);
     
     // 添加捕获模式前缀
     let element_xpath = format!("{}{}", capture_mode.xpath_prefix(), element_xpath_inner);
@@ -60,13 +60,13 @@ fn generate_window_selector(node: &HierarchyNode, window_info: Option<&WindowInf
 
 /// Generate element XPath directly from element hierarchy (nodes after Window).
 /// Uses "/" for direct children, "//" when intermediate nodes are skipped.
-pub fn generate_elements(nodes: &[HierarchyNode]) -> String {
-    generate_element_xpath(nodes)
+pub fn generate_elements(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
+    generate_element_xpath(nodes, capture_mode)
 }
 
 /// Generate simplified element XPath from element hierarchy.
 /// Keeps only nodes with AutomationId or Name, plus the target.
-pub fn generate_simplified_elements(nodes: &[HierarchyNode]) -> String {
+pub fn generate_simplified_elements(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
     if nodes.is_empty() {
         return String::new();
     }
@@ -85,14 +85,14 @@ pub fn generate_simplified_elements(nodes: &[HierarchyNode]) -> String {
         })
         .collect();
     
-    generate_element_xpath(&simplified_nodes)
+    generate_element_xpath(&simplified_nodes, capture_mode)
 }
 
 /// Generate element XPath from nodes after the Window node.
 /// Uses `depth_from_window` to determine the correct prefix:
 /// - depth差值=1 → 父子关系，用 `/`
 /// - depth差值>1 → 跳过中间层，用 `//`
-fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
+fn generate_element_xpath(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
     if nodes.is_empty() {
         return String::new();
     }
@@ -105,13 +105,24 @@ fn generate_element_xpath(nodes: &[HierarchyNode]) -> String {
         return String::new();
     }
     
+    let is_child_mode = matches!(capture_mode, CaptureMode::FastChild | CaptureMode::FullChild);
+    
     included.iter().enumerate().map(|(i, &node)| {
         if i == 0 {
-            // 第一个元素节点：根据其 depth_from_window 判断前缀
-            // depth=0 表示是窗口节点本身（不应该出现在 element_nodes 中）
-            // depth=1 表示是窗口的直接子节点，用 `/`
-            // depth>1 表示中间有被跳过的层级，用 `//`
-            if node.depth_from_window <= 1 {
+            // 第一个元素节点：根据其 depth_from_window 和 capture_mode 判断前缀
+            // depth=0: 在子窗口模式下，该节点是子HWND的直接子节点，用 `/`
+            //          在非子窗口模式下，深度关系不确定，用 `//`
+            // depth=1: 是窗口的直接子节点，用 `/`
+            // depth>1: 中间有被跳过的层级，用 `//`
+            log::info!("[XPATH GEN] first included node: name='{}' class='{}' depth_from_window={} ctrl='{}' child_mode={}",
+                node.name, node.class_name, node.depth_from_window, node.control_type, is_child_mode);
+            if node.depth_from_window == 0 {
+                if is_child_mode {
+                    format!("/{}", node.xpath_segment())
+                } else {
+                    format!("//{}", node.xpath_segment())
+                }
+            } else if node.depth_from_window == 1 {
                 format!("/{}", node.xpath_segment())
             } else {
                 format!("//{}", node.xpath_segment())
@@ -158,7 +169,11 @@ pub fn lint(xpath: &str) -> Option<String> {
         
         // Validate element XPath (should start with /, ( for indexed, or [fast]/[full] prefix)
         // Strip capture mode prefix first
-        let element_stripped = if element_part.starts_with("[fast]") {
+        let element_stripped = if element_part.starts_with("[fast-child]") {
+            &element_part[12..]
+        } else if element_part.starts_with("[full-child]") {
+            &element_part[12..]
+        } else if element_part.starts_with("[fast]") {
             &element_part[6..]
         } else if element_part.starts_with("[full]") {
             &element_part[6..]
@@ -176,7 +191,19 @@ pub fn lint(xpath: &str) -> Option<String> {
         } else {
             element_stripped
         };
-        if !inner_xpath.starts_with('/') {
+        // Also strip capture mode prefix from inner_xpath (prefix may be inside indexed form)
+        let inner_stripped = if inner_xpath.starts_with("[fast-child]") {
+            &inner_xpath[12..]
+        } else if inner_xpath.starts_with("[full-child]") {
+            &inner_xpath[12..]
+        } else if inner_xpath.starts_with("[fast]") {
+            &inner_xpath[6..]
+        } else if inner_xpath.starts_with("[full]") {
+            &inner_xpath[6..]
+        } else {
+            inner_xpath
+        };
+        if !inner_stripped.starts_with('/') {
             return Some("元素 XPath 必须以 / 开头".into());
         }
         
@@ -190,8 +217,12 @@ pub fn lint(xpath: &str) -> Option<String> {
         return None;
     }
     
-    // Old format: must start with // (or [fast]// / [full]//)
-    let s_stripped = if s.starts_with("[fast]") {
+    // Old format: must start with // (or [fast-child]// / [full-child]// / [fast]// / [full]//)
+    let s_stripped = if s.starts_with("[fast-child]") {
+        &s[12..]
+    } else if s.starts_with("[full-child]") {
+        &s[12..]
+    } else if s.starts_with("[fast]") {
         &s[6..]
     } else if s.starts_with("[full]") {
         &s[6..]
@@ -281,7 +312,7 @@ mod tests {
         
         // Generate simplified element XPath from element nodes (after Window)
         let element_nodes = &full_nodes[1..];
-        let element_xpath = generate_simplified_elements(element_nodes);
+        let element_xpath = generate_simplified_elements(element_nodes, CaptureMode::Fast);
         
         // Window selector should be present
         assert!(window_selector.contains("Window"));

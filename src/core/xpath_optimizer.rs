@@ -9,6 +9,7 @@
 
 use super::model::{HierarchyNode, Operator, PropertyFilter};
 use uiauto_xpath::{XPath, is_dynamic_class, extract_stable_prefix};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 /// 优化摘要（用于 UI 显示）
 #[derive(Debug, Clone, Default)]
@@ -276,8 +277,9 @@ impl XPathOptimizer {
                 }
                 "Name" => {
                     // 过长的 Name 可能是动态标题，禁用
+                    // 使用字符数而非字节数，避免中文/emoji 等 UTF-8 多字节字符被误判过长
                     let limit = if is_target { 30 } else { 20 };  // 目标节点限制更宽松
-                    optimized_filter.enabled = f.value.len() <= limit && !f.value.is_empty();
+                    optimized_filter.enabled = f.value.chars().count() <= limit && !f.value.is_empty();
                 }
                 "ControlType" => {
                     // ControlType 已通过 XPath 标签名表达，不需要额外谓词
@@ -343,13 +345,16 @@ impl XPathOptimizer {
     }
     
     /// 执行极简优化：通过实时尝试验证移除所有非必要属性
+    /// cancel_flag: 外部取消信号，优化线程每步验证前检查此标志
+    /// xpath_prefix: XPath 前缀（如 [fast-child]），验证时需加上以确保验证模式与最终使用一致
     pub fn optimize_minimal(
         &self,
         hierarchy: &[HierarchyNode],
         window_selector: &str,
         progress: &dyn Fn(&str),
+        cancel_flag: Arc<AtomicBool>,
+        xpath_prefix: &str,
     ) -> Option<OptimizationResult> {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         use crate::core::model::ValidationResult;
 
         if hierarchy.is_empty() {
@@ -357,22 +362,28 @@ impl XPathOptimizer {
             return None;
         }
 
+        // 0. 提前检查取消
+        if cancel_flag.load(Ordering::SeqCst) {
+            log::info!("[极简优化] 启动前检测到取消信号");
+            return None;
+        }
+
         progress(&format!("开始优化，共 {} 个层级节点", hierarchy.len()));
-        
+
         // 1. 找到目标节点
         let original_target_index = hierarchy.iter()
             .position(|n| n.is_target)
             .unwrap_or(hierarchy.len() - 1);
-        
+
         // 2. 构建 XPath 节点列表
         let xpath_nodes_with_indices: Vec<(usize, &HierarchyNode)> = hierarchy.iter()
             .enumerate()
             .filter(|(i, n)| n.included && *i <= original_target_index)
             .collect();
-        
+
         let target_xpath_pos = xpath_nodes_with_indices.iter()
             .position(|(orig_idx, _)| *orig_idx == original_target_index);
-        
+
         if target_xpath_pos.is_none() {
             log::warn!("[极简优化] 目标节点不在 XPath 列表中");
             return None;
@@ -404,13 +415,13 @@ impl XPathOptimizer {
 
         progress(&format!("原始 XPath 长度: {} 字符", full_xpath.len()));
 
-        // 4. 创建取消标志
-        let cancel_flag = Arc::new(AtomicBool::new(false));
+        // 4. 借用外部取消标志
         let cancel_flag_clone = cancel_flag.clone();
         
         // 5. 调用 uiauto-xpath 的极简优化（带验证回调和进度回调）
         let window_sel = window_selector.to_string();
         let hierarchy_clone = hierarchy.to_vec();
+        let prefix = xpath_prefix.to_string();
         
         let result = XPath::optimize_minimal(
             &full_xpath,
@@ -422,11 +433,15 @@ impl XPathOptimizer {
                     return Err(uiauto_xpath::error::XPathError::ParseError("用户取消".into()));
                 }
                 
+                // 【关键修复】验证时必须带上 XPath 前缀（如 [fast-child]），
+                // 否则验证走普通 UIA 模式，而最终使用走子窗口模式，结果不一致
+                let full_test_xpath = format!("{}{}", prefix, test_xpath);
+                
                 // 使用 COM worker 进行验证
                 match crate::core::com_worker::global_validate_xpath(
                     crate::core::metrics::next_request_id(),
                     window_sel.clone(),
-                    test_xpath.to_string(),
+                    full_test_xpath.clone(),
                     hierarchy_clone.clone(),
                 ) {
                     Ok(validation_result) => {
@@ -435,10 +450,10 @@ impl XPathOptimizer {
                         if !is_unique {
                             match &validation_result.overall {
                                 ValidationResult::Found { count, .. } => {
-                                    log::debug!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, test_xpath);
+                                    log::info!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, full_test_xpath);
                                 }
                                 ValidationResult::NotFound => {
-                                    log::debug!("[极简优化-验证] XPath 未找到元素: {}", test_xpath);
+                                    log::info!("[极简优化-验证] XPath 未找到元素: {}", full_test_xpath);
                                 }
                                 _ => {}
                             }
@@ -447,7 +462,7 @@ impl XPathOptimizer {
                     }
                     Err(e) => {
                         // 【改进】更友好的错误处理
-                        log::debug!("[极简优化-验证] 验证失败: {}", e);
+                        log::info!("[极简优化-验证] 验证失败: {} (xpath: {})", e, full_test_xpath);
                         // 如果是窗口未找到的错误，可以提前终止优化
                         if e.to_string().contains("窗口未找到") {
                             log::warn!("[极简优化-验证] 窗口未找到，终止优化");

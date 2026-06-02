@@ -328,6 +328,7 @@ pub mod windows_impl {
             item_type: get_bstr(unsafe { elem.CurrentItemType() }),
             item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
             process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+            runtime_id: runtime_id_key(elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")),
             is_checkable: None,
             is_checked: None,
             is_clickable: None,
@@ -734,10 +735,28 @@ pub mod windows_impl {
         let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
         set_walker_hints(&mut hierarchy, window_pid);
 
+        // Extract window_info BEFORE truncation (truncation removes Desktop, 
+        // making hierarchy[0] the window instead of Desktop → index offset)
         let window_info = extract_window_info(&hierarchy);
 
-        debug!("[Normal] Capture complete: hierarchy_depth={} target='{}'",
-            hierarchy.len(), target_name);
+        // 6. Detect cross-boundary (target is in a child window/sub-process)
+        // If any node after the Window has a different PID, the target is in a child window.
+        let mut capture_mode = CaptureMode::Fast;
+        if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
+            info!("[Normal] Cross-boundary detected at index {} (window_pid={}), switching to FastChild mode",
+                boundary_idx, window_pid);
+            // Truncate hierarchy: keep actual window + nodes from boundary_idx+1
+            hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
+            capture_mode = CaptureMode::FastChild;
+            // Debug: print truncated hierarchy
+            for (i, n) in hierarchy.iter().enumerate() {
+                info!("[TRUNCATED] idx={} name='{}' class='{}' ctrl='{}' depth={} included={}",
+                    i, n.name, n.class_name, n.control_type, n.depth_from_window, n.included);
+            }
+        }
+
+        debug!("[Normal] Capture complete: hierarchy_depth={} target='{}' mode={:?}",
+            hierarchy.len(), target_name, capture_mode);
 
         Ok(CaptureResult {
             hierarchy,
@@ -745,8 +764,72 @@ pub mod windows_impl {
             cursor_y: y,
             error: None,
             window_info,
-            capture_mode: CaptureMode::Fast,
+            capture_mode,
         })
+    }
+
+    /// Find the index of the first node in the hierarchy that crosses into a child window/sub-process.
+    /// First locates the actual window node (whose PID matches window_pid), then searches
+    /// from the node AFTER the window for one with a different PID.
+    /// Returns None if all nodes are in the same process.
+    fn find_cross_boundary_index(hierarchy: &[HierarchyNode], window_pid: u32) -> Option<usize> {
+        // Find the actual window node: first node (after Desktop) that matches window_pid
+        let window_node_idx = (1..hierarchy.len())
+            .find(|&i| hierarchy[i].process_id == window_pid)?;
+
+        // Search from the node AFTER the window for a cross-boundary node
+        for i in (window_node_idx + 1)..hierarchy.len() {
+            if hierarchy[i].process_id != window_pid && hierarchy[i].process_id != 0 {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Truncate the hierarchy to start from the actual window node,
+    /// keeping it as anchor + the nodes from boundary_idx onwards.
+    /// Recomputes depth_from_window so the first element (after the window) has depth 0.
+    fn truncate_hierarchy_to_child(
+        mut hierarchy: Vec<HierarchyNode>,
+        boundary_idx: usize,
+        window_pid: u32,
+    ) -> Vec<HierarchyNode> {
+        // Debug: print input hierarchy
+        info!("[TRUNC_IN] hierarchy len={} boundary={} window_pid={}", hierarchy.len(), boundary_idx, window_pid);
+        for (i, n) in hierarchy.iter().enumerate() {
+            info!("[TRUNC_IN]   idx={} name='{}' class='{}' ctrl='{}' pid={} incl={}",
+                i, n.name, n.class_name, n.control_type, n.process_id, n.included);
+        }
+
+        // Find the actual window node: first node (after Desktop) that matches window_pid
+        let window_node_idx = (1..hierarchy.len())
+            .find(|&i| hierarchy[i].process_id == window_pid)
+            .unwrap_or(0);
+
+        info!("[TRUNC_IN] window_node_idx={} (ctrl='{}' name='{}')",
+            window_node_idx, hierarchy[window_node_idx].control_type, hierarchy[window_node_idx].name);
+
+        // Clone BEFORE drain
+        let window_node = hierarchy[window_node_idx].clone();
+
+        // Skip the boundary node itself (e.g., Chrome_WidgetWin_0) —
+        // it's the child window container, not content. Start from boundary_idx+1.
+        if hierarchy.len() <= boundary_idx + 1 {
+            info!("[TRUNC_IN] no content after boundary, returning window-only hierarchy");
+            return vec![window_node];
+        }
+        let child_nodes: Vec<HierarchyNode> = hierarchy.drain(boundary_idx + 1..).collect();
+        info!("[TRUNC_IN] after drain: remaining={} child_count={} (skipped boundary node at idx={})",
+            hierarchy.len(), child_nodes.len(), boundary_idx);
+
+        let mut result = vec![window_node];
+        for (i, mut node) in child_nodes.into_iter().enumerate() {
+            // First child node gets depth 0, subsequent nodes get depth i
+            node.depth_from_window = i;
+            result.push(node);
+        }
+        info!("[TRUNC_IN] result len={}", result.len());
+        result
     }
 
     /// Determine if a ControlType is inherently clickable (even without InvokePattern).
@@ -1004,6 +1087,74 @@ pub mod windows_impl {
 
         // Stage 2: Try XPath on each matching window, return first success
         // This handles multi-process scenarios (e.g., multiple Tauri app instances)
+
+        // ── Child mode check ──
+        let (capture_mode, _) = CaptureMode::strip_xpath_prefix(element_xpath);
+        let is_child_mode = capture_mode.map_or(false, |m| m.is_child_mode());
+
+        if is_child_mode {
+            log::info!("[Validate] Child mode detected, searching via EnumChildWindows");
+            for search_root in &matched_windows {
+                let hwnd = match unsafe { search_root.CurrentNativeWindowHandle() } {
+                    Ok(h) => HWND(h.0),
+                    Err(_) => continue,
+                };
+                let child_hwnds = enum_child_hwnds(hwnd);
+                log::info!("[Validate] Child mode: {} child HWNDs", child_hwnds.len());
+
+                for child_hwnd in &child_hwnds {
+                    let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    match find_by_xpath_with_fallback(&auto, &child_elem, element_xpath) {
+                        Ok((results, segments)) => {
+                            if !results.is_empty() {
+                                let overall = if results.is_empty() {
+                                    ValidationResult::NotFound
+                                } else {
+                                    let mut rects = Vec::with_capacity(results.len());
+                                    for elem in &results {
+                                        if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
+                                            rects.push(ElementRect {
+                                                x: r.left, y: r.top,
+                                                width: r.right - r.left, height: r.bottom - r.top,
+                                            });
+                                        }
+                                    }
+                                    let first_rect = rects.first().cloned();
+                                    ValidationResult::Found { count: results.len(), first_rect, rects }
+                                };
+                                let is_offscreen = if !results.is_empty() {
+                                    Some(unsafe { results[0].CurrentIsOffscreen() }.map(|b| b.as_bool()).unwrap_or(false))
+                                } else { None };
+
+                                // Generate per-layer validation results (simplified for child mode)
+                                let layers: Vec<LayerValidationResult> = Vec::new();
+                                return DetailedValidationResult {
+                                    overall,
+                                    segments,
+                                    layers,
+                                    total_duration_ms: total_start.elapsed().as_millis() as u64,
+                                    is_offscreen,
+                                };
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+            // No match found in any child window
+            return DetailedValidationResult {
+                overall: ValidationResult::NotFound,
+                segments: vec![],
+                layers: vec![],
+                total_duration_ms: total_start.elapsed().as_millis() as u64,
+                is_offscreen: None,
+            };
+        }
+        // ── End child mode ──
+
         let mut last_error: Option<String> = None;
         let mut best_result: Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> = None;
         let mut webview_window_tried = false;
@@ -1698,17 +1849,29 @@ pub mod windows_impl {
         let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
         set_walker_hints(&mut hierarchy, window_pid);
 
+        // Extract window_info BEFORE truncation (truncation removes Desktop)
         let window_info = extract_window_info(&hierarchy);
+
+        // 6. Detect cross-HWND boundary from enhanced capture Step 1.5
+        let mut capture_mode = CaptureMode::Full;
+        if cross_hwnd_changed {
+            info!("[Enhanced] Cross-HWND detected, switching to FullChild mode");
+            // Find boundary index: first node with different PID from window
+            if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
+                hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
+                capture_mode = CaptureMode::FullChild;
+            }
+        }
         let empty = String::new();
         let empty2 = String::new();
         let target_ct = hierarchy.last().map(|n| &n.control_type).unwrap_or(&empty);
         let target_name = hierarchy.last().map(|n| &n.name).unwrap_or(&empty2);
         let normal_ct = unsafe { original_hit_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
         let normal_name = get_bstr(unsafe { original_hit_elem.CurrentName() });
-        info!("[Enhanced] hierarchy depth={} target='{}' name='{}' | ElementFromPoint type='{}' name='{}'",
-            hierarchy.len(), target_ct, target_name, normal_ct, normal_name);
+        info!("[Enhanced] hierarchy depth={} target='{}' name='{}' mode={:?} | ElementFromPoint type='{}' name='{}'",
+            hierarchy.len(), target_ct, target_name, capture_mode, normal_ct, normal_name);
 
-        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Full })
+        Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode })
     }
 
     /// Enumerate all top-level windows on desktop.
@@ -3022,12 +3185,12 @@ pub mod windows_impl {
         // ═══════════════════════════════════════════════════════════════════════════
         let (capture_mode, stripped_xpath) = CaptureMode::strip_xpath_prefix(&inner_xpath);
         let xpath = stripped_xpath;
-        let is_fast_mode = matches!(capture_mode, Some(CaptureMode::Fast));
+        let is_fast_mode = matches!(capture_mode, Some(CaptureMode::Fast) | Some(CaptureMode::FastChild));
         
         if is_fast_mode {
-            log::info!("[XPath Fallback] [fast] prefix detected — strict ControlView only, no fallback");
+            log::info!("[XPath Fallback] [fast]/[fast-child] prefix detected — strict ControlView only, no fallback");
         } else if capture_mode.is_some() {
-            log::info!("[XPath Fallback] [full] prefix detected — full fallback chain enabled");
+            log::info!("[XPath Fallback] [full]/[full-child] prefix detected — full fallback chain enabled");
         }
         
         let is_descendant = xpath.starts_with("//");
@@ -4156,9 +4319,35 @@ pub mod windows_impl {
         require_matches: Vec<(String, regex::Regex)>,
     }
 
+    /// Check if an XPath step predicate string contains child element predicates.
+    /// E.g., `Button[Text[@Name='确认']]` has `Text[@Name='确认']` as a child predicate
+    /// inside the outer brackets of `Button`.
+    fn has_child_predicate(predicates_str: &str) -> bool {
+        let bytes = predicates_str.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if let Some(pos) = predicates_str[i..].find("[@") {
+                let abs_pos = i + pos;
+                // Check if the character before `[` is a word character
+                // (indicating a ControlType name, not a logical operator like ' and ')
+                if abs_pos > 0 {
+                    let prev = bytes[abs_pos - 1];
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        return true;
+                    }
+                }
+                i = abs_pos + 2; // skip past "[@"
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
     /// Parse an XPath step string into its components.
-    /// When `or` or `not()` predicates are detected, property lists are cleared
-    /// so that callers fall back to uiauto-xpath for precise evaluation.
+    /// When `or`, `not()`, or child element predicates (e.g., `Text[@Name='xxx']`)
+    /// are detected, property lists are cleared so that callers fall back to
+    /// uiauto-xpath for precise evaluation.
     /// Same-key attribute conflicts keep the last occurrence and emit a warning.
     fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         let (type_name, predicates_str): (Option<String>, &str) = if step.starts_with('[') {
@@ -4173,6 +4362,19 @@ pub mod windows_impl {
         // key=value matching; clear properties to force uiauto-xpath fallback.
         if predicates_str.contains(" or ") || predicates_str.contains("not(") {
             log::warn!("[parse_xpath_step] Detected 'or'/'not()' in predicates, skipping simple matching for: {}", step);
+            return ParsedXPathStep {
+                type_name,
+                required_props: Vec::new(),
+                require_starts_with: Vec::new(),
+                require_contains: Vec::new(),
+                require_matches: Vec::new(),
+            };
+        }
+
+        // Detect child element predicates: e.g., `Button[Text[@Name='确认']]`
+        // Pattern: inside the outer predicates, there's a ControlType token followed by `[@`.
+        if has_child_predicate(predicates_str) {
+            log::info!("[parse_xpath_step] Detected child predicate in step, falling back to uiauto-xpath: {}", step);
             return ParsedXPathStep {
                 type_name,
                 required_props: Vec::new(),
@@ -4742,41 +4944,82 @@ pub mod windows_impl {
             return vec![];
         }
 
-        // ── Strip capture mode prefix [fast]/[full] for fast path check ──
-        let (_, element_xpath_stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
+        // ── Strip capture mode prefix ──
+        let (capture_mode, element_xpath_stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
+        let is_child_mode = capture_mode.map_or(false, |m| m.is_child_mode());
 
         // ── Fast path: XPath directly targets Window elements ──
         // When the XPath is //Window[...] or /Window[...], we already have the
         // matching windows from find_window_by_selector. Instead of running the
         // expensive fallback chain on each window, apply the XPath predicates
         // directly to filter the already-enumerated windows.
-        let xpath_trimmed = element_xpath_stripped.trim_start_matches('/');
-        let targets_window = xpath_trimmed == "Window"
-            || xpath_trimmed.starts_with("Window[");
-        if targets_window {
-            log::info!("[Fast Path] XPath targets Window, filtering enumerated windows directly");
-            // Parse XPath predicates to filter windows
-            let step_parsed = if xpath_trimmed.starts_with("Window[") {
-                // Extract predicates from "Window[@Name='...' and ...]"
-                let pred_start = xpath_trimmed.find('[').unwrap_or(0);
-                let pred_end = xpath_trimmed.rfind(']').unwrap_or(xpath_trimmed.len());
-                if pred_start < pred_end {
-                    Some(parse_xpath_step(&xpath_trimmed[..=pred_end]))
+        // Not applicable for child mode (child mode searches inside child HWNDs).
+        if !is_child_mode {
+            let xpath_trimmed = element_xpath_stripped.trim_start_matches('/');
+            let targets_window = xpath_trimmed == "Window"
+                || xpath_trimmed.starts_with("Window[");
+            if targets_window {
+                log::info!("[Fast Path] XPath targets Window, filtering enumerated windows directly");
+                // Parse XPath predicates to filter windows
+                let step_parsed = if xpath_trimmed.starts_with("Window[") {
+                    // Extract predicates from "Window[@Name='...' and ...]"
+                    let pred_start = xpath_trimmed.find('[').unwrap_or(0);
+                    let pred_end = xpath_trimmed.rfind(']').unwrap_or(xpath_trimmed.len());
+                    if pred_start < pred_end {
+                        Some(parse_xpath_step(&xpath_trimmed[..=pred_end]))
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            let mut rng = rand::thread_rng();
-            for window in &windows {
-                // If there are predicates, filter
-                if let Some(ref parsed) = step_parsed {
-                    if !element_matches_parsed_step(window, parsed) {
-                        continue;
+                let mut rng = rand::thread_rng();
+                for window in &windows {
+                    // If there are predicates, filter
+                    if let Some(ref parsed) = step_parsed {
+                        if !element_matches_parsed_step(window, parsed) {
+                            continue;
+                        }
+                    }
+                    let window_rect = unsafe {
+                        window.CurrentBoundingRectangle().ok().map(|r| {
+                            crate::api::types::Rect {
+                                x: r.left,
+                                y: r.top,
+                                width: r.right - r.left,
+                                height: r.bottom - r.top,
+                            }
+                        })
+                    };
+                    if let Some(info) = element_info_from_uia(window, window_rect.as_ref(), random_range, &mut rng) {
+                        // Record Window fast path in cache
+                        let _ = cache_store(element_xpath, window, CompiledStrategy::WindowFastPath, 0);
+                        return vec![info];
                     }
                 }
+                return vec![];
+            }
+        }
+        // ── End fast path ──
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Child Mode ([fast-child] / [full-child]): target is in child HWND.
+        // Instead of searching from main window root, enumerate child HWNDs and
+        // search directly from each child's UIA root element.
+        // This skips the entire main window UI tree (hundreds of irrelevant nodes).
+        // ═══════════════════════════════════════════════════════════════════════════
+        if is_child_mode {
+            log::info!("[Find All] Child mode detected, searching via EnumChildWindows: xpath='{}'", element_xpath_stripped);
+            for window in &windows {
+                let hwnd = match unsafe { window.CurrentNativeWindowHandle() } {
+                    Ok(h) => HWND(h.0),
+                    Err(_) => continue,
+                };
+                let child_hwnds = enum_child_hwnds(hwnd);
+                log::info!("[Find All] Child mode: {} child HWNDs for window", child_hwnds.len());
+
+                // Get window rect for coordinate computation
                 let window_rect = unsafe {
                     window.CurrentBoundingRectangle().ok().map(|r| {
                         crate::api::types::Rect {
@@ -4787,15 +5030,28 @@ pub mod windows_impl {
                         }
                     })
                 };
-                if let Some(info) = element_info_from_uia(window, window_rect.as_ref(), random_range, &mut rng) {
-                    // Record Window fast path in cache
-                    let _ = cache_store(element_xpath, window, CompiledStrategy::WindowFastPath, 0);
-                    return vec![info];
+
+                for child_hwnd in &child_hwnds {
+                    let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    // Search XPath starting from this child window's UIA root
+                    let (elements, _) = match find_by_xpath_with_fallback(&auto, &child_elem, element_xpath) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    if !elements.is_empty() {
+                        let mut rng = rand::thread_rng();
+                        return elements.iter().filter_map(|elem| {
+                            element_info_from_uia(elem, window_rect.as_ref(), random_range, &mut rng)
+                        }).collect();
+                    }
                 }
             }
             return vec![];
         }
-        // ── End fast path ──
+        // ── End child mode ──
 
         // Try each matching window until we find elements.
         // When window_selector is broad (no filter predicates), we may get many windows.
@@ -4902,6 +5158,89 @@ pub mod windows_impl {
         elements.iter().filter_map(|elem| {
             element_info_from_uia(elem, desktop_rect.as_ref(), random_range, &mut rng)
         }).collect()
+    }
+
+    /// Find elements by XPath starting from a specific element.
+    /// This is used internally by the COM worker's find-from-element implementation.
+    /// The `base_elem` is obtained from the element cache within the COM worker.
+    pub fn find_from_element_impl(
+        auto: &IUIAutomation,
+        base_elem: &IUIAutomationElement,
+        xpath: &str,
+        random_range: f32,
+    ) -> Vec<crate::api::types::ElementInfo> {
+        log::info!("[find_from_element] Searching from element: xpath='{}'", xpath);
+
+        // Get the base element's rect for visibleRect computation
+        let base_rect = unsafe {
+            base_elem.CurrentBoundingRectangle().ok().map(|r| {
+                crate::api::types::Rect {
+                    x: r.left,
+                    y: r.top,
+                    width: r.right - r.left,
+                    height: r.bottom - r.top,
+                }
+            })
+        };
+
+        // Execute XPath search from the base element
+        let (elements, _) = match find_by_xpath_detailed(auto, base_elem, xpath, None) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("[find_from_element] XPath search failed: {}", e);
+                return vec![];
+            }
+        };
+
+        if elements.is_empty() {
+            log::info!("[find_from_element] No elements found");
+            return vec![];
+        }
+
+        log::info!("[find_from_element] Found {} elements", elements.len());
+
+        let mut rng = rand::thread_rng();
+        elements.iter().filter_map(|elem| {
+            element_info_from_uia(elem, base_rect.as_ref(), random_range, &mut rng)
+        }).collect()
+    }
+
+    /// Public wrapper for find_by_xpath_detailed, used by COM worker's find-from-element.
+    pub fn find_by_xpath_detailed_public(
+        auto: &IUIAutomation,
+        root: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        find_by_xpath_detailed(auto, root, xpath, None)
+    }
+
+    /// Public wrapper for element_info_from_uia, used by COM worker's find-from-element.
+    pub fn element_info_from_uia_public<R: rand::Rng>(
+        elem: &IUIAutomationElement,
+        container_rect: Option<&crate::api::types::Rect>,
+        random_range: f32,
+        rng: &mut R,
+    ) -> Option<crate::api::types::ElementInfo> {
+        element_info_from_uia(elem, container_rect, random_range, rng)
+    }
+
+    /// Public wrapper for runtime_id_key, used by COM worker's element cache.
+    pub fn runtime_id_key_public(elem: &IUIAutomationElement) -> Option<String> {
+        runtime_id_key(elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
+    }
+
+    /// Public wrapper for find_window_by_selector, used by COM worker's element cache.
+    pub fn find_window_by_selector_public(auto: &IUIAutomation, selector: &str) -> Vec<IUIAutomationElement> {
+        find_window_by_selector(auto, selector)
+    }
+
+    /// Public wrapper for find_by_xpath_with_fallback, used by COM worker's element cache.
+    pub fn find_by_xpath_with_fallback_public(
+        auto: &IUIAutomation,
+        root: &IUIAutomationElement,
+        xpath: &str,
+    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        find_by_xpath_with_fallback(auto, root, xpath)
     }
 
     /// Compass navigation: find base element by XPath, then walk the UIA tree step-by-step.
@@ -5396,6 +5735,7 @@ pub mod windows_impl {
                 item_type: get_bstr(unsafe { elem.CurrentItemType() }),
                 item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
                 process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
+                runtime_id: runtime_id_key(&elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")),
                 is_checkable: None,
                 is_checked: None,
                 is_clickable: None,
@@ -5505,12 +5845,45 @@ pub mod windows_impl {
         }
 
         // Step 2: 在窗口中查找目标元素
+        // 检测 child mode 前缀 ([fast-child] / [full-child])，目标在子 HWND (如 WebView/Chrome) 中
+        let (capture_mode, _stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
+        let is_child_mode = capture_mode.map_or(false, |m| m.is_child_mode());
+
         let mut target_element: Option<IUIAutomationElement> = None;
-        for window in &windows {
-            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, element_xpath) {
-                if let Some(elem) = elements.into_iter().next() {
-                    target_element = Some(elem);
+
+        if is_child_mode {
+            log::info!("[inspect_subtree] Child mode detected, searching via EnumChildWindows");
+            for window in &windows {
+                let hwnd = match unsafe { window.CurrentNativeWindowHandle() } {
+                    Ok(h) => HWND(h.0),
+                    Err(_) => continue,
+                };
+                let child_hwnds = enum_child_hwnds(hwnd);
+                log::info!("[inspect_subtree] Child mode: {} child HWNDs for window", child_hwnds.len());
+
+                for child_hwnd in &child_hwnds {
+                    let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, &child_elem, element_xpath) {
+                        if let Some(elem) = elements.into_iter().next() {
+                            target_element = Some(elem);
+                            break;
+                        }
+                    }
+                }
+                if target_element.is_some() {
                     break;
+                }
+            }
+        } else {
+            for window in &windows {
+                if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, element_xpath) {
+                    if let Some(elem) = elements.into_iter().next() {
+                        target_element = Some(elem);
+                        break;
+                    }
                 }
             }
         }

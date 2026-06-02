@@ -119,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element/inspect", web::post().to(element::inspect_element))
             // 元素导航 (Compass)
             .route("/api/element/navigate", web::post().to(element::navigate_element))
+            // 从已知元素查找子元素 (BuildCache accelerated)
+            .route("/api/element/find-from", web::post().to(element::find_from_element))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击

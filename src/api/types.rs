@@ -185,6 +185,11 @@ pub struct ElementInfo {
     pub item_status: String,
     #[serde(rename = "processId")]
     pub process_id: u32,
+    /// RuntimeId of the element (opaque identifier for find-from-element API).
+    /// Encoded as comma-separated i32 values. Can be used with /api/element/find-from
+    /// to search descendants from this element without re-finding the window.
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     // ─── UIA Pattern availability ──────────────────────────────────────────
     #[serde(default, rename = "isCheckable", skip_serializing_if = "Option::is_none")]
     pub is_checkable: Option<bool>,
@@ -241,6 +246,34 @@ pub struct NavigateResponse {
     #[serde(rename = "findSelector")]
     pub find_selector: String,
     pub element: Option<ElementInfo>,
+    pub error: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 从已知元素查找子元素 API (Find-From-Element)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 从已知元素查找子元素请求
+/// 通过 runtimeId 定位之前找到的父元素，然后在其子树中执行 XPath 查找。
+/// 这避免了每次都从窗口根元素重新搜索整棵树。
+#[derive(Debug, Clone, Deserialize)]
+pub struct FindFromElementRequest {
+    /// 父元素的 RuntimeId（来自之前 API 返回的 ElementInfo.runtimeId）
+    #[serde(rename = "runtimeId")]
+    pub runtime_id: String,
+    /// 相对于父元素的 XPath（如 //Text[@Name='标题']）
+    pub xpath: String,
+    /// 随机偏移范围 (0.0-1.0)
+    #[serde(default, rename = "randomRange")]
+    pub random_range: f32,
+}
+
+/// 从已知元素查找子元素响应
+#[derive(Debug, Clone, Serialize)]
+pub struct FindFromElementResponse {
+    pub found: bool,
+    pub elements: Vec<ElementInfo>,
+    pub total: usize,
     pub error: Option<String>,
 }
 

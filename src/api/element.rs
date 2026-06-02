@@ -9,7 +9,7 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::core::metrics::{next_request_id, selector_hash, xpath_meta};
-use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo, NavigateRequest, NavigateResponse};
+use super::types::{ElementQuery, ElementResponse, ElementVisibilityRequest, ElementVisibilityResponse, ElementFlashRequest, ElementFlashResponse, Rect, InspectRequest, InspectResponse, InspectNodeInfo, FlatInspectNodeInfo, NavigateRequest, NavigateResponse, FindFromElementRequest, FindFromElementResponse};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 多元素查找响应类型
@@ -668,4 +668,81 @@ pub async fn clear_xpath_cache_handler() -> impl Responder {
         total_hits: 0,
         cleared: true,
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Find-From-Element API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// POST /api/element/find-from
+/// Find elements by XPath starting from a previously cached element.
+/// This avoids re-searching the entire window tree — the parent element is
+/// looked up from the element cache by its RuntimeId, then XPath search
+/// runs only within its subtree.
+///
+/// Request body:
+/// ```json
+/// {
+///   "runtimeId": "42,1234567890,1",   // from previous ElementInfo.runtimeId
+///   "xpath": "//Text[@Name='标题']",
+///   "randomRange": 0.0
+/// }
+/// ```
+pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl Responder {
+    let request_id = next_request_id();
+    let request_start = Instant::now();
+
+    info!(
+        "[PERF][HTTP][{}] /api/element/find-from runtime_id={} xpath_len={} random_range={}",
+        request_id,
+        body.runtime_id.len().min(32),  // Don't log full runtime_id (may be long)
+        body.xpath.len(),
+        body.random_range
+    );
+
+    let runtime_id = body.runtime_id.clone();
+    let xpath = body.xpath.clone();
+    let random_range = body.random_range;
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::com_worker::global_find_from_element(request_id, runtime_id, xpath, random_range)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(elements)) => {
+            let total = elements.len();
+            info!(
+                "[PERF][HTTP][{}] /api/element/find-from done found={} total={} duration_ms={}",
+                request_id,
+                total > 0,
+                total,
+                request_start.elapsed().as_millis()
+            );
+            HttpResponse::Ok().json(FindFromElementResponse {
+                found: total > 0,
+                elements,
+                total,
+                error: None,
+            })
+        }
+        Ok(Err(e)) => {
+            warn!("[HTTP][{}] find-from-element failed: {:?}", request_id, e);
+            HttpResponse::Ok().json(FindFromElementResponse {
+                found: false,
+                elements: vec![],
+                total: 0,
+                error: Some(format!("{}", e)),
+            })
+        }
+        Err(e) => {
+            warn!("[HTTP][{}] find-from-element task failed: {:?}", request_id, e);
+            HttpResponse::InternalServerError().json(FindFromElementResponse {
+                found: false,
+                elements: vec![],
+                total: 0,
+                error: Some(format!("Internal error: {}", e)),
+            })
+        }
+    }
 }

@@ -161,6 +161,7 @@ mod tests {
                 sibling_count: 0,
                 depth_from_window: 0,
                 walker_hint: crate::core::model::WalkerHint::Unknown,
+                child_predicates: Vec::new(),
                 is_checkable: false,
                 is_checked: None,
                 is_clickable: false,
