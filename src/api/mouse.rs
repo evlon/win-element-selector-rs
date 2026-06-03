@@ -44,7 +44,7 @@ fn check_wait_xpaths(
     xpaths: &[String],
 ) -> Option<super::super::model::DetailedValidationResult> {
     for xpath in xpaths {
-        let result = super::super::capture::validate_selector_and_xpath_detailed(
+        let result = crate::core::uia::validate_selector_and_xpath_detailed(
             window_selector,
             xpath,
             &[],
@@ -191,7 +191,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     // Step 2: 获取元素坐标
     let element = request.element.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        super::super::capture::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector,
             &element,
             &[],  // API层无 hierarchy 数据，layers 为空
@@ -691,9 +691,9 @@ async fn click_via_coordinate(
 ///
 /// 返回 Ok(true) 表示检测到遮挡，Ok(false) 表示无遮挡。
 fn check_occlusion_at_point(_window_selector: &str, x: i32, y: i32) -> anyhow::Result<bool> {
-    let request_id = super::super::core::metrics::next_request_id();
-    // 获取坐标处的元素 rect（通过 COM worker）
-    let rect_result = super::super::core::com_worker::global_get_element_rect_at_point(request_id, x, y)?;
+    let _request_id = super::super::core::metrics::next_request_id();
+    // 获取坐标处的元素 rect
+    let rect_result = crate::core::uia::get_element_rect_at_point(x, y);
 
     match rect_result {
         Some(rect) => {
@@ -936,7 +936,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let element_for_query = request.element.clone();
     let window_selector_for_element = window_selector.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        super::super::capture::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector_for_element,
             &element_for_query,
             &[],
@@ -1308,10 +1308,10 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
                 let cx = check_x;
                 let cy = check_y;
                 let rect_result = tokio::task::spawn_blocking(move || {
-                    super::super::core::com_worker::global_get_element_rect_at_point(super::super::core::metrics::next_request_id(), cx, cy)
+                    crate::core::uia::get_element_rect_at_point(cx, cy)
                 }).await;
 
-                if let Ok(Ok(Some(rect))) = rect_result {
+                if let Ok(Some(rect)) = rect_result {
                     let cur_y = rect.y;
                     if let Some(py) = prev_element_y {
                         if (cur_y - py).abs() <= STUCK_Y_THRESHOLD {
@@ -1410,7 +1410,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
     let container_for_query = container_xpath.clone();
     let window_for_container = window_selector.clone();
     let container_result = tokio::task::spawn_blocking(move || {
-        super::super::capture::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_selector_and_xpath_detailed(
             &window_for_container,
             &container_for_query,
             &[],
@@ -1715,7 +1715,7 @@ pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
     let element = request.element.clone();
 
     let element_result = tokio::task::spawn_blocking(move || {
-        super::super::capture::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector,
             &element,
             &[],
@@ -1824,10 +1824,10 @@ pub async fn drag_mouse(body: web::Json<MouseDragRequest>) -> impl Responder {
 
     // 查询源元素和目标元素坐标
     let element_result = tokio::task::spawn_blocking(move || {
-        let source_result = super::super::capture::validate_selector_and_xpath_detailed(
+        let source_result = crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector, &source_xpath, &[],
         );
-        let target_result = super::super::capture::validate_selector_and_xpath_detailed(
+        let target_result = crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector, &target_xpath, &[],
         );
         (source_result, target_result)

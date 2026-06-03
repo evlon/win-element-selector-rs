@@ -1754,7 +1754,7 @@ pub fn find_all_elements_detailed(
                 }
                 let window_rect = unsafe {
                     window.CurrentBoundingRectangle().ok().map(|r| {
-                        crate::api::types::Rect {
+                        crate::core::model::Rect {
                             x: r.left,
                             y: r.top,
                             width: r.right - r.left,
@@ -1792,7 +1792,7 @@ pub fn find_all_elements_detailed(
             // Get window rect for coordinate computation
             let window_rect = unsafe {
                 window.CurrentBoundingRectangle().ok().map(|r| {
-                    crate::api::types::Rect {
+                    crate::core::model::Rect {
                         x: r.left,
                         y: r.top,
                         width: r.right - r.left,
@@ -1851,7 +1851,7 @@ pub fn find_all_elements_detailed(
         // 获取窗口矩形用于计算 visibleRect
         let window_rect = unsafe {
             window.CurrentBoundingRectangle().ok().map(|r| {
-                crate::api::types::Rect {
+                crate::core::model::Rect {
                     x: r.left,
                     y: r.top,
                     width: r.right - r.left,
@@ -1912,7 +1912,7 @@ pub fn find_all_elements_from_root(
     // 获取 Desktop 矩形用于计算 visibleRect（Desktop 通常覆盖整个屏幕）
     let desktop_rect = unsafe {
         desktop.CurrentBoundingRectangle().ok().map(|r| {
-            crate::api::types::Rect {
+            crate::core::model::Rect {
                 x: r.left,
                 y: r.top,
                 width: r.right - r.left,
@@ -1938,7 +1938,7 @@ pub fn find_from_element_impl(
     // Get the base element's rect for visibleRect computation
     let base_rect = unsafe {
         base_elem.CurrentBoundingRectangle().ok().map(|r| {
-            crate::api::types::Rect {
+            crate::core::model::Rect {
                 x: r.left,
                 y: r.top,
                 width: r.right - r.left,
@@ -1969,36 +1969,44 @@ pub fn find_from_element_impl(
     }).collect()
 }
 
-pub fn find_by_xpath_detailed_public(
-    auto: &IUIAutomation,
-    root: &IUIAutomationElement,
+/// Find elements by XPath from a cached parent element (migrated from com_worker).
+///
+/// Uses the element cache to look up a previously found parent element,
+/// then searches within its subtree using XPath.
+pub fn find_from_element_cached(
+    runtime_id: &str,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_detailed(auto, root, xpath, None)
-}
-
-pub fn element_info_from_uia_public<R: rand::Rng>(
-    elem: &IUIAutomationElement,
-    container_rect: Option<&crate::api::types::Rect>,
     random_range: f32,
-    rng: &mut R,
-) -> Option<crate::api::types::ElementInfo> {
-    element_info_from_uia(elem, container_rect, random_range, rng)
-}
+) -> Vec<crate::api::types::ElementInfo> {
+    use crate::core::element_cache::{cache_element, get_cached_element};
 
-pub fn runtime_id_key_public(elem: &IUIAutomationElement) -> Option<String> {
-    runtime_id_key(elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
-}
+    let auto = match get_automation() {
+        Ok(a) => a,
+        Err(_) => return vec![],
+    };
 
-pub fn find_window_by_selector_public(auto: &IUIAutomation, selector: &str) -> Vec<IUIAutomationElement> {
-    find_window_by_selector(auto, selector)
-}
+    let base_elem: IUIAutomationElement = match get_cached_element(runtime_id) {
+        Some(e) => {
+            let raw: &IUIAutomationElement = e.as_ref();
+            raw.clone()
+        }
+        None => {
+            log::warn!("[find_from_element] Element not found in cache: runtime_id={}", runtime_id);
+            return vec![];
+        }
+    };
 
-pub fn find_by_xpath_with_fallback_public(
-    auto: &IUIAutomation,
-    root: &IUIAutomationElement,
-    xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_with_fallback(auto, root, xpath)
+    let results = find_from_element_impl(&auto, &base_elem, xpath, random_range);
+
+    // Cache found elements for subsequent lookups
+    if let Ok((raw_elements, _)) = find_by_xpath_detailed(&auto, &base_elem, xpath, None) {
+        for raw_elem in &raw_elements {
+            if let Some(rid_str) = runtime_id_key(raw_elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) {
+                cache_element(rid_str, uiautomation::core::UIElement::from(raw_elem.clone()));
+            }
+        }
+    }
+
+    results
 }
 

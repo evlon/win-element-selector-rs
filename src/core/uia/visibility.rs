@@ -4,7 +4,8 @@
 //
 // Extracted from com_worker::global_get_element_visibility for testability.
 
-use crate::api::types::{ElementVisibilityResponse, OverflowInfo, Rect};
+use crate::core::model::{OverflowInfo, Rect};
+use crate::api::types::ElementVisibilityResponse;
 
 /// Compute visibility of an element within a viewport and optional container.
 ///
@@ -97,6 +98,60 @@ pub fn visibility_no_rect(is_offscreen: Option<bool>, element_rect: Option<Rect>
         element_rect, visible_rect: None, viewport_rect: None, overflow: None, scroll_direction: None,
         error: Some(error.to_string()),
     }
+}
+
+/// Get element visibility information (migrated from com_worker).
+///
+/// Uses `validate_selector_and_xpath_detailed` to find the element,
+/// then computes visibility within the viewport and optional container.
+pub fn get_element_visibility(
+    window_selector: &str,
+    element_xpath: &str,
+    container_xpath: Option<&str>,
+) -> ElementVisibilityResponse {
+    use crate::core::model::ValidationResult;
+
+    let detailed = super::validate_selector_and_xpath_detailed(
+        window_selector, element_xpath, &[],
+    );
+
+    let (element_rect, is_offscreen) = match &detailed.overall {
+        ValidationResult::Found { first_rect, .. } => (first_rect.clone(), detailed.is_offscreen),
+        ValidationResult::NotFound => return visibility_not_found("元素未找到"),
+        ValidationResult::Error(e) => return visibility_error(e),
+        _ => return visibility_not_found("校验状态未知"),
+    };
+
+    let elem_rect = match &element_rect {
+        Some(r) => r,
+        None => return visibility_no_rect(is_offscreen, None, "元素坐标获取失败"),
+    };
+
+    let window_rect = super::get_window_rect_by_selector(window_selector);
+    let viewport_rect = match &window_rect {
+        Some(r) => r,
+        None => {
+            let api_rect = Rect { x: elem_rect.x, y: elem_rect.y, width: elem_rect.width, height: elem_rect.height };
+            return visibility_no_rect(is_offscreen, Some(api_rect), "窗口矩形获取失败");
+        }
+    };
+
+    let elem_api_rect = Rect { x: elem_rect.x, y: elem_rect.y, width: elem_rect.width, height: elem_rect.height };
+    let vp_api_rect = Rect { x: viewport_rect.x, y: viewport_rect.y, width: viewport_rect.width, height: viewport_rect.height };
+
+    let container_api_rect = if let Some(cxpath) = container_xpath {
+        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[]);
+        match &container_detailed.overall {
+            ValidationResult::Found { first_rect: Some(cr), .. } => {
+                Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    compute_visibility(&elem_api_rect, &vp_api_rect, container_api_rect.as_ref(), is_offscreen)
 }
 
 #[cfg(test)]

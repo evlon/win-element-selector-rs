@@ -3,9 +3,9 @@ use super::*;
 pub fn navigate_from_element(
     window_selector: &str,
     base_xpath: &str,
-    steps: &[crate::api::types::NavigateStep],
+    steps: &[crate::core::model::NavigateStep],
 ) -> Result<(Option<crate::api::types::ElementInfo>, String), String> {
-    use crate::api::types::NavigateStep;
+    use crate::core::model::NavigateStep;
 
     let auto = get_automation().map_err(|e| format!("IUIAutomation init failed: {}", e))?;
     let windows = find_window_by_selector(&auto, window_selector);
@@ -18,12 +18,12 @@ pub fn navigate_from_element(
 
     // Phase 1: Find base element (one XPath search)
     let mut base_elem: Option<IUIAutomationElement> = None;
-    let mut window_rect: Option<crate::api::types::Rect> = None;
+    let mut window_rect: Option<crate::core::model::Rect> = None;
 
     for window in &windows {
         let wr = unsafe {
             window.CurrentBoundingRectangle().ok().map(|r| {
-                crate::api::types::Rect { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
+                crate::core::model::Rect { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top }
             })
         };
         if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, base_xpath) {
@@ -172,7 +172,8 @@ pub fn find_visible_elements(
     container_xpath: &str,
     control_types: &[&str],
 ) -> Vec<crate::api::types::ElementInfo> {
-    use crate::api::types::{ElementInfo, Rect};
+    use crate::api::types::ElementInfo;
+    use crate::core::model::Rect;
     use windows::Win32::UI::Accessibility::*;
     use windows::Win32::System::Variant::*;
 

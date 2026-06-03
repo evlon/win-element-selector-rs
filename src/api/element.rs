@@ -253,12 +253,12 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
     let container = request.container.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_get_element_visibility(request_id, window, element, container)
+        crate::core::uia::get_element_visibility(&window, &element, container.as_deref())
     })
     .await;
 
     match result {
-        Ok(Ok(response)) => {
+        Ok(response) => {
             info!(
                 "Element visibility: found={} visibility={} position={} scroll_direction={:?}",
                 response.found, response.visibility, response.position, response.scroll_direction
@@ -271,27 +271,6 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
                 request_start.elapsed().as_millis()
             );
             HttpResponse::Ok().json(response)
-        }
-        Ok(Err(e)) => {
-            warn!("Element visibility check failed: {}", e);
-            warn!(
-                "[PERF][HTTP][{}] /api/element/visibility done status=com_error found=false duration_ms={} error={}",
-                request_id,
-                request_start.elapsed().as_millis(),
-                e
-            );
-            HttpResponse::Ok().json(ElementVisibilityResponse {
-                found: false,
-                is_offscreen: None,
-                visibility: "error".to_string(),
-                position: "unknown".to_string(),
-                element_rect: None,
-                visible_rect: None,
-                viewport_rect: None,
-                overflow: None,
-                scroll_direction: None,
-                error: Some(format!("内部错误: {}", e)),
-            })
         }
         Err(e) => {
             warn!("Element visibility spawn error: {}", e);
@@ -574,8 +553,7 @@ pub struct XPathCacheStatsResponse {
 /// GET /api/xpath-cache/stats
 /// Returns XPath compilation cache statistics.
 pub async fn get_xpath_cache_stats() -> impl Responder {
-    use crate::core::uia::windows_impl;
-    let (count, hits) = windows_impl::xpath_cache_stats();
+    let (count, hits) = crate::core::uia::xpath_cache_stats();
     HttpResponse::Ok().json(XPathCacheStatsResponse {
         entry_count: count,
         total_hits: hits,
@@ -586,8 +564,7 @@ pub async fn get_xpath_cache_stats() -> impl Responder {
 /// POST /api/xpath-cache/clear
 /// Clears the XPath compilation cache.
 pub async fn clear_xpath_cache_handler() -> impl Responder {
-    use crate::core::uia::windows_impl;
-    windows_impl::clear_xpath_cache();
+    crate::core::uia::clear_xpath_cache();
     log::info!("[API] XPath cache cleared");
     HttpResponse::Ok().json(XPathCacheStatsResponse {
         entry_count: 0,
@@ -631,12 +608,12 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
     let random_range = body.random_range;
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_from_element(request_id, runtime_id, xpath, random_range)
+        crate::core::uia::find_from_element_cached(&runtime_id, &xpath, random_range)
     })
     .await;
 
     match result {
-        Ok(Ok(elements)) => {
+        Ok(elements) => {
             let total = elements.len();
             info!(
                 "[PERF][HTTP][{}] /api/element/find-from done found={} total={} duration_ms={}",
@@ -650,15 +627,6 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
                 elements,
                 total,
                 error: None,
-            })
-        }
-        Ok(Err(e)) => {
-            warn!("[HTTP][{}] find-from-element failed: {:?}", request_id, e);
-            HttpResponse::Ok().json(FindFromElementResponse {
-                found: false,
-                elements: vec![],
-                total: 0,
-                error: Some(format!("{}", e)),
             })
         }
         Err(e) => {

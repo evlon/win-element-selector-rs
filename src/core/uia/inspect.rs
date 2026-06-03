@@ -100,7 +100,7 @@ pub struct InspectNode {
     /// 控件的 ItemStatus 属性
     pub item_status: String,
     /// 控件的区域位置
-    pub rect: Option<crate::api::types::Rect>,
+    pub rect: Option<crate::core::model::Rect>,
     /// 是否在屏幕外
     pub is_offscreen: bool,
     /// 选中该控件相对于根元素的 XPath 表达式
@@ -310,7 +310,7 @@ fn build_inspect_node(
 
     // 获取边界矩形
     let rect = match unsafe { element.CurrentBoundingRectangle() } {
-        Ok(r) => Some(crate::api::types::Rect {
+        Ok(r) => Some(crate::core::model::Rect {
             x: r.left,
             y: r.top,
             width: r.right - r.left,
@@ -442,7 +442,7 @@ fn build_inspect_node_inner(
         .unwrap_or(false);
 
     let rect = match unsafe { element.CurrentBoundingRectangle() } {
-        Ok(r) => Some(crate::api::types::Rect {
+        Ok(r) => Some(crate::core::model::Rect {
             x: r.left,
             y: r.top,
             width: r.right - r.left,

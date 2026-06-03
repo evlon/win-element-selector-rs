@@ -5,7 +5,7 @@
 //
 // Optimizations:
 // - VecDeque instead of Vec for O(1) popleft eviction
-// - RwLock instead of Mutex for read-heavy workload
+// - True LRU: get() hit promotes key to VecDeque tail
 // - Graceful lock poisoning recovery
 
 use std::collections::{HashMap, VecDeque};
@@ -48,8 +48,15 @@ impl ElementCache {
         self.insertion_order.push_back(key);
     }
 
-    fn get(&self, key: &str) -> Option<UIElement> {
-        self.elements.get(key).cloned()
+    fn get(&mut self, key: &str) -> Option<UIElement> {
+        if self.elements.contains_key(key) {
+            // Move key to the back of VecDeque (true LRU: recently accessed = most recently used)
+            self.insertion_order.retain(|k| k != key);
+            self.insertion_order.push_back(key.to_string());
+            self.elements.get(key).cloned()
+        } else {
+            None
+        }
     }
 
     fn len(&self) -> usize {
@@ -86,8 +93,9 @@ pub fn cache_element(runtime_id: String, element: UIElement) {
 
 /// Look up a cached element by its RuntimeId string.
 /// Returns None if not found or cache is empty.
+/// On hit, promotes the key to most-recently-used position (true LRU).
 pub fn get_cached_element(runtime_id: &str) -> Option<UIElement> {
-    let cache = recover_lock(get_cache().read());
+    let mut cache = recover_lock(get_cache().write());
     cache.get(runtime_id)
 }
 

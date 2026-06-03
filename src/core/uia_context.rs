@@ -45,6 +45,11 @@ pub fn init_uia_context() -> anyhow::Result<()> {
 
 /// Get a reference to the global UIAutomation instance.
 /// Panics if `init_uia_context()` has not been called.
+///
+/// # Deprecation
+/// Prefer `crate::core::uia::helpers::AutomationProvider::get_healthy()` for thread-local
+/// IUIAutomation with health checks, which is more robust than the global OnceLock singleton.
+#[deprecated(since = "1.2.0", note = "Use crate::core::uia::helpers::AutomationProvider::get_healthy() for thread-local IUIAutomation with health checks")]
 pub fn get_automation() -> &'static UIAutomation {
     UIA_AUTOMATION.get().expect("UiaContext not initialized — call init_uia_context() first")
 }
@@ -59,10 +64,12 @@ pub fn try_get_automation() -> anyhow::Result<&'static UIAutomation> {
 
 /// Execute a closure with a reference to the global UIAutomation.
 /// This is the primary way to access UIA functionality.
+#[deprecated(since = "1.2.0", note = "Use crate::core::uia::helpers::AutomationProvider::get_healthy() instead")]
 pub fn with_automation<F, R>(f: F) -> R
 where
     F: FnOnce(&UIAutomation) -> R,
 {
+    #[allow(deprecated)]
     let auto = get_automation();
     f(auto)
 }

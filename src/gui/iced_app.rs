@@ -28,7 +28,7 @@ use element_selector::core::model::{
 };
 use element_selector::core::xpath;
 use element_selector::core::{XPathOptimizer, OptimizationResult};
-use element_selector::capture;
+use element_selector::core::uia as capture;
 
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;
@@ -114,7 +114,7 @@ pub enum Message {
     MouseMoved { x: i32, y: i32 },
 
     // Similar elements
-    SimilarSearchComplete(Vec<capture::CaptureResult>),
+    SimilarSearchComplete(Vec<element_selector::core::model::CaptureResult>),
     ForceRefreshHighlight,
     CodeEdited(text_editor::Action),
     XPathEdited(text_editor::Action),
@@ -193,8 +193,8 @@ pub struct State {
     // Similar elements
     pub similar_samples: Vec<SimilarElementSample>,
     pub similar_mode_active: bool,
-    pub found_similar_elements: Vec<capture::CaptureResult>,
-    pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<capture::CaptureResult>>>,
+    pub found_similar_elements: Vec<element_selector::core::model::CaptureResult>,
+    pub similar_search_rx: Option<std::sync::mpsc::Receiver<Vec<element_selector::core::model::CaptureResult>>>,
     pub similar_search_start_time: Option<Instant>,
 
     // Common elements (multi-sample)
@@ -213,8 +213,8 @@ pub struct State {
     pub validation_start_time: Option<Instant>,
 
     // Highlight async
-    pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<(i32, i32, capture::CaptureResult)>>,
-    pub cached_hover_result: Option<capture::CaptureResult>,
+    pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<(i32, i32, element_selector::core::model::CaptureResult)>>,
+    pub cached_hover_result: Option<element_selector::core::model::CaptureResult>,
     pub last_highlighted_element_id: Option<String>,
     pub highlight_query_sequence: u64,
     pub last_highlight_pos: Option<(i32, i32)>,
@@ -879,8 +879,8 @@ impl State {
             cached
         } else {
             match self.capture_mode {
-                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at(x, y),
+                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at_point(x, y),
+                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at_point(x, y),
             }
         };
 
@@ -922,7 +922,7 @@ impl State {
         self.cached_hover_result = None;
     }
 
-    fn find_window_idx(result: &capture::CaptureResult) -> usize {
+    fn find_window_idx(result: &element_selector::core::model::CaptureResult) -> usize {
         if let Some(ref win) = result.window_info {
             result.hierarchy.iter()
                 .position(|n| n.class_name == win.class_name && n.process_id == win.process_id)
@@ -988,8 +988,8 @@ impl State {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = match mode {
-                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at(x, y),
+                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at_point(x, y),
+                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at_point(x, y),
             };
             let _ = tx.send((x, y, result));
         });
@@ -1108,12 +1108,12 @@ impl State {
         let in_progress = self.common_search_in_progress.clone();
         in_progress.store(true, Ordering::SeqCst);
 
-        let window_selector = self.window_selector.clone();
+        let _window_selector = self.window_selector.clone();
         let xpath = common.search_xpath.clone();
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let results = capture::find_common_elements(&window_selector, &xpath);
+            let results = capture::find_all_elements_from_root(&xpath, 5.0);
             let _ = tx.send((seq, results));
             in_progress.store(false, Ordering::SeqCst);
         });

@@ -11,9 +11,6 @@ pub use core::*;
 // API 层
 pub mod api;
 
-// Capture 包装层（供 GUI 和 API 使用）
-pub mod capture;
-
 // 鼠标控制（GUI + HTTP 共享）
 pub mod mouse_control;
 

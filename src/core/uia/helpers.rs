@@ -99,6 +99,7 @@ pub(super) fn is_leaf_control_type(ct: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(super) fn candidate_dominates_findall(
     candidate: &CandidateElement,
     best_area: i64,
@@ -127,15 +128,16 @@ pub(super) fn candidate_dominates_findall(
         || (candidate.area == best_area && candidate.index > best_index)
 }
 
+#[cfg(test)]
 pub(super) fn candidate_dominates_drilldown(child_area: i64, child_rid_len: usize, deeper_area: i64, deeper_rid_len: usize) -> bool {
     child_area < deeper_area
         || (child_area == deeper_area && child_rid_len > deeper_rid_len)
 }
 
 pub(super) fn compute_element_visible_rect(
-    element_rect: &crate::api::types::Rect,
-    window_rect: Option<&crate::api::types::Rect>,
-) -> Option<crate::api::types::Rect> {
+    element_rect: &crate::core::model::Rect,
+    window_rect: Option<&crate::core::model::Rect>,
+) -> Option<crate::core::model::Rect> {
     match window_rect {
         Some(vp) => {
             let left = element_rect.x.max(vp.x);
@@ -143,7 +145,7 @@ pub(super) fn compute_element_visible_rect(
             let right = (element_rect.x + element_rect.width).min(vp.x + vp.width);
             let bottom = (element_rect.y + element_rect.height).min(vp.y + vp.height);
             if right > left && bottom > top {
-                Some(crate::api::types::Rect { 
+                Some(crate::core::model::Rect { 
                     x: left, 
                     y: top, 
                     width: right - left, 
@@ -159,11 +161,12 @@ pub(super) fn compute_element_visible_rect(
 
 pub(super) fn element_info_from_uia<R: rand::Rng>(
     elem: &IUIAutomationElement,
-    container_rect: Option<&crate::api::types::Rect>,
+    container_rect: Option<&crate::core::model::Rect>,
     random_range: f32,
     rng: &mut R,
 ) -> Option<crate::api::types::ElementInfo> {
-    use crate::api::types::{ElementInfo, Rect, Point};
+    use crate::api::types::ElementInfo;
+    use crate::core::model::{Rect, Point};
 
     let r = match unsafe { elem.CurrentBoundingRectangle() } {
         Ok(r) => r,
@@ -327,6 +330,30 @@ thread_local! {
 
 pub(super) fn get_automation() -> anyhow::Result<IUIAutomation> {
     AutomationProvider::get_healthy()
+}
+
+/// Get element rect at screen coordinate (migrated from com_worker).
+///
+/// Uses ElementFromPoint to find the topmost element at the given point,
+/// then returns its bounding rectangle.
+pub fn get_element_rect_at_point(x: i32, y: i32) -> Option<crate::core::model::ElementRect> {
+    let auto = match get_automation() {
+        Ok(a) => a,
+        Err(_) => return None,
+    };
+    let pt = windows::Win32::Foundation::POINT { x, y };
+    let element: IUIAutomationElement = unsafe {
+        match auto.ElementFromPoint(pt) {
+            Ok(e) => e,
+            Err(_) => return None,
+        }
+    };
+    match unsafe { element.CurrentBoundingRectangle() } {
+        Ok(r) => Some(crate::core::model::ElementRect {
+            x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top,
+        }),
+        Err(_) => None,
+    }
 }
 
 pub fn capture_at_cursor() -> CaptureResult {

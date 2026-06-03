@@ -47,21 +47,6 @@ pub mod navigation;
 pub mod inspect;
 pub mod visibility;
 
-// Backward compatibility: external code uses `crate::core::uia::windows_impl`
-// We re-create the windows_impl namespace by re-exporting all sub-module items
-pub mod windows_impl {
-    pub use super::helpers::*;
-    pub use super::capture::*;
-    pub use super::validation::*;
-    pub use super::window::*;
-    pub use super::element::*;
-    pub use super::cache::*;
-    pub use super::find::*;
-    pub use super::navigation::*;
-    pub use super::inspect::*;
-    pub use super::visibility::*;
-}
-
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 pub use helpers::*;

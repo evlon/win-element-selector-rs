@@ -8,37 +8,8 @@ use serde::{Deserialize, Serialize};
 // 通用结构
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// 2D 点坐标
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Point {
-    pub x: i32,
-    pub y: i32,
-}
-
-impl Point {
-    pub fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
-
-/// 矩形区域
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-impl Rect {
-    /// 计算中心点
-    pub fn center(&self) -> Point {
-        Point::new(
-            self.x + self.width / 2,
-            self.y + self.height / 2,
-        )
-    }
-}
+// 从 core::model 下沉的类型 re-export（解决 core→api 依赖）
+pub use crate::core::model::{Point, Rect, OverflowInfo, NavigateStep};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 窗口 API
@@ -206,27 +177,6 @@ pub struct ElementInfo {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 元素导航 API (Compass)
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/// 导航步骤类型
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum NavigateStep {
-    /// 向上 N 层父元素
-    #[serde(rename = "parent")]
-    Parent { levels: u32 },
-    /// 第 N 个子元素（0-based，负数表示倒数）
-    #[serde(rename = "child")]
-    Child { index: i32 },
-    /// 绝对位置兄弟元素（0-based，负数表示倒数）
-    #[serde(rename = "sibling_abs")]
-    SiblingAbs { index: i32 },
-    /// 左侧第 N 个兄弟（相对偏移）
-    #[serde(rename = "sibling_left")]
-    SiblingLeft { offset: u32 },
-    /// 右侧第 N 个兄弟（相对偏移）
-    #[serde(rename = "sibling_right")]
-    SiblingRight { offset: u32 },
-}
 
 /// 元素导航请求
 #[derive(Debug, Clone, Deserialize)]
@@ -927,19 +877,6 @@ pub struct ElementVisibilityResponse {
     #[serde(rename = "scrollDirection", skip_serializing_if = "Option::is_none")]
     pub scroll_direction: Option<String>,
     pub error: Option<String>,
-}
-
-/// 各方向超出视口的像素数
-#[derive(Debug, Clone, Serialize)]
-pub struct OverflowInfo {
-    /// 元素顶部超出视口顶部的像素（正值=元素在视口上方）
-    pub top: i32,
-    /// 元素底部超出视口底部的像素（正值=元素在视口下方）
-    pub bottom: i32,
-    /// 元素左侧超出视口左侧的像素（正值=元素在视口左边）
-    pub left: i32,
-    /// 元素右侧超出视口右侧的像素（正值=元素在视口右边）
-    pub right: i32,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
