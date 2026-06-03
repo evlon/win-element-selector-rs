@@ -13,8 +13,7 @@ pub async fn list_windows() -> impl Responder {
     info!("API: /api/window/list");
     
     let windows = tokio::task::spawn_blocking(|| {
-        crate::core::com_worker::global_list_windows(crate::core::metrics::next_request_id())
-            .unwrap_or_default()
+        crate::core::uia::enumerate_windows()
     })
     .await
     .unwrap_or_default();
@@ -50,22 +49,11 @@ pub async fn exists_window(req: web::Json<ExistsWindowRequest>) -> impl Responde
 
     let window_selector = req.window_selector.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_exists_window(crate::core::metrics::next_request_id(), window_selector)
+    let exists = tokio::task::spawn_blocking(move || {
+        crate::core::uia::exists_window_by_selector(&window_selector)
     })
-    .await;
-
-    let exists = match result {
-        Ok(Ok(e)) => e,
-        Ok(Err(e)) => {
-            log::error!("exists_window COM worker error: {}", e);
-            false
-        }
-        Err(e) => {
-            log::error!("exists_window spawn_blocking error: {}", e);
-            false
-        }
-    };
+    .await
+    .unwrap_or(false);
 
     info!("Window exists: {}", exists);
     HttpResponse::Ok().json(ExistsWindowResponse { exists })
@@ -98,22 +86,11 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     
     let window_selector = req.window_selector.clone();
     
-    let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_activate_window(crate::core::metrics::next_request_id(), window_selector)
+    let success = tokio::task::spawn_blocking(move || {
+        crate::core::uia::activate_window_by_selector(&window_selector)
     })
-    .await;
-    
-    let success = match result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            log::error!("activate_window COM worker error: {}", e);
-            false
-        }
-        Err(e) => {
-            log::error!("activate_window spawn_blocking error: {}", e);
-            false
-        }
-    };
+    .await
+    .unwrap_or(false);
     
     let response = ActivateWindowResponse {
         success,
@@ -146,22 +123,11 @@ pub async fn focus_element(req: web::Json<FocusElementRequest>) -> impl Responde
     let window_selector = req.window_selector.clone();
     let xpath = req.xpath.clone();
     
-    let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_activate_and_focus_element(crate::core::metrics::next_request_id(), window_selector, xpath)
+    let success = tokio::task::spawn_blocking(move || {
+        crate::core::uia::activate_and_focus_element(&window_selector, &xpath)
     })
-    .await;
-    
-    let success = match result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            log::error!("focus_element COM worker error: {}", e);
-            false
-        }
-        Err(e) => {
-            log::error!("focus_element spawn_blocking error: {}", e);
-            false
-        }
-    };
+    .await
+    .unwrap_or(false);
     
     HttpResponse::Ok().json(FocusElementResponse {
         success,

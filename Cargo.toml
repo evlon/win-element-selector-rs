@@ -21,6 +21,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 rdev = { version = "0.5", features = ["unstable_grab"] }
 uiauto-xpath = { path = "../uiauto-xpath" }
+uiautomation = { path = "../uiautomation-rs/crates/uiautomation", features = ["pattern", "input", "control", "event"] }
 regex = "1"
 
 # HTTP 服务化依赖

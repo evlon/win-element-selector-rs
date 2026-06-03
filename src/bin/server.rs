@@ -71,16 +71,10 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = format!("{}:{}", args.bind, args.port);
     info!("element-selector-server starting on {}", bind_addr);
 
-    // COM 必须在主线程初始化 (STA)
-    {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                .ok()
-                .expect("CoInitializeEx failed");
-        }
-        info!("COM initialized (STA)");
-    }
+    // Initialize UIA context in MTA mode (free-threaded, no STA worker needed)
+    element_selector::core::uia_context::init_uia_context()
+        .expect("Failed to initialize UIA context (MTA)");
+    info!("UIA context initialized (MTA mode)");
 
     // Enable Narrator RunningState for full UIA tree visibility (configurable).
     let skip_narrator = args.no_narrator_motion || !element_selector::core::narrator::should_enable();
@@ -91,11 +85,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Initialize global COM worker thread (single-threaded COM management)
-    element_selector::core::com_worker::init_global_com_worker()
-        .expect("Failed to initialize COM worker");
-    info!("COM worker thread initialized");
-    
     // 配置 HTTP 服务
     HttpServer::new(|| {
         App::new()

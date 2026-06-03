@@ -1,4 +1,4 @@
-// src/core/commonality.rs
+﻿// src/core/commonality.rs
 //
 // 多元素共同特征提取：从多个相似元素样本中提取共同祖先链，生成搜索 XPath
 //

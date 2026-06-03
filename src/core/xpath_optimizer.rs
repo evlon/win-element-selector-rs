@@ -437,40 +437,26 @@ impl XPathOptimizer {
                 // 否则验证走普通 UIA 模式，而最终使用走子窗口模式，结果不一致
                 let full_test_xpath = format!("{}{}", prefix, test_xpath);
                 
-                // 使用 COM worker 进行验证
-                match crate::core::com_worker::global_validate_xpath(
-                    crate::core::metrics::next_request_id(),
-                    window_sel.clone(),
-                    full_test_xpath.clone(),
-                    hierarchy_clone.clone(),
-                ) {
-                    Ok(validation_result) => {
-                        // 【关键修复】极简优化要求 XPath 必须找到**恰好1个**元素
-                        let is_unique = matches!(validation_result.overall, ValidationResult::Found { count: 1, .. });
-                        if !is_unique {
-                            match &validation_result.overall {
-                                ValidationResult::Found { count, .. } => {
-                                    log::info!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, full_test_xpath);
-                                }
-                                ValidationResult::NotFound => {
-                                    log::info!("[极简优化-验证] XPath 未找到元素: {}", full_test_xpath);
-                                }
-                                _ => {}
-                            }
+                // 使用直接调用进行验证
+                let validation_result = crate::core::uia::validate_selector_and_xpath_detailed(
+                    &window_sel,
+                    &full_test_xpath,
+                    &hierarchy_clone,
+                );
+                // 【关键修复】极简优化要求 XPath 必须找到**恰好1个**元素
+                let is_unique = matches!(validation_result.overall, ValidationResult::Found { count: 1, .. });
+                if !is_unique {
+                    match &validation_result.overall {
+                        ValidationResult::Found { count, .. } => {
+                            log::info!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, full_test_xpath);
                         }
-                        Ok(is_unique)
-                    }
-                    Err(e) => {
-                        // 【改进】更友好的错误处理
-                        log::info!("[极简优化-验证] 验证失败: {} (xpath: {})", e, full_test_xpath);
-                        // 如果是窗口未找到的错误，可以提前终止优化
-                        if e.to_string().contains("窗口未找到") {
-                            log::warn!("[极简优化-验证] 窗口未找到，终止优化");
-                            return Err(uiauto_xpath::error::XPathError::ParseError("窗口未找到".into()));
+                        ValidationResult::NotFound => {
+                            log::info!("[极简优化-验证] XPath 未找到元素: {}", full_test_xpath);
                         }
-                        Err(uiauto_xpath::error::XPathError::ParseError(format!("验证失败: {}", e)))
+                        _ => {}
                     }
                 }
+                Ok(is_unique)
             },
             // 进度回调 - 转发到外部 progress 回调
             |msg: &str| {

@@ -68,14 +68,14 @@ pub async fn get_element(
     let element = element_query.element.clone();
     let random_range = element_query.random_range;
 
-    // Use global COM worker thread (single-threaded COM management)
+    // Direct call to core::uia layer
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(request_id, window, element, Some(random_range))
+        crate::core::uia::find_all_elements_detailed(&window, &element, random_range)
     })
     .await;
 
     match result {
-        Ok(Ok(elements)) => {
+        Ok(elements) => {
             let total = elements.len();
             if let Some(element_info) = elements.into_iter().next() {
                 let center_pos = element_info.center
@@ -113,22 +113,6 @@ pub async fn get_element(
                     error: Some("未找到匹配元素".to_string()),
                 })
             }
-        }
-        Ok(Err(e)) => {
-            warn!("COM worker error: {}", e);
-            warn!(
-                "[PERF][HTTP][{}] /api/element done status=com_error found=false duration_ms={} error={}",
-                request_id,
-                request_start.elapsed().as_millis(),
-                e
-            );
-            HttpResponse::InternalServerError().json(ElementResponse {
-                found: false,
-                element_selector: element_query.element.clone(),
-                element: None,
-                total: 0,
-                error: Some(format!("内部错误: {}", e)),
-            })
         }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
@@ -183,14 +167,14 @@ pub async fn get_all_elements(
     let element = element_query.element.clone();
     let random_range = element_query.random_range;
 
-    // Use global COM worker thread
+    // Direct call to core::uia layer
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(request_id, window, element, Some(random_range))
+        crate::core::uia::find_all_elements_detailed(&window, &element, random_range)
     })
     .await;
 
     match result {
-        Ok(Ok(elements)) => {
+        Ok(elements) => {
             let total = elements.len();
             if total > 0 {
                 info!("Found {} elements", total);
@@ -227,21 +211,6 @@ pub async fn get_all_elements(
                     error: Some("未找到匹配元素".to_string()),
                 })
             }
-        }
-        Ok(Err(e)) => {
-            warn!("COM worker error: {}", e);
-            warn!(
-                "[PERF][HTTP][{}] /api/element/all done status=com_error found=false duration_ms={} error={}",
-                request_id,
-                request_start.elapsed().as_millis(),
-                e
-            );
-            HttpResponse::InternalServerError().json(AllElementsResponse {
-                found: false,
-                elements: vec![],
-                total: 0,
-                error: Some(format!("内部错误: {}", e)),
-            })
         }
         Err(e) => {
             warn!("Spawn blocking error: {}", e);
@@ -363,14 +332,13 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
     let timeout = request.timeout;
 
     // 查找元素获取其矩形区域
-    let request_id = next_request_id();
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_find_element(request_id, window, element, None)
+        crate::core::uia::find_all_elements_detailed(&window, &element, 5.0)
     })
     .await;
 
     match result {
-        Ok(Ok(elements)) => {
+        Ok(elements) => {
             if let Some(element_info) = elements.into_iter().next() {
                 if let Some(rect) = &element_info.rect {
                     let model_rect = crate::core::model::ElementRect {
@@ -413,14 +381,6 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
                 })
             }
         }
-        Ok(Err(e)) => {
-            warn!("Flash element COM worker error: {}", e);
-            HttpResponse::InternalServerError().json(ElementFlashResponse {
-                success: false,
-                element_rect: None,
-                error: Some(format!("内部错误: {}", e)),
-            })
-        }
         Err(e) => {
             warn!("Flash element spawn error: {}", e);
             HttpResponse::InternalServerError().json(ElementFlashResponse {
@@ -459,12 +419,12 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
     let format = request.format.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_inspect(request_id, window, element, max_depth, max_nodes, format)
+        crate::core::uia::inspect_subtree(&window, &element, max_depth, max_nodes, &format)
     })
     .await;
 
     match result {
-        Ok(Ok(inspect_result)) => {
+        Ok(inspect_result) => {
             info!(
                 "[PERF][HTTP][{}] /api/element/inspect done status=ok success={} total_children={} duration_ms={}",
                 request_id,
@@ -483,25 +443,6 @@ pub async fn inspect_element(body: web::Json<InspectRequest>) -> impl Responder 
                 text_output: inspect_result.text_output,
                 total_children: inspect_result.total_children,
                 error: inspect_result.error,
-            })
-        }
-        Ok(Err(e)) => {
-            warn!("Inspect element COM worker error: {}", e);
-            warn!(
-                "[PERF][HTTP][{}] /api/element/inspect done status=com_error success=false duration_ms={} error={}",
-                request_id,
-                request_start.elapsed().as_millis(),
-                e
-            );
-            HttpResponse::Ok().json(InspectResponse {
-                success: false,
-                root_xpath: request.element.clone(),
-                nodes: None,
-                flat_nodes: vec![],
-                filtered_nodes: vec![],
-                text_output: None,
-                total_children: 0,
-                error: Some(format!("内部错误: {}", e)),
             })
         }
         Err(e) => {
@@ -549,12 +490,12 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
     let steps = request.steps.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::com_worker::global_navigate(request_id, window, base_xpath, steps)
+        crate::core::uia::navigate_from_element(&window, &base_xpath, &steps)
     })
     .await;
 
     match result {
-        Ok(Ok(Ok((Some(element_info), find_selector)))) => {
+        Ok(Ok((Some(element_info), find_selector))) => {
             info!(
                 "Navigate succeeded: type='{}' name='{}'",
                 element_info.control_type, element_info.name
@@ -571,7 +512,7 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
                 error: None,
             })
         }
-        Ok(Ok(Ok((None, find_selector)))) => {
+        Ok(Ok((None, find_selector))) => {
             warn!("Navigate: element not found at target position");
             info!(
                 "[PERF][HTTP][{}] /api/element/navigate done status=ok found=false duration_ms={}",
@@ -585,7 +526,7 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
                 error: Some("导航目标元素不存在".to_string()),
             })
         }
-        Ok(Ok(Err(e))) => {
+        Ok(Err(e)) => {
             warn!("Navigate failed: {}", e);
             warn!(
                 "[PERF][HTTP][{}] /api/element/navigate done status=navigate_error found=false duration_ms={} error={}",
@@ -598,21 +539,6 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
                 find_selector: String::new(),
                 element: None,
                 error: Some(e),
-            })
-        }
-        Ok(Err(e)) => {
-            warn!("Navigate COM worker error: {}", e);
-            warn!(
-                "[PERF][HTTP][{}] /api/element/navigate done status=com_error found=false duration_ms={} error={}",
-                request_id,
-                request_start.elapsed().as_millis(),
-                e
-            );
-            HttpResponse::InternalServerError().json(NavigateResponse {
-                found: false,
-                find_selector: String::new(),
-                element: None,
-                error: Some(format!("内部错误: {}", e)),
             })
         }
         Err(e) => {

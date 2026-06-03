@@ -27,15 +27,11 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let cli_skip_narrator = args.contains(&"--no-narrator-motion".to_string());
 
-    // COM must be initialized on the main thread (STA) for UI Automation.
-    {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                .ok()
-                .expect("CoInitializeEx failed");
-        }
-    }
+    // COM must be initialized in MTA mode for UI Automation (free-threaded).
+    // All threads using UIA will share the global IUIAutomation instance.
+    element_selector::core::uia_context::init_uia_context()
+        .expect("Failed to initialize UIA context (MTA)");
+    info!("UIA context initialized (MTA mode)");
 
     // Enable Narrator RunningState for full UIA tree visibility (configurable).
     let config = load_config();
@@ -53,11 +49,6 @@ fn main() -> anyhow::Result<()> {
     input_hook::init()
         .expect("Failed to initialize input hook system");
     info!("Input hook system initialized");
-
-    // Initialize global COM worker thread (single-threaded COM management)
-    element_selector::core::com_worker::init_global_com_worker()
-        .expect("Failed to initialize COM worker");
-    info!("COM worker thread initialized");
 
     // Load fonts from Windows system fonts
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = {
