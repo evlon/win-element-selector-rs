@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) const XPATH_FALLBACK_BUDGET_MS: u128 = 5000;
+pub(super) const XPATH_FALLBACK_BUDGET_MS: u128 = 3000;
 
 /// The strategy that successfully resolved an XPath against a window.
 #[derive(Debug, Clone)]
@@ -55,11 +55,11 @@ const XPATH_CACHE_MAX_ENTRIES: usize = 256;
 /// Build a cache key from an XPath string and a window element.
 /// Uses the window's class name prefix (first 32 chars of the part before any underscore)
 /// to capture the app type without tying to a specific window instance.
-fn cache_key(xpath: &str, window: &IUIAutomationElement) -> Option<(u64, String)> {
+fn cache_key(xpath: &str, window: &UIElement) -> Option<(u64, String)> {
     use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
 
-    let class = get_bstr(unsafe { window.CurrentClassName() });
+    let class = window.get_classname().unwrap_or_default();
     // Extract the "app type" prefix: e.g., "Chrome_WidgetWin_0" → "Chrome_Widget"
     // "mmui::MainWindow" → "mmui"
     let app_prefix = if let Some(pos) = class.find('_') {
@@ -78,7 +78,7 @@ fn cache_key(xpath: &str, window: &IUIAutomationElement) -> Option<(u64, String)
     Some((xpath_hash, app_prefix))
 }
 
-pub(super) fn cache_lookup(xpath: &str, window: &IUIAutomationElement) -> Option<CompiledXPathEntry> {
+pub(super) fn cache_lookup(xpath: &str, window: &UIElement) -> Option<CompiledXPathEntry> {
     let key = cache_key(xpath, window)?;
     let mut cache = XPATH_CACHE.lock().ok()?;
     if let Some(entry) = cache.get_mut(&key) {
@@ -97,7 +97,7 @@ pub(super) fn cache_lookup(xpath: &str, window: &IUIAutomationElement) -> Option
 
 pub(super) fn cache_store(
     xpath: &str,
-    window: &IUIAutomationElement,
+    window: &UIElement,
     strategy: CompiledStrategy,
     elapsed_ms: u64,
 ) {

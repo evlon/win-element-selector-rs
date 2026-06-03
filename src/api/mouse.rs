@@ -1492,7 +1492,8 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 control_types,
             );
             elements.iter().map(|elem| {
-                let identifier = make_identifier(elem);
+                let elem_info: super::types::ElementInfo = elem.clone().into();
+                let identifier = make_identifier(&elem_info);
                 let top = elem.rect.as_ref().map(|r| r.y);
                 ElementSnapshot {
                     identifier,
@@ -1511,8 +1512,9 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 let ex_elements = tokio::task::spawn_blocking(move || {
                     crate::core::uia::find_all_elements_detailed(&ws, &xp, 0.0)
                 }).await.unwrap_or_default();
-                for elem in &ex_elements {
-                    set.insert(make_identifier(elem));
+                for elem_data in &ex_elements {
+                    let elem_info: super::types::ElementInfo = elem_data.clone().into();
+                    set.insert(make_identifier(&elem_info));
                 }
             }
             set

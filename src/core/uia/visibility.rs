@@ -2,10 +2,9 @@
 //
 // Element visibility computation — pure functions for testing.
 //
-// Extracted from com_worker::global_get_element_visibility for testability.
+// All functions return core::model::VisibilityResult (no api layer dependency).
 
-use crate::core::model::{OverflowInfo, Rect};
-use crate::api::types::ElementVisibilityResponse;
+use crate::core::model::{OverflowInfo, Rect, VisibilityResult};
 
 /// Compute visibility of an element within a viewport and optional container.
 ///
@@ -16,7 +15,7 @@ pub fn compute_visibility(
     viewport_rect: &Rect,
     container_rect: Option<&Rect>,
     is_offscreen: Option<bool>,
-) -> ElementVisibilityResponse {
+) -> VisibilityResult {
     let intersect = |a: &Rect, b: &Rect| -> Option<Rect> {
         let left = a.x.max(b.x);
         let top = a.y.max(b.y);
@@ -55,7 +54,7 @@ pub fn compute_visibility(
         else if overflow_left > overflow_right { Some("right".to_string()) }
         else { Some("left".to_string()) };
 
-    ElementVisibilityResponse {
+    VisibilityResult {
         found: true,
         is_offscreen,
         visibility,
@@ -69,9 +68,9 @@ pub fn compute_visibility(
     }
 }
 
-/// Build a "not found" visibility response.
-pub fn visibility_not_found(error: &str) -> ElementVisibilityResponse {
-    ElementVisibilityResponse {
+/// Build a "not found" visibility result.
+pub fn visibility_not_found(error: &str) -> VisibilityResult {
+    VisibilityResult {
         found: false, is_offscreen: None, visibility: "not_found".to_string(),
         position: "unknown".to_string(), element_rect: None, visible_rect: None,
         viewport_rect: None, overflow: None, scroll_direction: None,
@@ -79,9 +78,9 @@ pub fn visibility_not_found(error: &str) -> ElementVisibilityResponse {
     }
 }
 
-/// Build an "error" visibility response.
-pub fn visibility_error(error: &str) -> ElementVisibilityResponse {
-    ElementVisibilityResponse {
+/// Build an "error" visibility result.
+pub fn visibility_error(error: &str) -> VisibilityResult {
+    VisibilityResult {
         found: false, is_offscreen: None, visibility: "error".to_string(),
         position: "unknown".to_string(), element_rect: None, visible_rect: None,
         viewport_rect: None, overflow: None, scroll_direction: None,
@@ -89,9 +88,9 @@ pub fn visibility_error(error: &str) -> ElementVisibilityResponse {
     }
 }
 
-/// Build a "found but no rect" visibility response.
-pub fn visibility_no_rect(is_offscreen: Option<bool>, element_rect: Option<Rect>, error: &str) -> ElementVisibilityResponse {
-    ElementVisibilityResponse {
+/// Build a "found but no rect" visibility result.
+pub fn visibility_no_rect(is_offscreen: Option<bool>, element_rect: Option<Rect>, error: &str) -> VisibilityResult {
+    VisibilityResult {
         found: true, is_offscreen,
         visibility: if is_offscreen.unwrap_or(false) { "offscreen".to_string() } else { "visible".to_string() },
         position: "unknown".to_string(),
@@ -104,11 +103,12 @@ pub fn visibility_no_rect(is_offscreen: Option<bool>, element_rect: Option<Rect>
 ///
 /// Uses `validate_selector_and_xpath_detailed` to find the element,
 /// then computes visibility within the viewport and optional container.
+/// Returns `VisibilityResult` (core layer type, no api dependency).
 pub fn get_element_visibility(
     window_selector: &str,
     element_xpath: &str,
     container_xpath: Option<&str>,
-) -> ElementVisibilityResponse {
+) -> VisibilityResult {
     use crate::core::model::ValidationResult;
 
     let detailed = super::validate_selector_and_xpath_detailed(
@@ -189,19 +189,12 @@ mod tests {
 
     #[test]
     fn test_offscreen_both_directions() {
-        // Element completely outside both above and to the left
-        // overflow_top=100, overflow_bottom=0, overflow_left=100, overflow_right=0
-        // This is "partially_visible" because it only overflows in two opposite directions
-        // but not BOTH vertically or BOTH horizontally
         let result = compute_visibility(&rect(-100, -100, 50, 50), &rect(0, 0, 800, 600), None, None);
         assert_eq!(result.visibility, "partially_visible");
     }
 
     #[test]
     fn test_no_overlap_bottom_right() {
-        // Element extends past viewport on both bottom and right
-        // overflow_bottom=50, overflow_right=50, but not both vertical/horizontal
-        // => "partially_visible" (not fully offscreen)
         let result = compute_visibility(&rect(800, 600, 50, 50), &rect(0, 0, 800, 600), None, None);
         assert_eq!(result.visibility, "partially_visible");
     }
@@ -209,12 +202,7 @@ mod tests {
     #[test]
     fn test_with_container_clip() {
         let container = rect(100, 100, 200, 200);
-        // Element extends past container to the right (150+100=250 < 300, so fits)
-        // Actually 150+100=250, container ends at 300, so no overflow in X
-        // 150+100=250, container ends at 300, no overflow in Y either
-        // So this is fully_visible within the container clip
         let result = compute_visibility(&rect(150, 150, 100, 100), &rect(0, 0, 800, 600), Some(&container), None);
-        // Element is fully within container, so fully_visible
         assert_eq!(result.visibility, "fully_visible");
     }
 }

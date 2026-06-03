@@ -1103,6 +1103,39 @@ impl From<super::super::model::ElementRect> for Rect {
     }
 }
 
+/// Convert core::model::ElementData → api::types::ElementInfo
+impl From<super::super::model::ElementData> for ElementInfo {
+    fn from(d: super::super::model::ElementData) -> Self {
+        Self {
+            rect: d.rect,
+            visible_rect: d.visible_rect,
+            center: d.center,
+            center_random: d.center_random,
+            control_type: d.control_type,
+            name: d.name,
+            automation_id: d.automation_id,
+            class_name: d.class_name,
+            framework_id: d.framework_id,
+            help_text: d.help_text,
+            localized_control_type: d.localized_control_type,
+            is_enabled: d.is_enabled,
+            is_offscreen: d.is_offscreen,
+            is_password: d.is_password,
+            accelerator_key: d.accelerator_key,
+            access_key: d.access_key,
+            item_type: d.item_type,
+            item_status: d.item_status,
+            process_id: d.process_id,
+            runtime_id: d.runtime_id,
+            is_checkable: d.is_checkable,
+            is_checked: d.is_checked,
+            is_clickable: d.is_clickable,
+            is_scrollable: d.is_scrollable,
+            is_selected: d.is_selected,
+        }
+    }
+}
+
 impl From<super::super::model::WindowInfo> for WindowInfoResponse {
     fn from(w: super::super::model::WindowInfo) -> Self {
         Self {

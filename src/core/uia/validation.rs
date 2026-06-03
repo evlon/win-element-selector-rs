@@ -28,7 +28,7 @@ pub fn validate_selector_and_xpath_detailed(
     log::info!("[PERF] Stage 1/2: Locating window with selector: {}", window_selector);
     let stage1_start = Instant::now();
     
-    let matched_windows = find_window_by_selector(&auto, window_selector);
+    let mut matched_windows = find_window_by_selector(&auto, window_selector);
     
     let stage1_duration = stage1_start.elapsed().as_millis();
     log::info!("[PERF] Stage 1 completed in {}ms, found {} windows", stage1_duration, matched_windows.len());
@@ -47,8 +47,26 @@ pub fn validate_selector_and_xpath_detailed(
     
     log::info!("[PERF] ✓ Found {} matching window(s), trying XPath on each", matched_windows.len());
 
-    // Stage 2: Try XPath on each matching window, return first success
-    // This handles multi-process scenarios (e.g., multiple Tauri app instances)
+    // ── Prioritize the foreground window ──
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        let fg_hwnd = unsafe { GetForegroundWindow() };
+        if !fg_hwnd.is_invalid() {
+            let fg_idx = matched_windows.iter().position(|w| {
+                w.get_native_window_handle().map(|h| {
+                    let raw: windows::Win32::Foundation::HANDLE = h.into();
+                    HWND(raw.0) == fg_hwnd
+                }).unwrap_or(false)
+            });
+            if let Some(idx) = fg_idx {
+                if idx > 0 {
+                    log::info!("[PERF] Foreground window is at index {}, moving to front", idx);
+                    let fg_win = matched_windows.remove(idx);
+                    matched_windows.insert(0, fg_win);
+                }
+            }
+        }
+    }
 
     // ── Child mode check ──
     let (capture_mode, _) = CaptureMode::strip_xpath_prefix(element_xpath);
@@ -57,15 +75,18 @@ pub fn validate_selector_and_xpath_detailed(
     if is_child_mode {
         log::info!("[Validate] Child mode detected, searching via EnumChildWindows");
         for search_root in &matched_windows {
-            let hwnd = match unsafe { search_root.CurrentNativeWindowHandle() } {
-                Ok(h) => HWND(h.0),
+            let hwnd = match search_root.get_native_window_handle() {
+                Ok(h) => {
+                    let raw: windows::Win32::Foundation::HANDLE = h.into();
+                    HWND(raw.0)
+                }
                 Err(_) => continue,
             };
             let child_hwnds = enum_child_hwnds(hwnd);
             log::info!("[Validate] Child mode: {} child HWNDs", child_hwnds.len());
 
             for child_hwnd in &child_hwnds {
-                let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                let child_elem = match auto.element_from_handle((*child_hwnd).into()) {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
@@ -77,10 +98,10 @@ pub fn validate_selector_and_xpath_detailed(
                             } else {
                                 let mut rects = Vec::with_capacity(results.len());
                                 for elem in &results {
-                                    if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
+                                    if let Ok(r) = elem.get_bounding_rectangle() {
                                         rects.push(ElementRect {
-                                            x: r.left, y: r.top,
-                                            width: r.right - r.left, height: r.bottom - r.top,
+                                            x: r.get_left(), y: r.get_top(),
+                                            width: r.get_right() - r.get_left(), height: r.get_bottom() - r.get_top(),
                                         });
                                     }
                                 }
@@ -88,10 +109,9 @@ pub fn validate_selector_and_xpath_detailed(
                                 ValidationResult::Found { count: results.len(), first_rect, rects }
                             };
                             let is_offscreen = if !results.is_empty() {
-                                Some(unsafe { results[0].CurrentIsOffscreen() }.map(|b| b.as_bool()).unwrap_or(false))
+                                Some(results[0].is_offscreen().unwrap_or(false))
                             } else { None };
 
-                            // Generate per-layer validation results (simplified for child mode)
                             let layers: Vec<LayerValidationResult> = Vec::new();
                             return DetailedValidationResult {
                                 overall,
@@ -106,7 +126,6 @@ pub fn validate_selector_and_xpath_detailed(
                 }
             }
         }
-        // No match found in any child window
         return DetailedValidationResult {
             overall: ValidationResult::NotFound,
             segments: vec![],
@@ -118,23 +137,33 @@ pub fn validate_selector_and_xpath_detailed(
     // ── End child mode ──
 
     let mut last_error: Option<String> = None;
-    let mut best_result: Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> = None;
+    let mut best_result: Option<(Vec<UIElement>, Vec<SegmentValidationResult>)> = None;
     let mut webview_window_tried = false;
 
+    const MAX_WINDOWS_TO_TRY: usize = 5;
+    let windows_to_try = matched_windows.len().min(MAX_WINDOWS_TO_TRY);
+    if matched_windows.len() > MAX_WINDOWS_TO_TRY {
+        log::info!("[PERF] Limiting window search to first {} of {} windows (foreground window is first)",
+            MAX_WINDOWS_TO_TRY, matched_windows.len());
+    }
+
     for (win_idx, search_root) in matched_windows.iter().enumerate() {
-        log::info!("[PERF] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, matched_windows.len());
+        if win_idx >= windows_to_try {
+            log::info!("[PERF] Reached window limit ({}), stopping", MAX_WINDOWS_TO_TRY);
+            break;
+        }
+
+        if total_start.elapsed().as_millis() > 10000 {
+            log::info!("[PERF] Total validation time exceeded 10s, stopping");
+            break;
+        }
+
+        log::info!("[PERF] Stage 2/2: Trying XPath on window {} of {}", win_idx + 1, windows_to_try);
         let stage2_window_start = Instant::now();
 
         // ── Fast skip: WebView windows ──
-        // WebView/Chrome windows have huge UIA subtrees that make XPath search
-        // extremely slow (seconds to minutes). When window='Window' is too generic
-        // and matches 40+ windows, most are irrelevant Chrome/Edge windows.
-        //
-        // Strategy: Try the first WebView window (might be the correct one, e.g.,
-        // WeChat article viewer). If it doesn't match, skip all remaining WebView
-        // windows — the correct window, if it's a WebView, was already tried.
         {
-            let win_class = get_bstr(unsafe { search_root.CurrentClassName() });
+            let win_class = search_root.get_classname().unwrap_or_default();
             if is_webview_class(&win_class) {
                 if webview_window_tried {
                     log::info!("[PERF] Skipping WebView window {} class='{}' (already tried a WebView window)", 
@@ -151,35 +180,35 @@ pub fn validate_selector_and_xpath_detailed(
         #[cfg(debug_assertions)]
         if win_idx == 0 {
             log::info!("[XPath Validation] Window's direct children (RawViewWalker):");
-            let walker = unsafe { auto.RawViewWalker().ok() }
-                .or_else(|| unsafe { auto.ControlViewWalker().ok() });
+            let walker = auto.get_raw_view_walker().ok()
+                .or_else(|| auto.get_control_view_walker().ok());
             if let Some(walker) = walker {
-                let mut child = unsafe { walker.GetFirstChildElement(search_root).ok() };
+                let mut child = walker.get_first_child(search_root).ok();
                 let mut idx = 0;
                 while let Some(c) = child {
-                    let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                    let class = get_bstr(unsafe { c.CurrentClassName() });
-                    let name = get_bstr(unsafe { c.CurrentName() });
-                    let fwid = get_bstr(unsafe { c.CurrentFrameworkId() });
+                    let ct = c.get_control_type_raw().map(control_type_name).unwrap_or_default();
+                    let class = c.get_classname().unwrap_or_default();
+                    let name = c.get_name().unwrap_or_default();
+                    let fwid = c.get_framework_id().unwrap_or_default();
                     log::info!("  child[{}] {} class='{}' name='{}' frameworkId='{}'", idx, ct, class, name, fwid);
 
                     if idx == 0 {
                         log::info!("  first child's sub-children:");
-                        let mut sub_child = unsafe { walker.GetFirstChildElement(&c).ok() };
+                        let mut sub_child = walker.get_first_child(&c).ok();
                         let mut sub_idx = 0;
                         while let Some(sc) = sub_child {
-                            let sub_ct = unsafe { sc.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                            let sub_class = get_bstr(unsafe { sc.CurrentClassName() });
-                            let sub_name = get_bstr(unsafe { sc.CurrentName() });
-                            let sub_fwid = get_bstr(unsafe { sc.CurrentFrameworkId() });
+                            let sub_ct = sc.get_control_type_raw().map(control_type_name).unwrap_or_default();
+                            let sub_class = sc.get_classname().unwrap_or_default();
+                            let sub_name = sc.get_name().unwrap_or_default();
+                            let sub_fwid = sc.get_framework_id().unwrap_or_default();
                             log::info!("    sub[{}] {} class='{}' name='{}' frameworkId='{}'", sub_idx, sub_ct, sub_class, sub_name, sub_fwid);
-                            sub_child = unsafe { walker.GetNextSiblingElement(&sc).ok() };
+                            sub_child = walker.get_next_sibling(&sc).ok();
                             sub_idx += 1;
                             if sub_idx > 5 { break; }
                         }
                     }
 
-                    child = unsafe { walker.GetNextSiblingElement(&c).ok() };
+                    child = walker.get_next_sibling(&c).ok();
                     idx += 1;
                     if idx > 10 { break; }
                 }
@@ -190,15 +219,12 @@ pub fn validate_selector_and_xpath_detailed(
             Ok((results, segments)) => {
                 let window_duration = stage2_window_start.elapsed().as_millis();
                 if !results.is_empty() {
-                    // Found! Use this window's results
                     log::info!("[PERF] ✓ Window {} XPath succeeded in {}ms, found {} results", win_idx + 1, window_duration, results.len());
                     best_result = Some((results, segments));
                     break;
                 }
-                // No match in this window, try next
                 log::info!("[PERF] Window {} - XPath matched 0 elements in {}ms, trying next window", win_idx + 1, window_duration);
                 if best_result.is_none() {
-                    // Keep empty results as fallback
                     best_result = Some((results, segments));
                 }
             }
@@ -230,10 +256,10 @@ pub fn validate_selector_and_xpath_detailed(
     } else {
         let mut rects = Vec::with_capacity(results.len());
         for elem in &results {
-            if let Ok(r) = unsafe { elem.CurrentBoundingRectangle() } {
+            if let Ok(r) = elem.get_bounding_rectangle() {
                 rects.push(ElementRect {
-                    x: r.left, y: r.top,
-                    width: r.right - r.left, height: r.bottom - r.top,
+                    x: r.get_left(), y: r.get_top(),
+                    width: r.get_right() - r.get_left(), height: r.get_bottom() - r.get_top(),
                 });
             }
         }
@@ -241,18 +267,15 @@ pub fn validate_selector_and_xpath_detailed(
         ValidationResult::Found { count: results.len(), first_rect, rects }
     };
 
-    // 查询第一个匹配元素的 isOffscreen
     let is_offscreen = if !results.is_empty() {
-        Some(unsafe { results[0].CurrentIsOffscreen() }
-            .map(|b| b.as_bool())
-            .unwrap_or(false))
+        Some(results[0].is_offscreen().unwrap_or(false))
     } else {
         None
     };
     
     // 生成逐层校验结果（复用 uiauto-xpath 的 ancestors 和 get_property API）
     let layers = if !results.is_empty() {
-        let first_match = UiaXPathElement::new(results[0].clone(), auto.clone());
+        let first_match = UiaXPathElement::new(results[0].clone().into(), auto.clone().into());
         let ancestors = first_match.ancestors();
         
         hierarchy.iter().enumerate().map(|(layer_idx, node)| {
@@ -336,4 +359,3 @@ pub fn validate_selector_and_xpath_detailed(
         is_offscreen,
     }
 }
-

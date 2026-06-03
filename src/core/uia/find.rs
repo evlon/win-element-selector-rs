@@ -1,10 +1,10 @@
 use super::*;
 
 pub(super) fn find_by_xpath_with_fallback(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     use std::time::Instant;
     let fallback_start = Instant::now();
     
@@ -161,13 +161,13 @@ pub(super) fn find_by_xpath_with_fallback(
     #[inline(always)]
     fn record_and_return(
         strategy: CompiledStrategy,
-        results: Vec<IUIAutomationElement>,
+        results: Vec<UIElement>,
         segments: Vec<SegmentValidationResult>,
         xpath: &str,
-        window: &IUIAutomationElement,
+        window: &UIElement,
         position_index: Option<usize>,
         fallback_start: &std::time::Instant,
-    ) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+    ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
         let elapsed = fallback_start.elapsed().as_millis() as u64;
         cache_store(xpath, window, strategy, elapsed);
         // Apply positional predicate
@@ -245,11 +245,12 @@ pub(super) fn find_by_xpath_with_fallback(
         // Step 2: Try from window root.
         // Check for WebView child HWNDs — if present, uiauto-xpath may hang,
         // so use find_by_xpath_raw_descendants instead.
-        let has_webview_children = if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
-            let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+        let has_webview_children = if let Ok(handle) = window.get_native_window_handle() {
+            let raw_handle: windows::Win32::Foundation::HANDLE = handle.into();
+            let child_hwnds = enum_child_hwnds(HWND(raw_handle.0));
             child_hwnds.iter().any(|ch| {
-                if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*ch) } {
-                    let class = get_bstr(unsafe { child_elem.CurrentClassName() });
+                if let Ok(child_elem) = auto.element_from_handle((*ch).into()) {
+                    let class = child_elem.get_classname().unwrap_or_default();
                     is_webview_class(&class)
                 } else {
                     false
@@ -292,12 +293,13 @@ pub(super) fn find_by_xpath_with_fallback(
         // Step 3: EnumChildWindows — try child HWNDs
         // For non-WebView child HWNDs, try find_by_xpath_detailed first (faster & more reliable).
         // For WebView child HWNDs, use find_by_xpath_raw_descendants to avoid hanging.
-        if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
-            let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+        if let Ok(handle) = window.get_native_window_handle() {
+            let raw_handle: windows::Win32::Foundation::HANDLE = handle.into();
+            let child_hwnds = enum_child_hwnds(HWND(raw_handle.0));
             log::info!("[XPath Fallback] //XPath — Step 3: trying {} child HWNDs", child_hwnds.len());
             for (idx, child_hwnd) in child_hwnds.iter().enumerate() {
-                if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
-                    let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+                if let Ok(child_elem) = auto.element_from_handle((*child_hwnd).into()) {
+                    let child_class = child_elem.get_classname().unwrap_or_default();
                     let is_webview = is_webview_class(&child_class);
                     
                     if !is_webview {
@@ -391,28 +393,28 @@ pub(super) fn find_by_xpath_with_fallback(
         } else if let Some(ref first_parsed) = first_step_parsed {
             if !xpath_parts.is_empty() {
                 log::info!("[XPath Fallback] /XPath — Strategy 1.5: RawViewWalker BFS from window root");
-                if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+                if let Ok(raw_walker) = auto.get_raw_view_walker() {
                     let first_step_end = find_first_step_end(xpath);
                     let remaining_after_first = &xpath[first_step_end..];
-                    
+
                     // BFS from window root using RawViewWalker, max depth 8
-                    let mut queue: Vec<(IUIAutomationElement, u32)> = vec![(window.clone(), 0)];
+                    let mut queue: Vec<(UIElement, u32)> = vec![(window.clone(), 0)];
                     let mut visited: HashSet<Vec<i32>> = HashSet::new();
                     if let Some(rid) = runtime_id_key(window) { visited.insert(rid); }
-                    
+
                     while let Some((elem, depth)) = queue.pop() {
                         if depth > 8 { continue; }
-                        
+
                         // Check this element's children
-                        let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
+                        let mut child = raw_walker.get_first_child(&elem).ok();
                         while let Some(c) = child {
                             if let Some(rid) = runtime_id_key(&c) {
                                 if !visited.insert(rid) {
-                                    child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                                    child = raw_walker.get_next_sibling(&c).ok();
                                     continue;
                                 }
                             }
-                            
+
                             if element_matches_parsed_step(&c, &first_parsed) {
                                 log::info!("[XPath Fallback] Strategy 1.5: found first-step match at depth {}", depth + 1);
                                 if let Some(result) = try_remaining_from_match(
@@ -423,10 +425,10 @@ pub(super) fn find_by_xpath_with_fallback(
                                     return record_and_return(CompiledStrategy::RawViewBfs, r, s, xpath, window, position_index, &fallback_start);
                                 }
                             }
-                            
+
                             // Also enqueue for deeper BFS
                             queue.push((c.clone(), depth + 1));
-                            child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+                            child = raw_walker.get_next_sibling(&c).ok();
                         }
                     }
                     log::info!("[XPath Fallback] Strategy 1.5: no match found via RawViewWalker BFS");
@@ -559,13 +561,13 @@ pub(super) fn find_by_xpath_with_fallback(
         ///    `find_by_xpath_detailed` entirely to prevent hanging, and rely on the
         ///    FindAll fast path + raw tree walk fallback.
         fn try_remaining_from_match(
-            auto: &IUIAutomation,
-            match_elem: &IUIAutomationElement,
+            auto: &UIAutomation,
+            match_elem: &UIElement,
             remaining_xpath: &str,
             xpath_parts: &[&str],
             fallback_start: &std::time::Instant,
             strategy_label: &str,
-        ) -> Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+        ) -> Option<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
             // If remaining path is empty, the matched element IS the result
             if remaining_xpath.is_empty() || remaining_xpath == "/" {
                 let duration_ms = fallback_start.elapsed().as_millis() as u64;
@@ -625,7 +627,7 @@ pub(super) fn find_by_xpath_with_fallback(
             }
             
             // Fallback: raw tree walk for remaining steps
-            if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+            if let Ok(raw_walker) = auto.get_raw_view_walker() {
                 let remaining_parts: Vec<&str> = remaining_xpath.split('/').filter(|s| !s.is_empty()).collect();
                 if let Ok(matches) = walk_raw_tree_steps(auto, &raw_walker, match_elem, &remaining_parts) {
                     if !matches.is_empty() {
@@ -662,15 +664,13 @@ pub(super) fn find_by_xpath_with_fallback(
         /// predicates. Returns `None` for complex predicates (starts-with, contains, etc.)
         /// or if FindAll fails.
         fn findall_descendants_fast(
-            auto: &IUIAutomation,
-            match_elem: &IUIAutomationElement,
+            auto: &UIAutomation,
+            match_elem: &UIElement,
             remaining_xpath: &str,
             xpath_parts: &[&str],
             fallback_start: &std::time::Instant,
             strategy_label: &str,
-        ) -> Option<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-            use windows::Win32::UI::Accessibility::*;
-            use windows::Win32::System::Variant::*;
+        ) -> Option<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
 
             // Find the last `//` in the remaining XPath and extract the final step
             let last_desc_idx = remaining_xpath.rfind("//")?;
@@ -719,20 +719,13 @@ pub(super) fn find_by_xpath_with_fallback(
             };
 
             // Build UIA conditions from parsed predicates
-            let mut conditions: Vec<IUIAutomationCondition> = Vec::new();
+            let mut conditions: Vec<UICondition> = Vec::new();
 
             // Add ControlType condition if type_name is specified
             if let Some(ref type_name) = parsed.type_name {
                 if let Some(ct_id) = control_type_name_to_id(type_name) {
-                    let mut variant = VARIANT::default();
-                    unsafe {
-                        let var_ptr = &mut variant as *mut VARIANT;
-                        let vt_ptr = var_ptr as *mut VARENUM;
-                        std::ptr::write(vt_ptr, VT_I4);
-                        let i4_ptr = (var_ptr as *mut u8).add(8) as *mut i32;
-                        std::ptr::write(i4_ptr, ct_id);
-                    }
-                    if let Ok(cond) = unsafe { auto.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant) } {
+                    let variant = Variant::from(ct_id);
+                    if let Ok(cond) = auto.create_property_condition(UIProperty::ControlType, variant, None) {
                         conditions.push(cond);
                     }
                 }
@@ -741,11 +734,11 @@ pub(super) fn find_by_xpath_with_fallback(
             // Add equality predicate conditions (@Name='...', @AutomationId='...', @FrameworkId='...', etc.)
             // Only add conditions for properties that have a UIA property ID mapping.
             for (key, value) in &parsed.required_props {
-                let prop_id: UIA_PROPERTY_ID = match key.as_str() {
-                    "Name" => UIA_NamePropertyId,
-                    "AutomationId" => UIA_AutomationIdPropertyId,
-                    "FrameworkId" => UIA_FrameworkIdPropertyId,
-                    "ClassName" => UIA_ClassNamePropertyId,
+                let prop: UIProperty = match key.as_str() {
+                    "Name" => UIProperty::Name,
+                    "AutomationId" => UIProperty::AutomationId,
+                    "FrameworkId" => UIProperty::FrameworkId,
+                    "ClassName" => UIProperty::ClassName,
                     "ControlType" => {
                         // ControlType already handled above via type_name
                         continue;
@@ -757,15 +750,8 @@ pub(super) fn find_by_xpath_with_fallback(
                     }
                 };
 
-                let mut variant = VARIANT::default();
-                unsafe {
-                    let var_ptr = &mut variant as *mut VARIANT;
-                    let vt_ptr = var_ptr as *mut VARENUM;
-                    std::ptr::write(vt_ptr, VT_BSTR);
-                    let bstr_ptr = (var_ptr as *mut u8).add(8) as *mut core::mem::ManuallyDrop<BSTR>;
-                    std::ptr::write(bstr_ptr, core::mem::ManuallyDrop::new(BSTR::from(value.as_str())));
-                }
-                if let Ok(cond) = unsafe { auto.CreatePropertyCondition(prop_id, &variant) } {
+                let variant = Variant::from(value.clone());
+                if let Ok(cond) = auto.create_property_condition(prop, variant, None) {
                     conditions.push(cond);
                 }
             }
@@ -780,15 +766,24 @@ pub(super) fn find_by_xpath_with_fallback(
                 2 => {
                     let cond2 = conditions.remove(1);
                     let cond1 = conditions.remove(0);
-                    unsafe { auto.CreateAndCondition(&cond1, &cond2).unwrap_or(cond1) }
+                    auto.create_and_condition(cond1.clone(), cond2).unwrap_or(cond1)
                 }
                 _ => {
-                    let opts: Vec<Option<IUIAutomationCondition>> = conditions.into_iter().map(Some).collect();
-                    let first = opts.first().and_then(|o| o.clone());
-                    unsafe {
-                        auto.CreateAndConditionFromNativeArray(&opts)
-                            .unwrap_or_else(|_| first.expect("at least one condition"))
+                    // Chain create_and_condition for 3+ conditions
+                    let mut iter = conditions.into_iter();
+                    let first = iter.next().expect("at least one condition");
+                    let mut combined: Option<UICondition> = Some(first);
+                    for cond in iter {
+                        let current = match combined.take() {
+                            Some(c) => c,
+                            None => break,
+                        };
+                        match auto.create_and_condition(current, cond) {
+                            Ok(c) => combined = Some(c),
+                            Err(_) => break,
+                        }
                     }
+                    combined.unwrap_or_else(|| auto.create_true_condition().expect("at least one condition"))
                 }
             };
 
@@ -797,9 +792,9 @@ pub(super) fn find_by_xpath_with_fallback(
             log::info!("[XPath Fallback] Strategy {}: FindAll fast path — executing on subtree (step: {})",
                 strategy_label, last_step_str);
             
-            match unsafe { search_root.FindAll(TreeScope_Subtree, &final_condition) } {
-                Ok(arr) => {
-                    let count = unsafe { arr.Length() }.unwrap_or(0);
+            match search_root.find_all(TreeScope::Subtree, &final_condition) {
+                Ok(elements) => {
+                    let count = elements.len();
                     let findall_ms = findall_start.elapsed().as_millis();
                     log::info!("[XPath Fallback] Strategy {}: FindAll fast path — found {} elements ({}ms)",
                         strategy_label, count, findall_ms);
@@ -808,17 +803,7 @@ pub(super) fn find_by_xpath_with_fallback(
                         return None;
                     }
 
-                    // Collect matching elements
-                    let mut matches: Vec<IUIAutomationElement> = Vec::new();
-                    for i in 0..count {
-                        if let Ok(elem) = unsafe { arr.GetElement(i) } {
-                            matches.push(elem);
-                        }
-                    }
-
-                    if matches.is_empty() {
-                        return None;
-                    }
+                    let matches = elements;
 
                     log::info!("[XPath Fallback] ✓ Strategy {}: FindAll fast path found {} elements ({}ms total)",
                         strategy_label, matches.len(), fallback_start.elapsed().as_millis());
@@ -848,18 +833,19 @@ pub(super) fn find_by_xpath_with_fallback(
         let first_step_end = find_first_step_end(xpath);
         let remaining_after_first = &xpath[first_step_end..];
         
-        if let Ok(hwnd) = unsafe { window.CurrentNativeWindowHandle() } {
-            let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+        if let Ok(handle) = window.get_native_window_handle() {
+            let raw_handle: windows::Win32::Foundation::HANDLE = handle.into();
+            let child_hwnds = enum_child_hwnds(HWND(raw_handle.0));
             log::info!("[Strategy 2.7] Found {} child HWNDs under window", child_hwnds.len());
-            
+
             let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
             let xpath_parts: Vec<&str> = desc_xpath.split('/').filter(|s| !s.is_empty()).collect();
-            
+
             for (idx, child_hwnd) in child_hwnds.iter().enumerate() {
-                if let Ok(child_elem) = unsafe { auto.ElementFromHandle(*child_hwnd) } {
-                    let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
-                    let child_ct = unsafe { child_elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                    let child_pid = unsafe { child_elem.CurrentProcessId().unwrap_or(0) };
+                if let Ok(child_elem) = auto.element_from_handle((*child_hwnd).into()) {
+                    let child_class = child_elem.get_classname().unwrap_or_default();
+                    let child_ct = child_elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
+                    let child_pid = child_elem.get_process_id().unwrap_or(0);
                     log::info!("[Strategy 2.7]   child_hwnd[{}]: hwnd=0x{:X} type='{}' class='{}' pid={}",
                         idx, child_hwnd.0 as usize, child_ct, child_class, child_pid);
                     
@@ -890,9 +876,9 @@ pub(super) fn find_by_xpath_with_fallback(
                         }
                         
                         // Also try: search inside this child HWND's subtree for the first step
-                        if let Ok(raw_walker) = unsafe { auto.RawViewWalker() } {
+                        if let Ok(raw_walker) = auto.get_raw_view_walker() {
                             let first_parsed = parse_xpath_step(xpath_parts[0]);
-                            let mut sub_match = unsafe { raw_walker.GetFirstChildElement(&child_elem).ok() };
+                            let mut sub_match = raw_walker.get_first_child(&child_elem).ok();
                             while let Some(sub) = sub_match {
                                 if element_matches_parsed_step(&sub, &first_parsed) {
                                     log::info!("[Strategy 2.7]   ✓ Found first-step match inside child HWND!");
@@ -901,7 +887,7 @@ pub(super) fn find_by_xpath_with_fallback(
                                         return record_and_return(CompiledStrategy::ChildHwndEnum(idx), r, s, xpath, window, position_index, &fallback_start);
                                     }
                                 }
-                                sub_match = unsafe { raw_walker.GetNextSiblingElement(&sub).ok() };
+                                sub_match = raw_walker.get_next_sibling(&sub).ok();
                             }
                         }
                     }
@@ -932,7 +918,7 @@ pub(super) fn find_by_xpath_with_fallback(
                 // 1286ms+ on Chrome windows, and descendant search is even worse.
                 // The target element will be found from the correct window in the main loop,
                 // not from a sibling fallback.
-                let sibling_class = get_bstr(unsafe { sibling.CurrentClassName() });
+                let sibling_class = sibling.get_classname().unwrap_or_default();
                 if is_webview_class(&sibling_class) {
                     log::info!("[Strategy 3] Skipping WebView sibling[{}] class='{}'", idx, sibling_class);
                     continue;
@@ -979,9 +965,9 @@ pub(super) fn find_by_xpath_with_fallback(
                 }
                 
                 // Get window info for debugging
-                let child_pid = unsafe { child_win.CurrentProcessId().unwrap_or(0) };
-                let child_name = get_bstr(unsafe { child_win.CurrentName() });
-                let child_class = get_bstr(unsafe { child_win.CurrentClassName() });
+                let child_pid = child_win.get_process_id().unwrap_or(0);
+                let child_name = child_win.get_name().unwrap_or_default();
+                let child_class = child_win.get_classname().unwrap_or_default();
                 let child_is_webview = is_webview_class(&child_class);
                 log::info!("[Strategy 3b] Trying window {}: PID={}, Class='{}', Name='{}', WebView={}", 
                     idx + 1, child_pid, child_class, child_name, child_is_webview);
@@ -1038,7 +1024,7 @@ pub(super) fn find_by_xpath_with_fallback(
         } else {
             log::info!("[XPath Fallback] /XPath — Strategy 4: Desktop root descendant (explicitly enabled via ENABLE_DESKTOP_SEARCH=1)");
             let desktop_desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
-            if let Ok(desktop) = unsafe { auto.GetRootElement() } {
+            if let Ok(desktop) = auto.get_root_element() {
                 let strategy4_start = std::time::Instant::now();
                 let timeout_ms = 2000; // 2 second timeout for Desktop search
                 
@@ -1063,26 +1049,27 @@ pub(super) fn find_by_xpath_with_fallback(
 }
 
 fn cached_raw_view_bfs(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     find_by_xpath_raw_descendants(auto, window, xpath)
 }
 
 fn cached_child_hwnd_search(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
     child_idx: usize,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-    let hwnd = unsafe { window.CurrentNativeWindowHandle() }?;
-    let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
+    let handle = window.get_native_window_handle()?;
+    let raw_handle: windows::Win32::Foundation::HANDLE = handle.into();
+    let child_hwnds = enum_child_hwnds(HWND(raw_handle.0));
     if child_idx >= child_hwnds.len() {
         return Ok((vec![], vec![]));
     }
-    let child_elem = unsafe { auto.ElementFromHandle(child_hwnds[child_idx]) }?;
-    let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+    let child_elem = auto.element_from_handle(child_hwnds[child_idx].into())?;
+    let child_class = child_elem.get_classname().unwrap_or_default();
     if !is_webview_class(&child_class) {
         if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
@@ -1092,13 +1079,13 @@ fn cached_child_hwnd_search(
 }
 
 fn cached_sibling_search(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     let siblings = find_sibling_windows_same_process(auto, window)?;
     for sibling in &siblings {
-        let sibling_class = get_bstr(unsafe { sibling.CurrentClassName() });
+        let sibling_class = sibling.get_classname().unwrap_or_default();
         if is_webview_class(&sibling_class) { continue; }
         if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
@@ -1112,14 +1099,14 @@ fn cached_sibling_search(
 }
 
 fn cached_child_process_search(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     let child_windows = find_child_process_windows(auto, window)?;
     let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
     for child_win in &child_windows {
-        let child_class = get_bstr(unsafe { child_win.CurrentClassName() });
+        let child_class = child_win.get_classname().unwrap_or_default();
         if is_webview_class(&child_class) { continue; }
         if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
@@ -1132,18 +1119,19 @@ fn cached_child_process_search(
 }
 
 fn cached_descendant_child_hwnd(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
     child_idx: usize,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
-    let hwnd = unsafe { window.CurrentNativeWindowHandle() }?;
-    let child_hwnds = enum_child_hwnds(HWND(hwnd.0));
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
+    let handle = window.get_native_window_handle()?;
+    let raw_handle: windows::Win32::Foundation::HANDLE = handle.into();
+    let child_hwnds = enum_child_hwnds(HWND(raw_handle.0));
     if child_idx >= child_hwnds.len() {
         return Ok((vec![], vec![]));
     }
-    let child_elem = unsafe { auto.ElementFromHandle(child_hwnds[child_idx]) }?;
-    let child_class = get_bstr(unsafe { child_elem.CurrentClassName() });
+    let child_elem = auto.element_from_handle(child_hwnds[child_idx].into())?;
+    let child_class = child_elem.get_classname().unwrap_or_default();
     if !is_webview_class(&child_class) {
         if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
@@ -1266,21 +1254,21 @@ fn parse_xpath_step(step: &str) -> ParsedXPathStep {
     ParsedXPathStep { type_name, required_props, require_starts_with, require_contains, require_matches }
 }
 
-fn get_uia_property_for_xpath(elem: &IUIAutomationElement, key: &str) -> String {
+fn get_uia_property_for_xpath(elem: &UIElement, key: &str) -> String {
     match key {
-        "Name" => get_bstr(unsafe { elem.CurrentName() }),
-        "ClassName" => get_bstr(unsafe { elem.CurrentClassName() }),
-        "AutomationId" => get_bstr(unsafe { elem.CurrentAutomationId() }),
-        "FrameworkId" => get_bstr(unsafe { elem.CurrentFrameworkId() }),
-        "HelpText" => get_bstr(unsafe { elem.CurrentHelpText() }),
+        "Name" => elem.get_name().unwrap_or_default(),
+        "ClassName" => elem.get_classname().unwrap_or_default(),
+        "AutomationId" => elem.get_automation_id().unwrap_or_default(),
+        "FrameworkId" => elem.get_framework_id().unwrap_or_default(),
+        "HelpText" => elem.get_help_text().unwrap_or_default(),
         _ => String::new(),
     }
 }
 
-fn element_matches_parsed_step(elem: &IUIAutomationElement, step: &ParsedXPathStep) -> bool {
+fn element_matches_parsed_step(elem: &UIElement, step: &ParsedXPathStep) -> bool {
     // Check control type
     if let Some(ref type_name) = step.type_name {
-        let elem_ct = unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() };
+        let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
         if elem_ct != *type_name {
             return false;
         }
@@ -1322,11 +1310,11 @@ fn element_matches_parsed_step(elem: &IUIAutomationElement, step: &ParsedXPathSt
 }
 
 fn walk_raw_tree_steps(
-    auto: &IUIAutomation,
-    raw_walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    root: &IUIAutomationElement,
+    auto: &UIAutomation,
+    raw_walker: &UITreeWalker,
+    root: &UIElement,
     steps: &[&str],
-) -> anyhow::Result<Vec<IUIAutomationElement>> {
+) -> anyhow::Result<Vec<UIElement>> {
     if steps.is_empty() {
         return Ok(vec![root.clone()]);
     }
@@ -1334,13 +1322,13 @@ fn walk_raw_tree_steps(
     let first_parsed = parse_xpath_step(steps[0]);
 
     // Find children of root matching the first step
-    let mut current_matches: Vec<IUIAutomationElement> = Vec::new();
-    let mut child = unsafe { raw_walker.GetFirstChildElement(root).ok() };
+    let mut current_matches: Vec<UIElement> = Vec::new();
+    let mut child = raw_walker.get_first_child(root).ok();
     while let Some(c) = child {
         if element_matches_parsed_step(&c, &first_parsed) {
             current_matches.push(c.clone());
         }
-        child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+        child = raw_walker.get_next_sibling(&c).ok();
     }
 
     if current_matches.is_empty() {
@@ -1365,10 +1353,10 @@ fn walk_raw_tree_steps(
 }
 
 fn find_by_xpath_raw_descendants(
-    auto: &IUIAutomation,
-    window: &IUIAutomationElement,
+    auto: &UIAutomation,
+    window: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     use std::time::Instant;
     let start = Instant::now();
 
@@ -1387,7 +1375,7 @@ fn find_by_xpath_raw_descendants(
         first_step_parsed.type_name, first_step_parsed.required_props, first_step_parsed.require_starts_with);
 
     // Use RawViewWalker to find elements matching the first step
-    let raw_walker = match unsafe { auto.RawViewWalker() } {
+    let raw_walker = match auto.get_raw_view_walker() {
         Ok(w) => w,
         Err(e) => {
             log::warn!("[Raw Desc] Failed to get RawViewWalker: {}", e);
@@ -1399,51 +1387,51 @@ fn find_by_xpath_raw_descendants(
     #[cfg(debug_assertions)]
     {
         let mut diag_count = 0u32;
-        let mut d1_child = unsafe { raw_walker.GetFirstChildElement(window).ok() };
+        let mut d1_child = raw_walker.get_first_child(window).ok();
         while let Some(c) = d1_child {
-            let ct = unsafe { c.CurrentControlType().map(control_type_name).unwrap_or_default() };
-            let cn = get_bstr(unsafe { c.CurrentClassName() });
-            let nm = get_bstr(unsafe { c.CurrentName() });
-            let fw = get_bstr(unsafe { c.CurrentFrameworkId() });
-            let pid = unsafe { c.CurrentProcessId().unwrap_or(0) };
+            let ct = c.get_control_type_raw().map(control_type_name).unwrap_or_default();
+            let cn = c.get_classname().unwrap_or_default();
+            let nm = c.get_name().unwrap_or_default();
+            let fw = c.get_framework_id().unwrap_or_default();
+            let pid = c.get_process_id().unwrap_or(0);
             log::info!("[Raw Desc]   raw_depth1[{}]: {} class='{}' name='{}' fw='{}' pid={}",
                 diag_count, ct, cn, nm, fw, pid);
             // Print depth-2 children of the first 3 depth-1 elements
             if diag_count < 3 {
                 let mut d2_idx = 0u32;
-                let mut d2_child = unsafe { raw_walker.GetFirstChildElement(&c).ok() };
+                let mut d2_child = raw_walker.get_first_child(&c).ok();
                 while let Some(c2) = d2_child {
                     if d2_idx < 5 {
-                        let ct2 = unsafe { c2.CurrentControlType().map(control_type_name).unwrap_or_default() };
-                        let cn2 = get_bstr(unsafe { c2.CurrentClassName() });
-                        let fw2 = get_bstr(unsafe { c2.CurrentFrameworkId() });
+                        let ct2 = c2.get_control_type_raw().map(control_type_name).unwrap_or_default();
+                        let cn2 = c2.get_classname().unwrap_or_default();
+                        let fw2 = c2.get_framework_id().unwrap_or_default();
                         log::info!("[Raw Desc]     raw_depth2[{}]: {} class='{}' fw='{}'", d2_idx, ct2, cn2, fw2);
                     }
                     d2_idx += 1;
-                    d2_child = unsafe { raw_walker.GetNextSiblingElement(&c2).ok() };
+                    d2_child = raw_walker.get_next_sibling(&c2).ok();
                 }
                 if d2_idx > 5 {
                     log::info!("[Raw Desc]     ... and {} more depth-2 children", d2_idx - 5);
                 }
             }
             diag_count += 1;
-            d1_child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            d1_child = raw_walker.get_next_sibling(&c).ok();
         }
         log::info!("[Raw Desc] Window has {} raw children at depth 1", diag_count);
     }
 
     // Collect raw tree children of the window, then search deeper if needed
-    let mut first_step_matches: Vec<IUIAutomationElement> = Vec::new();
+    let mut first_step_matches: Vec<UIElement> = Vec::new();
 
     // BFS: search for first-step matches in the raw tree
     // Depth 8 covers most real-world UI hierarchies (e.g., WeChat's Qt tree can be 7+ levels deep).
     // Previously depth 3 was too shallow, causing elements captured by RawViewWalker to be
     // unreachable during validation/search.
-    let mut queue: std::collections::VecDeque<(IUIAutomationElement, u32)> = std::collections::VecDeque::from(vec![(window.clone(), 0)]);
+    let mut queue: std::collections::VecDeque<(UIElement, u32)> = std::collections::VecDeque::from(vec![(window.clone(), 0)]);
     let max_depth = 8u32;
 
     while let Some((elem, depth)) = queue.pop_front() {
-        let mut child = unsafe { raw_walker.GetFirstChildElement(&elem).ok() };
+        let mut child = raw_walker.get_first_child(&elem).ok();
         while let Some(c) = child {
             // Check if this child matches the first step
             if element_matches_parsed_step(&c, &first_step_parsed) {
@@ -1453,7 +1441,7 @@ fn find_by_xpath_raw_descendants(
             if depth + 1 < max_depth {
                 queue.push_back((c.clone(), depth + 1));
             }
-            child = unsafe { raw_walker.GetNextSiblingElement(&c).ok() };
+            child = raw_walker.get_next_sibling(&c).ok();
         }
     }
 
@@ -1569,36 +1557,38 @@ fn find_by_xpath_raw_descendants(
 }
 
 fn find_by_xpath_detailed(
-    auto: &IUIAutomation,
-    root: &IUIAutomationElement,
+    auto: &UIAutomation,
+    root: &UIElement,
     xpath: &str,
     visibility_filter: Option<uiauto_xpath::xpath::VisibilityFilter>,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     find_by_xpath_detailed_impl(auto, root, xpath, visibility_filter, false)
 }
 
 fn find_by_xpath_detailed_strict(
-    auto: &IUIAutomation,
-    root: &IUIAutomationElement,
+    auto: &UIAutomation,
+    root: &UIElement,
     xpath: &str,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     find_by_xpath_detailed_impl(auto, root, xpath, None, true)
 }
 
 fn find_by_xpath_detailed_impl(
-    auto: &IUIAutomation,
-    root: &IUIAutomationElement,
+    auto: &UIAutomation,
+    root: &UIElement,
     xpath: &str,
     visibility_filter: Option<uiauto_xpath::xpath::VisibilityFilter>,
     strict: bool,
-) -> anyhow::Result<(Vec<IUIAutomationElement>, Vec<SegmentValidationResult>)> {
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     use std::time::Instant;
 
     let total_start = Instant::now();
     info!("[XPath Validation] Executing XPath with uiauto-xpath: {}", xpath);
 
     // Wrap the root element for uiauto-xpath
-    let uia_elem = UiaXPathElement::new(root.clone(), auto.clone());
+    // UiaXPathElement::new requires IUIAutomationElement and IUIAutomation (raw COM types)
+    // We extract them from the safe wrappers via Into trait
+    let uia_elem = UiaXPathElement::new(root.clone().into(), auto.clone().into());
 
     // Compile and execute XPath using uiauto-xpath library
     let compile_start = Instant::now();
@@ -1613,12 +1603,12 @@ fn find_by_xpath_detailed_impl(
 
     // Execute the query with optional visibility filter
     let execute_start = Instant::now();
-    let matches: Vec<IUIAutomationElement> = if strict {
+    let matches: Vec<UIElement> = if strict {
         // Strict ControlView mode: no RawViewWalker fallback
         match compiled_xpath.select_nodes_strict(&uia_elem) {
             Ok(nodes) => {
                 nodes.into_iter()
-                    .map(|n| n.raw_element().clone())
+                    .map(|n| UIElement::from(n.raw_element_clone()))
                     .collect()
             },
             Err(e) => {
@@ -1632,7 +1622,7 @@ fn find_by_xpath_detailed_impl(
                 match compiled_xpath.select_nodes_with_visibility(&uia_elem, filter) {
                     Ok(nodes) => {
                         nodes.into_iter()
-                            .map(|n| n.raw_element().clone())
+                            .map(|n| UIElement::from(n.raw_element_clone()))
                             .collect()
                     },
                     Err(e) => {
@@ -1645,7 +1635,7 @@ fn find_by_xpath_detailed_impl(
                 match compiled_xpath.select_nodes(&uia_elem) {
                     Ok(nodes) => {
                         nodes.into_iter()
-                            .map(|n| n.raw_element().clone())
+                            .map(|n| UIElement::from(n.raw_element_clone()))
                             .collect()
                     },
                     Err(e) => {
@@ -1703,7 +1693,7 @@ pub fn find_all_elements_detailed(
     window_selector: &str,
     element_xpath: &str,
     random_range: f32,
-) -> Vec<crate::api::types::ElementInfo> {
+) -> Vec<crate::core::model::ElementData> {
     let auto = match get_automation() {
         Ok(a) => a,
         Err(_) => return vec![],
@@ -1752,16 +1742,14 @@ pub fn find_all_elements_detailed(
                         continue;
                     }
                 }
-                let window_rect = unsafe {
-                    window.CurrentBoundingRectangle().ok().map(|r| {
-                        crate::core::model::Rect {
-                            x: r.left,
-                            y: r.top,
-                            width: r.right - r.left,
-                            height: r.bottom - r.top,
-                        }
-                    })
-                };
+                let window_rect = window.get_bounding_rectangle().ok().map(|r| {
+                    crate::core::model::Rect {
+                        x: r.get_left(),
+                        y: r.get_top(),
+                        width: r.get_right() - r.get_left(),
+                        height: r.get_bottom() - r.get_top(),
+                    }
+                });
                 if let Some(info) = element_info_from_uia(window, window_rect.as_ref(), random_range, &mut rng) {
                     // Record Window fast path in cache
                     let _ = cache_store(element_xpath, window, CompiledStrategy::WindowFastPath, 0);
@@ -1782,27 +1770,28 @@ pub fn find_all_elements_detailed(
     if is_child_mode {
         log::info!("[Find All] Child mode detected, searching via EnumChildWindows: xpath='{}'", element_xpath_stripped);
         for window in &windows {
-            let hwnd = match unsafe { window.CurrentNativeWindowHandle() } {
-                Ok(h) => HWND(h.0),
+            let hwnd = match window.get_native_window_handle() {
+                Ok(h) => {
+                    let raw: windows::Win32::Foundation::HANDLE = h.into();
+                    HWND(raw.0)
+                },
                 Err(_) => continue,
             };
             let child_hwnds = enum_child_hwnds(hwnd);
             log::info!("[Find All] Child mode: {} child HWNDs for window", child_hwnds.len());
 
             // Get window rect for coordinate computation
-            let window_rect = unsafe {
-                window.CurrentBoundingRectangle().ok().map(|r| {
-                    crate::core::model::Rect {
-                        x: r.left,
-                        y: r.top,
-                        width: r.right - r.left,
-                        height: r.bottom - r.top,
-                    }
-                })
-            };
+            let window_rect = window.get_bounding_rectangle().ok().map(|r| {
+                crate::core::model::Rect {
+                    x: r.get_left(),
+                    y: r.get_top(),
+                    width: r.get_right() - r.get_left(),
+                    height: r.get_bottom() - r.get_top(),
+                }
+            });
 
             for child_hwnd in &child_hwnds {
-                let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                let child_elem = match auto.element_from_handle((*child_hwnd).into()) {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
@@ -1841,7 +1830,7 @@ pub fn find_all_elements_detailed(
         
         // Skip WebView-class windows for absolute XPath — their children live under child HWNDs
         if is_absolute_xpath {
-            let win_class = get_bstr(unsafe { window.CurrentClassName() });
+            let win_class = window.get_classname().unwrap_or_default();
             if is_webview_class(&win_class) {
                 log::info!("[Find All] Skipping WebView window '{}' for absolute XPath (children under child HWNDs)", win_class);
                 continue;
@@ -1849,17 +1838,15 @@ pub fn find_all_elements_detailed(
         }
         
         // 获取窗口矩形用于计算 visibleRect
-        let window_rect = unsafe {
-            window.CurrentBoundingRectangle().ok().map(|r| {
-                crate::core::model::Rect {
-                    x: r.left,
-                    y: r.top,
-                    width: r.right - r.left,
-                    height: r.bottom - r.top,
-                }
-            })
-        };
-        
+        let window_rect = window.get_bounding_rectangle().ok().map(|r| {
+            crate::core::model::Rect {
+                x: r.get_left(),
+                y: r.get_top(),
+                width: r.get_right() - r.get_left(),
+                height: r.get_bottom() - r.get_top(),
+            }
+        });
+
         let (elements, _) = match find_by_xpath_with_fallback(&auto, window, element_xpath) {
             Ok(result) => result,
             Err(_) => continue,
@@ -1879,13 +1866,13 @@ pub fn find_all_elements_detailed(
 pub fn find_all_elements_from_root(
     element_xpath: &str,
     random_range: f32,
-) -> Vec<crate::api::types::ElementInfo> {
+) -> Vec<crate::core::model::ElementData> {
     let auto = match get_automation() {
         Ok(a) => a,
         Err(_) => return vec![],
     };
 
-    let desktop = match unsafe { auto.GetRootElement() } {
+    let desktop = match auto.get_root_element() {
         Ok(d) => d,
         Err(e) => {
             log::error!("[find_from_root] Failed to get root element: {:?}", e);
@@ -1910,16 +1897,14 @@ pub fn find_all_elements_from_root(
     log::info!("[find_from_root] Found {} elements", elements.len());
 
     // 获取 Desktop 矩形用于计算 visibleRect（Desktop 通常覆盖整个屏幕）
-    let desktop_rect = unsafe {
-        desktop.CurrentBoundingRectangle().ok().map(|r| {
-            crate::core::model::Rect {
-                x: r.left,
-                y: r.top,
-                width: r.right - r.left,
-                height: r.bottom - r.top,
-            }
-        })
-    };
+    let desktop_rect = desktop.get_bounding_rectangle().ok().map(|r| {
+        crate::core::model::Rect {
+            x: r.get_left(),
+            y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
+        }
+    });
 
     let mut rng = rand::thread_rng();
     elements.iter().filter_map(|elem| {
@@ -1928,45 +1913,45 @@ pub fn find_all_elements_from_root(
 }
 
 pub fn find_from_element_impl(
-    auto: &IUIAutomation,
-    base_elem: &IUIAutomationElement,
+    auto: &UIAutomation,
+    base_elem: &UIElement,
     xpath: &str,
     random_range: f32,
-) -> Vec<crate::api::types::ElementInfo> {
+) -> (Vec<crate::core::model::ElementData>, Vec<UIElement>) {
     log::info!("[find_from_element] Searching from element: xpath='{}'", xpath);
 
     // Get the base element's rect for visibleRect computation
-    let base_rect = unsafe {
-        base_elem.CurrentBoundingRectangle().ok().map(|r| {
-            crate::core::model::Rect {
-                x: r.left,
-                y: r.top,
-                width: r.right - r.left,
-                height: r.bottom - r.top,
-            }
-        })
-    };
+    let base_rect = base_elem.get_bounding_rectangle().ok().map(|r| {
+        crate::core::model::Rect {
+            x: r.get_left(),
+            y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
+        }
+    });
 
     // Execute XPath search from the base element
-    let (elements, _) = match find_by_xpath_detailed(auto, base_elem, xpath, None) {
+    let (raw_elements, _) = match find_by_xpath_detailed(auto, base_elem, xpath, None) {
         Ok(r) => r,
         Err(e) => {
             log::error!("[find_from_element] XPath search failed: {}", e);
-            return vec![];
+            return (vec![], vec![]);
         }
     };
 
-    if elements.is_empty() {
+    if raw_elements.is_empty() {
         log::info!("[find_from_element] No elements found");
-        return vec![];
+        return (vec![], vec![]);
     }
 
-    log::info!("[find_from_element] Found {} elements", elements.len());
+    log::info!("[find_from_element] Found {} elements", raw_elements.len());
 
     let mut rng = rand::thread_rng();
-    elements.iter().filter_map(|elem| {
+    let results: Vec<crate::core::model::ElementData> = raw_elements.iter().filter_map(|elem| {
         element_info_from_uia(elem, base_rect.as_ref(), random_range, &mut rng)
-    }).collect()
+    }).collect();
+
+    (results, raw_elements)
 }
 
 /// Find elements by XPath from a cached parent element (migrated from com_worker).
@@ -1977,7 +1962,7 @@ pub fn find_from_element_cached(
     runtime_id: &str,
     xpath: &str,
     random_range: f32,
-) -> Vec<crate::api::types::ElementInfo> {
+) -> Vec<crate::core::model::ElementData> {
     use crate::core::element_cache::{cache_element, get_cached_element};
 
     let auto = match get_automation() {
@@ -1985,25 +1970,20 @@ pub fn find_from_element_cached(
         Err(_) => return vec![],
     };
 
-    let base_elem: IUIAutomationElement = match get_cached_element(runtime_id) {
-        Some(e) => {
-            let raw: &IUIAutomationElement = e.as_ref();
-            raw.clone()
-        }
+    let base_elem: UIElement = match get_cached_element(runtime_id) {
+        Some(e) => e,
         None => {
             log::warn!("[find_from_element] Element not found in cache: runtime_id={}", runtime_id);
             return vec![];
         }
     };
 
-    let results = find_from_element_impl(&auto, &base_elem, xpath, random_range);
+    let (results, raw_elements) = find_from_element_impl(&auto, &base_elem, xpath, random_range);
 
-    // Cache found elements for subsequent lookups
-    if let Ok((raw_elements, _)) = find_by_xpath_detailed(&auto, &base_elem, xpath, None) {
-        for raw_elem in &raw_elements {
-            if let Some(rid_str) = runtime_id_key(raw_elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) {
-                cache_element(rid_str, uiautomation::core::UIElement::from(raw_elem.clone()));
-            }
+    // Cache found elements for subsequent lookups (single XPath execution)
+    for raw_elem in &raw_elements {
+        if let Some(rid_str) = runtime_id_key(raw_elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) {
+            cache_element(rid_str, raw_elem.clone());
         }
     }
 

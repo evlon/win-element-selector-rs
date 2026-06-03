@@ -80,7 +80,7 @@ mod windows_impl {
                 ShowWindow, PeekMessageW, TranslateMessage, DispatchMessageW,
                 HWND_TOPMOST, WM_DESTROY, WM_PAINT, WM_CLOSE, WNDCLASSEXW,
                 WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
-                WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
+                WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOW,
                 SetLayeredWindowAttributes, LWA_COLORKEY, GetClientRect,
                 PM_REMOVE, WM_QUIT, WS_EX_TOOLWINDOW,
             },
@@ -106,8 +106,54 @@ mod windows_impl {
     }
 
     pub fn update_highlight(info: &HighlightInfo) {
-        hide_internal();
+        let border_val = BORDER_HWND.load(Ordering::SeqCst);
+        let label_val = LABEL_HWND.load(Ordering::SeqCst);
 
+        // If both windows exist, try to move them instead of recreating.
+        // This is much faster (sub-millisecond) compared to destroy + create (~50-100ms).
+        if border_val != 0 && label_val != 0 {
+            let r = &info.rect;
+            let label = info.control_type_cn.clone();
+
+            // Update label text
+            LABEL_TEXT.with(|cell| *cell.borrow_mut() = label.clone());
+
+            // Move border window using SetWindowPos (no repaint needed — same style)
+            unsafe {
+                let _ = SetWindowPos(
+                    HWND(border_val as _),
+                    Some(HWND_TOPMOST),
+                    r.x, r.y,
+                    r.width, r.height,
+                    SWP_SHOWWINDOW,
+                );
+            }
+
+            // Move label window (position + size in one call)
+            let (label_width, label_height) = estimate_label_size(&label);
+            unsafe {
+                let _ = SetWindowPos(
+                    HWND(label_val as _),
+                    Some(HWND_TOPMOST),
+                    r.x, r.y - label_height,
+                    label_width, label_height,
+                    SWP_SHOWWINDOW,
+                );
+            }
+
+            // Force repaint on both windows
+            unsafe {
+                // InvalidateRect is in Win32::Graphics::Gdi
+                // For SetWindowPos with SWP_SHOWWINDOW, repaint should happen automatically.
+                // But we force it to ensure label text update is visible.
+                use windows::Win32::Graphics::Gdi::InvalidateRect;
+                let _ = InvalidateRect(Some(HWND(border_val as _)), None, true);
+                let _ = InvalidateRect(Some(HWND(label_val as _)), None, true);
+            }
+            return;
+        }
+
+        // No existing windows — fall back to create path
         let r = info.rect.clone();
         let label = info.control_type_cn.clone();
 

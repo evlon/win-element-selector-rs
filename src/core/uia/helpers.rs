@@ -1,4 +1,8 @@
 use super::*;
+use crate::core::model::{CaptureMode, CaptureResult, ElementRect, HierarchyNode, WalkerHint, WindowInfo};
+use uiauto_xpath::control_type_id_to_name;
+use uiautomation::types::Point as UiaPoint;
+use uiautomation::types::ControlType;
 
 pub(super) const WEBVIEW_CLASS_PREFIXES: &[&str] = &[
     "WRY_WEBVIEW",           // Tauri/WRY apps
@@ -71,7 +75,33 @@ pub(super) fn is_rendering_layer(class_name: &str) -> bool {
     RENDERING_LAYER_CLASSES.iter().any(|c| class_name == *c)
 }
 
-pub(super) fn point_in_rect(x: i32, y: i32, r: &RECT) -> bool {
+/// Simple rect for point-in-rect checks, decoupled from windows-rs RECT and uiautomation-rs Rect.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SimpleRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl SimpleRect {
+    pub fn width(&self) -> i32 { self.right - self.left }
+    pub fn height(&self) -> i32 { self.bottom - self.top }
+}
+
+impl From<&UiaRect> for SimpleRect {
+    fn from(r: &UiaRect) -> Self {
+        SimpleRect { left: r.get_left(), top: r.get_top(), right: r.get_right(), bottom: r.get_bottom() }
+    }
+}
+
+impl From<windows::Win32::Foundation::RECT> for SimpleRect {
+    fn from(r: windows::Win32::Foundation::RECT) -> Self {
+        SimpleRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+    }
+}
+
+pub(super) fn point_in_rect(x: i32, y: i32, r: &SimpleRect) -> bool {
     x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
 }
 
@@ -160,23 +190,22 @@ pub(super) fn compute_element_visible_rect(
 }
 
 pub(super) fn element_info_from_uia<R: rand::Rng>(
-    elem: &IUIAutomationElement,
+    elem: &UIElement,
     container_rect: Option<&crate::core::model::Rect>,
     random_range: f32,
     rng: &mut R,
-) -> Option<crate::api::types::ElementInfo> {
-    use crate::api::types::ElementInfo;
-    use crate::core::model::{Rect, Point};
+) -> Option<crate::core::model::ElementData> {
+    use crate::core::model::{Rect, Point, ElementData};
 
-    let r = match unsafe { elem.CurrentBoundingRectangle() } {
+    let uia_rect = match elem.get_bounding_rectangle() {
         Ok(r) => r,
         Err(_) => return None,
     };
     let api_rect = Rect {
-        x: r.left,
-        y: r.top,
-        width: r.right - r.left,
-        height: r.bottom - r.top,
+        x: uia_rect.get_left(),
+        y: uia_rect.get_top(),
+        width: uia_rect.get_right() - uia_rect.get_left(),
+        height: uia_rect.get_bottom() - uia_rect.get_top(),
     };
     let center = api_rect.center();
 
@@ -200,7 +229,7 @@ pub(super) fn element_info_from_uia<R: rand::Rng>(
     };
     let center_random = Point::new(center.x + offset_x, center.y + offset_y);
 
-    let is_offscreen = unsafe { elem.CurrentIsOffscreen().map(|b| b.as_bool()).unwrap_or(false) };
+    let is_offscreen = elem.is_offscreen().unwrap_or(false);
 
     // rect 始终保留：即使元素标记为 offscreen，坐标仍有效（如副屏负坐标场景）
     // center / center_random 仅在非 offscreen 时提供，避免误点击不可见元素
@@ -210,27 +239,27 @@ pub(super) fn element_info_from_uia<R: rand::Rng>(
         (Some(center), Some(center_random))
     };
 
-    Some(ElementInfo {
+    Some(ElementData {
         rect: Some(api_rect),
         visible_rect,
         center: center_opt,
         center_random: cr_opt,
-        control_type: unsafe { elem.CurrentControlType().map(control_type_name).unwrap_or_default() },
-        name: get_bstr(unsafe { elem.CurrentName() }),
-        automation_id: get_bstr(unsafe { elem.CurrentAutomationId() }),
-        class_name: get_bstr(unsafe { elem.CurrentClassName() }),
-        framework_id: get_bstr(unsafe { elem.CurrentFrameworkId() }),
-        help_text: get_bstr(unsafe { elem.CurrentHelpText() }),
-        localized_control_type: get_bstr(unsafe { elem.CurrentLocalizedControlType() }),
-        is_enabled: unsafe { elem.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true) },
+        control_type: elem.get_control_type_raw().map(control_type_name).unwrap_or_default(),
+        name: elem.get_name().unwrap_or_default(),
+        automation_id: elem.get_automation_id().unwrap_or_default(),
+        class_name: elem.get_classname().unwrap_or_default(),
+        framework_id: elem.get_framework_id().unwrap_or_default(),
+        help_text: elem.get_help_text().unwrap_or_default(),
+        localized_control_type: elem.get_localized_control_type().unwrap_or_default(),
+        is_enabled: elem.is_enabled().unwrap_or(true),
         is_offscreen,
-        is_password: unsafe { elem.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) },
-        accelerator_key: get_bstr(unsafe { elem.CurrentAcceleratorKey() }),
-        access_key: get_bstr(unsafe { elem.CurrentAccessKey() }),
-        item_type: get_bstr(unsafe { elem.CurrentItemType() }),
-        item_status: get_bstr(unsafe { elem.CurrentItemStatus() }),
-        process_id: unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 },
-        runtime_id: runtime_id_key(elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")),
+        is_password: elem.is_password().unwrap_or(false),
+        accelerator_key: elem.get_accelerator_key().unwrap_or_default(),
+        access_key: elem.get_access_key().unwrap_or_default(),
+        item_type: elem.get_item_type().unwrap_or_default(),
+        item_status: elem.get_item_status().unwrap_or_default(),
+        process_id: elem.get_process_id().unwrap_or(0),
+        runtime_id: elem.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")),
         is_checkable: None,
         is_checked: None,
         is_clickable: None,
@@ -239,16 +268,8 @@ pub(super) fn element_info_from_uia<R: rand::Rng>(
     })
 }
 
-pub(super) fn runtime_id_key(elem: &IUIAutomationElement) -> Option<Vec<i32>> {
-    unsafe {
-        let variant = elem.GetRuntimeId().ok()?;
-        let len = (*variant).rgsabound[0].cElements as usize;
-        let ptr = (*variant).pvData as *const i32;
-        if ptr.is_null() || len == 0 {
-            return None;
-        }
-        Some(std::slice::from_raw_parts(ptr, len).to_vec())
-    }
+pub(super) fn runtime_id_key(elem: &UIElement) -> Option<Vec<i32>> {
+    elem.get_runtime_id().ok()
 }
 
 pub enum ComApartmentType {
@@ -263,8 +284,8 @@ pub enum ComApartmentType {
 pub struct AutomationProvider;
 
 impl AutomationProvider {
-    /// 获取 IUIAutomation 实例，带健康检查
-    pub fn get_healthy() -> anyhow::Result<IUIAutomation> {
+    /// 获取 UIAutomation 实例，带健康检查
+    pub fn get_healthy() -> anyhow::Result<UIAutomation> {
         AUTOMATION.with(|cell| {
             let mut opt = cell.borrow_mut();
             
@@ -272,40 +293,36 @@ impl AutomationProvider {
             if let Some(ref auto) = *opt {
                 // 尝试一个简单的操作来验证实例是否仍然有效
                 if Self::validate_instance(auto) {
-                    log::debug!("Reusing existing IUIAutomation instance");
+                    log::debug!("Reusing existing UIAutomation instance");
                     return Ok(auto.clone());
                 } else {
-                    log::warn!("Existing IUIAutomation instance is invalid, recreating...");
+                    log::warn!("Existing UIAutomation instance is invalid, recreating...");
                     *opt = None;
                 }
             }
             
-            // 创建新实例
-            log::debug!("Creating new IUIAutomation instance");
-            let auto: IUIAutomation = unsafe {
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-            }
-            .map_err(|e| anyhow::anyhow!("CoCreateInstance IUIAutomation: {e}"))?;
+            // 创建新实例（使用 new_direct，因为 MTA 已在 uia_context 中初始化）
+            log::debug!("Creating new UIAutomation instance");
+            let auto = UIAutomation::new_direct()
+                .map_err(|e| anyhow::anyhow!("UIAutomation::new_direct: {e}"))?;
             
             *opt = Some(auto.clone());
             Ok(auto)
         })
     }
     
-    /// 验证 IUIAutomation 实例是否有效
-    fn validate_instance(auto: &IUIAutomation) -> bool {
+    /// 验证 UIAutomation 实例是否有效
+    fn validate_instance(auto: &UIAutomation) -> bool {
         use std::time::Instant;
         
         // 尝试获取根元素作为健康检查，并设置超时
         let start = Instant::now();
-        let result = unsafe {
-            auto.GetRootElement()
-        };
+        let result = auto.get_root_element();
         let elapsed = start.elapsed();
         
         // 如果操作超过 100ms，认为 COM 对象已经失效
         if elapsed.as_millis() > 100 {
-            log::warn!("IUIAutomation health check took {}ms (too slow, likely stale)", 
+            log::warn!("UIAutomation health check took {}ms (too slow, likely stale)", 
                       elapsed.as_millis());
             return false;
         }
@@ -313,22 +330,22 @@ impl AutomationProvider {
         result.is_ok()
     }
     
-    /// 强制重置 IUIAutomation 实例
+    /// 强制重置 UIAutomation 实例
     pub fn force_reset() {
         AUTOMATION.with(|cell| {
             let mut opt = cell.borrow_mut();
             *opt = None;
-            log::debug!("IUIAutomation instance reset");
+            log::debug!("UIAutomation instance reset");
         });
     }
 }
 
 thread_local! {
-    static AUTOMATION: std::cell::RefCell<Option<IUIAutomation>> =
+    static AUTOMATION: std::cell::RefCell<Option<UIAutomation>> =
         std::cell::RefCell::new(None);
 }
 
-pub(super) fn get_automation() -> anyhow::Result<IUIAutomation> {
+pub fn get_automation() -> anyhow::Result<UIAutomation> {
     AutomationProvider::get_healthy()
 }
 
@@ -341,16 +358,16 @@ pub fn get_element_rect_at_point(x: i32, y: i32) -> Option<crate::core::model::E
         Ok(a) => a,
         Err(_) => return None,
     };
-    let pt = windows::Win32::Foundation::POINT { x, y };
-    let element: IUIAutomationElement = unsafe {
-        match auto.ElementFromPoint(pt) {
-            Ok(e) => e,
-            Err(_) => return None,
-        }
+    let point = UiaPoint::new(x, y);
+    let element = match auto.element_from_point(point) {
+        Ok(e) => e,
+        Err(_) => return None,
     };
-    match unsafe { element.CurrentBoundingRectangle() } {
+    match element.get_bounding_rectangle() {
         Ok(r) => Some(crate::core::model::ElementRect {
-            x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top,
+            x: r.get_left(), y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
         }),
         Err(_) => None,
     }
@@ -370,7 +387,7 @@ pub fn capture_at_cursor() -> CaptureResult {
         }
         p
     };
-    capture_at_point(pt.x, pt.y)
+    crate::core::uia::capture_at_point(pt.x, pt.y)
 }
 
 pub(super) fn get_process_name_by_id(process_id: u32) -> String {
@@ -451,51 +468,37 @@ pub(super) fn is_control_type_clickable(control_type: &str) -> bool {
 }
 
 pub(super) fn element_to_node(
-    elem: &IUIAutomationElement,
-    _auto: &IUIAutomation,
+    elem: &UIElement,
+    _auto: &UIAutomation,
 ) -> Option<HierarchyNode> {
-    let control_type = unsafe {
-        elem.CurrentControlType()
-            .map(control_type_name)
-            .unwrap_or_default()
-    };
+    let control_type = elem.get_control_type_raw()
+        .map(control_type_name)
+        .unwrap_or_default();
 
-    let automation_id = get_bstr(unsafe { elem.CurrentAutomationId() });
-    let class_name    = get_bstr(unsafe { elem.CurrentClassName() });
-    let name          = get_bstr(unsafe { elem.CurrentName() });
-    let process_id    = unsafe { elem.CurrentProcessId().unwrap_or(0) as u32 };
+    let automation_id = elem.get_automation_id().unwrap_or_default();
+    let class_name    = elem.get_classname().unwrap_or_default();
+    let name          = elem.get_name().unwrap_or_default();
+    let process_id    = elem.get_process_id().unwrap_or(0);
     
     // Extract extended properties
-    let framework_id = get_bstr(unsafe { elem.CurrentFrameworkId() });
-    let help_text = get_bstr(unsafe { elem.CurrentHelpText() });
-    let localized_control_type = get_bstr(unsafe { elem.CurrentLocalizedControlType() });
-    let is_enabled = match unsafe { elem.CurrentIsEnabled() } {
-        Ok(val) => val.as_bool(),
-        Err(_) => true,
-    };
-    let is_offscreen = match unsafe { elem.CurrentIsOffscreen() } {
-        Ok(val) => val.as_bool(),
-        Err(_) => false,
-    };
-    let is_password = match unsafe { elem.CurrentIsPassword() } {
-        Ok(val) => val.as_bool(),
-        Err(_) => false,
-    };
+    let framework_id = elem.get_framework_id().unwrap_or_default();
+    let help_text = elem.get_help_text().unwrap_or_default();
+    let localized_control_type = elem.get_localized_control_type().unwrap_or_default();
+    let is_enabled = elem.is_enabled().unwrap_or(true);
+    let is_offscreen = elem.is_offscreen().unwrap_or(false);
+    let is_password = elem.is_password().unwrap_or(false);
     
     // AccRole is deprecated in UIA, use ControlType instead
-    // But we can still extract it if needed from LegacyIAccessible pattern
     let acc_role = String::new();
 
-    let rect = unsafe {
-        elem.CurrentBoundingRectangle()
-            .map(|r| ElementRect {
-                x:      r.left,
-                y:      r.top,
-                width:  r.right  - r.left,
-                height: r.bottom - r.top,
-            })
-            .unwrap_or_default()
-    };
+    let rect = elem.get_bounding_rectangle()
+        .map(|r| ElementRect {
+            x:      r.get_left(),
+            y:      r.get_top(),
+            width:  r.get_right()  - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
+        })
+        .unwrap_or_default();
 
     debug!(
         "element: type={control_type} aid={automation_id} \
@@ -516,56 +519,39 @@ pub(super) fn element_to_node(
     node.is_enabled = is_enabled;
     node.is_offscreen = is_offscreen;
     node.is_password = is_password;
-    node.accelerator_key = get_bstr(unsafe { elem.CurrentAcceleratorKey() });
-    node.access_key = get_bstr(unsafe { elem.CurrentAccessKey() });
-    node.item_type = get_bstr(unsafe { elem.CurrentItemType() });
-    node.item_status = get_bstr(unsafe { elem.CurrentItemStatus() });
+    node.accelerator_key = elem.get_accelerator_key().unwrap_or_default();
+    node.access_key = elem.get_access_key().unwrap_or_default();
+    node.item_type = elem.get_item_type().unwrap_or_default();
+    node.item_status = elem.get_item_status().unwrap_or_default();
 
     // ─── UIA Pattern detection ───────────────────────────────────────────
-    use windows::Win32::UI::Accessibility::{
-        UIA_TogglePatternId, UIA_InvokePatternId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
-    };
-    let has_toggle = unsafe {
-        elem.GetCurrentPattern(UIA_TogglePatternId).is_ok()
-    };
-    let has_invoke = unsafe {
-        elem.GetCurrentPattern(UIA_InvokePatternId).is_ok()
-    };
-    let has_scroll = unsafe {
-        elem.GetCurrentPattern(UIA_ScrollPatternId).is_ok()
-    };
-    let has_selection_item = unsafe {
-        elem.GetCurrentPattern(UIA_SelectionItemPatternId).is_ok()
-    };
+    {
+        use uiautomation::patterns::{UITogglePattern, UISelectionItemPattern, UIInvokePattern, UIScrollPattern};
+        
+        let has_toggle = elem.get_pattern::<UITogglePattern>().is_ok();
+        let has_invoke = elem.get_pattern::<UIInvokePattern>().is_ok();
+        let has_scroll = elem.get_pattern::<UIScrollPattern>().is_ok();
+        let has_selection_item = elem.get_pattern::<UISelectionItemPattern>().is_ok();
 
-    node.is_checkable = has_toggle;
-    node.is_clickable = has_invoke || is_control_type_clickable(&control_type);
-    node.is_scrollable = has_scroll;
+        node.is_checkable = has_toggle;
+        node.is_clickable = has_invoke || is_control_type_clickable(&control_type);
+        node.is_scrollable = has_scroll;
 
-    // Read ToggleState if checkable
-    if has_toggle {
-        if let Ok(pattern) = unsafe {
-            elem.GetCurrentPattern(UIA_TogglePatternId)
-        } {
-            use windows::Win32::UI::Accessibility::IToggleProvider;
-            if let Ok(toggle) = pattern.cast::<IToggleProvider>() {
-                if let Ok(state) = unsafe { toggle.ToggleState() } {
+        // Read ToggleState if checkable
+        if has_toggle {
+            if let Ok(toggle) = elem.get_pattern::<UITogglePattern>() {
+                if let Ok(state) = toggle.get_toggle_state() {
                     // ToggleState_Off = 0, ToggleState_On = 1, ToggleState_Indeterminate = 2
-                    node.is_checked = Some(state.0 == 1);
+                    node.is_checked = Some(matches!(state, uiautomation::types::ToggleState::On));
                 }
             }
         }
-    }
 
-    // Read SelectionItem IsSelected if available
-    if has_selection_item {
-        if let Ok(pattern) = unsafe {
-            elem.GetCurrentPattern(UIA_SelectionItemPatternId)
-        } {
-            use windows::Win32::UI::Accessibility::ISelectionItemProvider;
-            if let Ok(sel) = pattern.cast::<ISelectionItemProvider>() {
-                if let Ok(selected) = unsafe { sel.IsSelected() } {
-                    node.is_selected = Some(selected.as_bool());
+        // Read SelectionItem IsSelected if available
+        if has_selection_item {
+            if let Ok(sel) = elem.get_pattern::<UISelectionItemPattern>() {
+                if let Ok(selected) = sel.is_selected() {
+                    node.is_selected = Some(selected);
                 }
             }
         }
@@ -578,27 +564,24 @@ pub(super) fn element_to_node(
 }
 
 pub(super) fn sibling_index(
-    target: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
+    target: &UIElement,
+    walker: &UITreeWalker,
 ) -> Option<i32> {
-    let parent = unsafe { walker.GetParentElement(target).ok()? };
-    let mut child = unsafe { walker.GetFirstChildElement(&parent).ok()? };
-    let target_ct = unsafe { target.CurrentControlType().ok()? };
+    let parent = walker.get_parent(target).ok()?;
+    let mut child = walker.get_first_child(&parent).ok()?;
+    let target_ct = target.get_control_type_raw().ok()?;
 
     let mut idx = 0i32;
     loop {
-        let ct = unsafe { child.CurrentControlType().ok()? };
+        let ct = child.get_control_type_raw().ok()?;
         if ct == target_ct {
             idx += 1;
         }
-        // Compare by RuntimeId.
-        let same = unsafe {
-            let aid_child  = child.CurrentAutomationId().unwrap_or_default();
-            let aid_target = target.CurrentAutomationId().unwrap_or_default();
-            aid_child == aid_target
-        };
-        if same { return Some(idx); }
-        match unsafe { walker.GetNextSiblingElement(&child) } {
+        // Compare by AutomationId (same logic as before)
+        let aid_child = child.get_automation_id().unwrap_or_default();
+        let aid_target = target.get_automation_id().unwrap_or_default();
+        if aid_child == aid_target { return Some(idx); }
+        match walker.get_next_sibling(&child) {
             Ok(next) => child = next,
             Err(_)   => break,
         }
@@ -607,20 +590,20 @@ pub(super) fn sibling_index(
 }
 
 pub(super) fn count_siblings(
-    target: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
+    target: &UIElement,
+    walker: &UITreeWalker,
 ) -> Option<i32> {
-    let parent = unsafe { walker.GetParentElement(target).ok()? };
-    let mut child = unsafe { walker.GetFirstChildElement(&parent).ok()? };
-    let target_ct = unsafe { target.CurrentControlType().ok()? };
+    let parent = walker.get_parent(target).ok()?;
+    let mut child = walker.get_first_child(&parent).ok()?;
+    let target_ct = target.get_control_type_raw().ok()?;
 
     let mut count = 0i32;
     loop {
-        let ct = unsafe { child.CurrentControlType().ok()? };
+        let ct = child.get_control_type_raw().ok()?;
         if ct == target_ct {
             count += 1;
         }
-        match unsafe { walker.GetNextSiblingElement(&child) } {
+        match walker.get_next_sibling(&child) {
             Ok(next) => child = next,
             Err(_)   => break,
         }
@@ -628,17 +611,13 @@ pub(super) fn count_siblings(
     Some(count)
 }
 
-pub(super) fn get_bstr<T: Into<BSTR>>(r: windows::core::Result<T>) -> String {
-    r.ok()
-        .map(|b| {
-            let bstr: BSTR = b.into();
-            bstr.to_string()
-        })
-        .unwrap_or_default()
+pub(super) fn control_type_name(id: i32) -> String {
+    control_type_id_to_name(id).to_string()
 }
 
-pub(super) fn control_type_name(id: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> String {
-    control_type_id_to_name(id.0).to_string()
+/// Convert a uiautomation-rs ControlType to its string name
+pub(super) fn control_type_name_from_enum(ct: &ControlType) -> String {
+    control_type_id_to_name(*ct as i32).to_string()
 }
 
 pub fn enumerate_windows() -> Vec<WindowInfo> {
@@ -647,69 +626,48 @@ pub fn enumerate_windows() -> Vec<WindowInfo> {
         Err(_) => return vec![],
     };
 
-    let desktop = match unsafe { auto.GetRootElement() } {
+    let desktop = match auto.get_root_element() {
         Ok(d) => d,
         Err(_) => return vec![],
     };
 
-    use windows::Win32::UI::Accessibility::*;
-    let condition = match unsafe { auto.CreateTrueCondition() } {
+    let condition = match auto.create_true_condition() {
         Ok(c) => c,
         Err(_) => return vec![],
     };
 
-    let windows = match unsafe { desktop.FindAll(TreeScope_Descendants, &condition) } {
+    let windows = match desktop.find_all(uiautomation::types::TreeScope::Descendants, &condition) {
         Ok(w) => w,
         Err(_) => return vec![],
     };
 
-    let count = match unsafe { windows.Length() } {
-        Ok(c) => {
-            debug!("enumerate_windows: found {} total elements (TreeScope_Descendants)", c);
-            c
-        },
-        Err(_) => return vec![],
-    };
+    debug!("enumerate_windows: found {} total elements (TreeScope_Descendants)", windows.len());
 
     let mut window_list = Vec::new();
-    for i in 0..count {
-        let win = match unsafe { windows.GetElement(i) } {
-            Ok(w) => w,
-            Err(_) => continue,
-        };
-
-        let ct = unsafe {
-            win.CurrentControlType()
-                .map(control_type_name)
-                .unwrap_or_default()
-        };
+    for win in &windows {
+        let ct = win.get_control_type_raw()
+            .map(|id| control_type_name(id))
+            .unwrap_or_default();
 
         // 支持多种窗口类型：Window, Pane, Application
-        // 这些都可能是应用的主窗口
         let valid_window_types = ["Window", "Pane", "Application"];
         
         if valid_window_types.contains(&ct.as_str()) {
-            let title = get_bstr(unsafe { win.CurrentName() });
-            let class = get_bstr(unsafe { win.CurrentClassName() });
-            let pid = unsafe { win.CurrentProcessId().ok() }.unwrap_or(0) as u32;
+            let title = win.get_name().unwrap_or_default();
+            let class = win.get_classname().unwrap_or_default();
+            let pid = win.get_process_id().unwrap_or(0);
 
             // Only include windows with non-empty title
             if !title.is_empty() {
                 // Get window rect for size checking
-                let rect = unsafe {
-                    win.CurrentBoundingRectangle()
-                        .map(|r| (r.right - r.left, r.bottom - r.top))
-                        .unwrap_or((0, 0))
-                };
-                // Feature-based filtering (instead of hardcoded class names)
-                // Feature 1: Size check - skip small windows (tooltips, menus)
+                let rect = win.get_bounding_rectangle()
+                    .map(|r| (r.get_right() - r.get_left(), r.get_bottom() - r.get_top()))
+                    .unwrap_or((0, 0));
+                // Feature-based filtering
                 if rect.0 < 100 || rect.1 < 100 {
                     continue;
                 }
                 
-                // Feature 2: Check if it's a shell system window
-                // Pattern: class name starts with "Shell" (Shell_TrayWnd, ShellTabWindowClass, etc.)
-                // or equals Progman/WorkerW (desktop components)
                 let is_shell_window = class.starts_with("Shell") 
                     || class == "Progman" 
                     || class == "WorkerW";
@@ -717,14 +675,6 @@ pub fn enumerate_windows() -> Vec<WindowInfo> {
                     continue;
                 }
                 
-                // Feature 3: Check if it's a UI sub-component
-                // Pattern: class name contains common sub-control keywords
-                // - Host (ProperTreeHost, etc.)
-                // - View (BrowserRootView, but not Chrome_WidgetWin which is main window)
-                // - List (DUIListView, etc.)
-                // - Tab (ShellTabWindowClass, tab controls)
-                // - Tip (TeachingTip, tooltips)
-                // - Starts with Windows.UI/Microsoft.UI (UWP system windows)
                 let is_sub_component = class.contains("Host") 
                     || (class.contains("View") && !class.contains("Chrome_WidgetWin"))
                     || class.contains("List") 
@@ -783,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_point_in_rect_basic() {
-        let rect = RECT { left: 100, top: 200, right: 300, bottom: 400 };
+        let rect = SimpleRect { left: 100, top: 200, right: 300, bottom: 400 };
         assert!(point_in_rect(100, 200, &rect), "top-left corner should be inclusive");
         assert!(point_in_rect(300, 400, &rect), "bottom-right corner should be inclusive");
         assert!(point_in_rect(200, 300, &rect), "center should be inside");
@@ -795,7 +745,7 @@ mod tests {
 
     #[test]
     fn test_point_in_rect_single_pixel() {
-        let rect = RECT { left: 50, top: 50, right: 50, bottom: 50 };
+        let rect = SimpleRect { left: 50, top: 50, right: 50, bottom: 50 };
         assert!(point_in_rect(50, 50, &rect), "single pixel point should match");
         assert!(!point_in_rect(49, 50, &rect));
         assert!(!point_in_rect(51, 50, &rect));
@@ -1235,8 +1185,8 @@ mod tests {
     /// WeChat scenario: Group (300x40) vs Text (300x20) at same point.
     #[test]
     fn test_wechat_scenario_group_vs_text() {
-        let group_rect = RECT { left: 400, top: 250, right: 700, bottom: 290 };
-        let text_rect = RECT { left: 400, top: 260, right: 700, bottom: 280 };
+        let group_rect = SimpleRect { left: 400, top: 250, right: 700, bottom: 290 };
+        let text_rect = SimpleRect { left: 400, top: 260, right: 700, bottom: 280 };
         assert!(point_in_rect(549, 269, &group_rect));
         assert!(point_in_rect(549, 269, &text_rect));
 

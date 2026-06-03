@@ -77,13 +77,13 @@ pub async fn get_element(
     match result {
         Ok(elements) => {
             let total = elements.len();
-            if let Some(element_info) = elements.into_iter().next() {
-                let center_pos = element_info.center
+            if let Some(element_data) = elements.into_iter().next() {
+                let center_pos = element_data.center
                     .map(|c| format!("({}, {})", c.x, c.y))
                     .unwrap_or_else(|| "N/A".to_string());
                 info!(
                     "Element found: type='{}' name='{}' center={} (total={})",
-                    element_info.control_type, element_info.name, center_pos, total
+                    element_data.control_type, element_data.name, center_pos, total
                 );
                 info!(
                     "[PERF][HTTP][{}] /api/element done status=ok found=true total={} duration_ms={}",
@@ -91,6 +91,7 @@ pub async fn get_element(
                     total,
                     request_start.elapsed().as_millis()
                 );
+                let element_info: super::types::ElementInfo = element_data.into();
                 HttpResponse::Ok().json(ElementResponse {
                     found: true,
                     element_selector: element_query.element.clone(),
@@ -186,9 +187,9 @@ pub async fn get_all_elements(
                 );
                 let elements_with_selector: Vec<ElementWithSelector> = elements
                     .into_iter()
-                    .map(|el_info| ElementWithSelector {
+                    .map(|el_data| ElementWithSelector {
                         element_selector: element_query.element.clone(),
-                        info: el_info,
+                        info: el_data.into(),
                     })
                     .collect();
                 HttpResponse::Ok().json(AllElementsResponse {
@@ -258,7 +259,20 @@ pub async fn get_element_visibility(body: web::Json<ElementVisibilityRequest>) -
     .await;
 
     match result {
-        Ok(response) => {
+        Ok(vis_result) => {
+            // Convert core::model::VisibilityResult → api::types::ElementVisibilityResponse
+            let response = ElementVisibilityResponse {
+                found: vis_result.found,
+                is_offscreen: vis_result.is_offscreen,
+                visibility: vis_result.visibility.clone(),
+                position: vis_result.position.clone(),
+                element_rect: vis_result.element_rect,
+                visible_rect: vis_result.visible_rect,
+                viewport_rect: vis_result.viewport_rect,
+                overflow: vis_result.overflow,
+                scroll_direction: vis_result.scroll_direction,
+                error: vis_result.error,
+            };
             info!(
                 "Element visibility: found={} visibility={} position={} scroll_direction={:?}",
                 response.found, response.visibility, response.position, response.scroll_direction
@@ -318,8 +332,8 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 
     match result {
         Ok(elements) => {
-            if let Some(element_info) = elements.into_iter().next() {
-                if let Some(rect) = &element_info.rect {
+            if let Some(element_data) = elements.into_iter().next() {
+                if let Some(rect) = &element_data.rect {
                     let model_rect = crate::core::model::ElementRect {
                         x: rect.x,
                         y: rect.y,
@@ -328,7 +342,7 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
                     };
                     let info = crate::core::model::HighlightInfo::new(
                         model_rect,
-                        &element_info.control_type,
+                        &element_data.control_type,
                     );
                     // 在独立线程中执行高亮闪烁
                     crate::highlight::flash_with_info(&info, timeout);
@@ -474,16 +488,17 @@ pub async fn navigate_element(body: web::Json<NavigateRequest>) -> impl Responde
     .await;
 
     match result {
-        Ok(Ok((Some(element_info), find_selector))) => {
+        Ok(Ok((Some(element_data), find_selector))) => {
             info!(
                 "Navigate succeeded: type='{}' name='{}'",
-                element_info.control_type, element_info.name
+                element_data.control_type, element_data.name
             );
             info!(
                 "[PERF][HTTP][{}] /api/element/navigate done status=ok found=true duration_ms={}",
                 request_id,
                 request_start.elapsed().as_millis()
             );
+            let element_info: super::types::ElementInfo = element_data.into();
             HttpResponse::Ok().json(NavigateResponse {
                 found: true,
                 find_selector,
@@ -613,8 +628,8 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
     .await;
 
     match result {
-        Ok(elements) => {
-            let total = elements.len();
+        Ok(element_data_list) => {
+            let total = element_data_list.len();
             info!(
                 "[PERF][HTTP][{}] /api/element/find-from done found={} total={} duration_ms={}",
                 request_id,
@@ -622,6 +637,7 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
                 total,
                 request_start.elapsed().as_millis()
             );
+            let elements: Vec<super::types::ElementInfo> = element_data_list.into_iter().map(Into::into).collect();
             HttpResponse::Ok().json(FindFromElementResponse {
                 found: total > 0,
                 elements,

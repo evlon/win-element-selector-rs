@@ -1208,6 +1208,57 @@ pub struct OverflowInfo {
     pub right: i32,
 }
 
+/// 元素可视性计算结果（core 层纯数据，无 serde）
+///
+/// 由 `compute_visibility` 返回，API 层负责转换为 `ElementVisibilityResponse`。
+/// 不依赖 api 层类型，解决 core→api 反向依赖。
+#[derive(Debug, Clone)]
+pub struct VisibilityResult {
+    pub found: bool,
+    pub is_offscreen: Option<bool>,
+    pub visibility: String,
+    pub position: String,
+    pub element_rect: Option<Rect>,
+    pub visible_rect: Option<Rect>,
+    pub viewport_rect: Option<Rect>,
+    pub overflow: Option<OverflowInfo>,
+    pub scroll_direction: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 元素数据（core 层，无 serde）
+///
+/// 由 `element_info_from_uia` 等函数返回，API 层负责转换为 `api::types::ElementInfo`。
+/// 与 `ElementInfo` 字段一一对应，但不含 serde 注解，解决 core→api 反向依赖。
+#[derive(Debug, Clone)]
+pub struct ElementData {
+    pub rect: Option<Rect>,
+    pub visible_rect: Option<Rect>,
+    pub center: Option<Point>,
+    pub center_random: Option<Point>,
+    pub control_type: String,
+    pub name: String,
+    pub automation_id: String,
+    pub class_name: String,
+    pub framework_id: String,
+    pub help_text: String,
+    pub localized_control_type: String,
+    pub is_enabled: bool,
+    pub is_offscreen: bool,
+    pub is_password: bool,
+    pub accelerator_key: String,
+    pub access_key: String,
+    pub item_type: String,
+    pub item_status: String,
+    pub process_id: u32,
+    pub runtime_id: Option<String>,
+    pub is_checkable: Option<bool>,
+    pub is_checked: Option<bool>,
+    pub is_clickable: Option<bool>,
+    pub is_scrollable: Option<bool>,
+    pub is_selected: Option<bool>,
+}
+
 /// 导航步骤类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

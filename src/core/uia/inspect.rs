@@ -1,74 +1,64 @@
 use super::*;
 
 pub fn extract_children_features(
-    automation: &IUIAutomation,
-    element: &IUIAutomationElement,
+    automation: &UIAutomation,
+    element: &UIElement,
     parent_rect: &RECT,
 ) -> Vec<crate::core::model::ChildFeature> {
-    use windows::Win32::UI::Accessibility::TreeScope_Children;
     use crate::core::model::{ChildFeature, RelativeRect};
     
     let mut features = vec![];
     
-    unsafe {
-        // 创建条件：获取所有子元素
-        let condition = match automation.CreateTrueCondition() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        
-        // 查找所有直接子元素
-        let children_array = match element.FindAll(TreeScope_Children, &condition) {
-            Ok(arr) => arr,
-            Err(_) => return vec![],
-        };
-        
-        let count = match children_array.Length() {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        
-        let parent_width = (parent_rect.right - parent_rect.left) as f32;
-        let parent_height = (parent_rect.bottom - parent_rect.top) as f32;
-        
-        if parent_width <= 0.0 || parent_height <= 0.0 {
-            return vec![];
-        }
-        
-        for i in 0..count {
-            if let Ok(child) = children_array.GetElement(i) {
-                // 获取子元素的 ControlType ID
-                if let Ok(control_type_id) = child.CurrentControlType() {
-                    let control_type = control_type_name(control_type_id);
-                    
-                    // 获取子元素的边界
-                    if let Ok(child_rect) = child.CurrentBoundingRectangle() {
-                        let child_width = (child_rect.right - child_rect.left) as f32;
-                        let child_height = (child_rect.bottom - child_rect.top) as f32;
-                        
-                        // 计算相对于父元素的归一化坐标
-                        let x_ratio = (child_rect.left - parent_rect.left) as f32 / parent_width;
-                        let y_ratio = (child_rect.top - parent_rect.top) as f32 / parent_height;
-                        let width_ratio = child_width / parent_width;
-                        let height_ratio = child_height / parent_height;
-                        
-                        // 限制在 [0, 1] 范围内
-                        let x_ratio = x_ratio.clamp(0.0, 1.0);
-                        let y_ratio = y_ratio.clamp(0.0, 1.0);
-                        let width_ratio = width_ratio.clamp(0.0, 1.0);
-                        let height_ratio = height_ratio.clamp(0.0, 1.0);
-                        
-                        features.push(ChildFeature {
-                            control_type,
-                            relative_bounds: RelativeRect {
-                                x_ratio,
-                                y_ratio,
-                                width_ratio,
-                                height_ratio,
-                            },
-                        });
-                    }
-                }
+    // 创建条件：获取所有子元素
+    let condition = match automation.create_true_condition() {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    
+    // 查找所有直接子元素
+    let children = match element.find_all(TreeScope::Children, &condition) {
+        Ok(arr) => arr,
+        Err(_) => return vec![],
+    };
+    
+    let parent_width = (parent_rect.right - parent_rect.left) as f32;
+    let parent_height = (parent_rect.bottom - parent_rect.top) as f32;
+    
+    if parent_width <= 0.0 || parent_height <= 0.0 {
+        return vec![];
+    }
+    
+    for child in &children {
+        // 获取子元素的 ControlType ID
+        if let Ok(control_type_id) = child.get_control_type_raw() {
+            let control_type = control_type_name(control_type_id);
+            
+            // 获取子元素的边界
+            if let Ok(child_rect) = child.get_bounding_rectangle() {
+                let child_width = (child_rect.get_right() - child_rect.get_left()) as f32;
+                let child_height = (child_rect.get_bottom() - child_rect.get_top()) as f32;
+                
+                // 计算相对于父元素的归一化坐标
+                let x_ratio = (child_rect.get_left() - parent_rect.left) as f32 / parent_width;
+                let y_ratio = (child_rect.get_top() - parent_rect.top) as f32 / parent_height;
+                let width_ratio = child_width / parent_width;
+                let height_ratio = child_height / parent_height;
+                
+                // 限制在 [0, 1] 范围内
+                let x_ratio = x_ratio.clamp(0.0, 1.0);
+                let y_ratio = y_ratio.clamp(0.0, 1.0);
+                let width_ratio = width_ratio.clamp(0.0, 1.0);
+                let height_ratio = height_ratio.clamp(0.0, 1.0);
+                
+                features.push(ChildFeature {
+                    control_type,
+                    relative_bounds: RelativeRect {
+                        x_ratio,
+                        y_ratio,
+                        width_ratio,
+                        height_ratio,
+                    },
+                });
             }
         }
     }
@@ -147,7 +137,7 @@ pub fn inspect_subtree(
                 flat_nodes: vec![],
                 text_output: None,
                 total_children: 0,
-                error: Some(format!("获取 IUIAutomation 实例失败: {}", e)),
+                error: Some(format!("获取 UIAutomation 实例失败: {}", e)),
             };
         }
     };
@@ -167,24 +157,26 @@ pub fn inspect_subtree(
     }
 
     // Step 2: 在窗口中查找目标元素
-    // 检测 child mode 前缀 ([fast-child] / [full-child])，目标在子 HWND (如 WebView/Chrome) 中
     let (capture_mode, _stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
     let is_child_mode = capture_mode.map_or(false, |m| m.is_child_mode());
 
-    let mut target_element: Option<IUIAutomationElement> = None;
+    let mut target_element: Option<UIElement> = None;
 
     if is_child_mode {
         log::info!("[inspect_subtree] Child mode detected, searching via EnumChildWindows");
         for window in &windows {
-            let hwnd = match unsafe { window.CurrentNativeWindowHandle() } {
-                Ok(h) => HWND(h.0),
+            let hwnd = match window.get_native_window_handle() {
+                Ok(h) => {
+                    let raw: windows::Win32::Foundation::HANDLE = h.into();
+                    HWND(raw.0)
+                }
                 Err(_) => continue,
             };
             let child_hwnds = enum_child_hwnds(hwnd);
             log::info!("[inspect_subtree] Child mode: {} child HWNDs for window", child_hwnds.len());
 
             for child_hwnd in &child_hwnds {
-                let child_elem = match unsafe { auto.ElementFromHandle(*child_hwnd) } {
+                let child_elem = match auto.element_from_handle((*child_hwnd).into()) {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
@@ -226,7 +218,7 @@ pub fn inspect_subtree(
     };
 
     // Step 3: 使用 RawViewWalker 递归遍历子树
-    let raw_walker = match unsafe { auto.RawViewWalker() } {
+    let raw_walker = match auto.get_raw_view_walker() {
         Ok(w) => w,
         Err(e) => {
             return InspectResult {
@@ -283,8 +275,8 @@ pub fn inspect_subtree(
 }
 
 fn build_inspect_node(
-    element: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
+    element: &UIElement,
+    walker: &UITreeWalker,
     depth: usize,
     max_depth: usize,
     max_nodes: usize,
@@ -294,27 +286,25 @@ fn build_inspect_node(
     *total_count += 1;
 
     // 提取元素属性
-    let control_type = unsafe { element.CurrentControlType() }
-        .map(|id| control_type_name(id))
+    let control_type = element.get_control_type_raw()
+        .map(control_type_name)
         .unwrap_or_default();
-    let name = get_bstr(unsafe { element.CurrentName() });
-    let class_name = get_bstr(unsafe { element.CurrentClassName() });
-    let automation_id = get_bstr(unsafe { element.CurrentAutomationId() });
-    let framework_id = get_bstr(unsafe { element.CurrentFrameworkId() });
-    let help_text = get_bstr(unsafe { element.CurrentHelpText() });
-    let item_type = get_bstr(unsafe { element.CurrentItemType() });
-    let item_status = get_bstr(unsafe { element.CurrentItemStatus() });
-    let is_offscreen = unsafe { element.CurrentIsOffscreen() }
-        .map(|b| b.as_bool())
-        .unwrap_or(false);
+    let name = element.get_name().unwrap_or_default();
+    let class_name = element.get_classname().unwrap_or_default();
+    let automation_id = element.get_automation_id().unwrap_or_default();
+    let framework_id = element.get_framework_id().unwrap_or_default();
+    let help_text = element.get_help_text().unwrap_or_default();
+    let item_type = element.get_item_type().unwrap_or_default();
+    let item_status = element.get_item_status().unwrap_or_default();
+    let is_offscreen = element.is_offscreen().unwrap_or(false);
 
     // 获取边界矩形
-    let rect = match unsafe { element.CurrentBoundingRectangle() } {
+    let rect = match element.get_bounding_rectangle() {
         Ok(r) => Some(crate::core::model::Rect {
-            x: r.left,
-            y: r.top,
-            width: r.right - r.left,
-            height: r.bottom - r.top,
+            x: r.get_left(),
+            y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
         }),
         Err(_) => None,
     };
@@ -335,13 +325,13 @@ fn build_inspect_node(
     let mut children = Vec::new();
     if depth < max_depth && *total_count < max_nodes {
         // 首先收集所有直接子元素，以便计算同类型兄弟索引
-        let child_elements: Vec<IUIAutomationElement> = {
+        let child_elements: Vec<UIElement> = {
             let mut kids = Vec::new();
-            let mut child = unsafe { walker.GetFirstChildElement(element).ok() };
+            let mut child = walker.get_first_child(element).ok();
             while let Some(c) = child {
                 let last = c.clone();
                 kids.push(c);
-                child = unsafe { walker.GetNextSiblingElement(&last).ok() };
+                child = walker.get_next_sibling(&last).ok();
             }
             kids
         };
@@ -349,8 +339,8 @@ fn build_inspect_node(
         // 按控件类型统计出现次数，用于构建带索引的 XPath
         let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for child_elem in &child_elements {
-            let ct = unsafe { child_elem.CurrentControlType() }
-                .map(|id| control_type_name(id))
+            let ct = child_elem.get_control_type_raw()
+                .map(control_type_name)
                 .unwrap_or_default();
             let idx = type_counts.entry(ct.clone()).or_insert(0);
             *idx += 1;
@@ -363,8 +353,8 @@ fn build_inspect_node(
             if *total_count >= max_nodes {
                 break;
             }
-            let ct = unsafe { child_elem.CurrentControlType() }
-                .map(|id| control_type_name(id))
+            let ct = child_elem.get_control_type_raw()
+                .map(control_type_name)
                 .unwrap_or_default();
 
             let seen = type_seen.entry(ct.clone()).or_insert(0);
@@ -414,8 +404,8 @@ fn build_inspect_node(
 }
 
 fn build_inspect_node_inner(
-    element: &IUIAutomationElement,
-    walker: &IUIAutomationTreeWalker,
+    element: &UIElement,
+    walker: &UITreeWalker,
     depth: usize,
     max_depth: usize,
     max_nodes: usize,
@@ -427,26 +417,24 @@ fn build_inspect_node_inner(
 ) -> InspectNode {
     *total_count += 1;
 
-    let control_type = unsafe { element.CurrentControlType() }
-        .map(|id| control_type_name(id))
+    let control_type = element.get_control_type_raw()
+        .map(control_type_name)
         .unwrap_or_default();
-    let name = get_bstr(unsafe { element.CurrentName() });
-    let class_name = get_bstr(unsafe { element.CurrentClassName() });
-    let automation_id = get_bstr(unsafe { element.CurrentAutomationId() });
-    let framework_id = get_bstr(unsafe { element.CurrentFrameworkId() });
-    let help_text = get_bstr(unsafe { element.CurrentHelpText() });
-    let item_type = get_bstr(unsafe { element.CurrentItemType() });
-    let item_status = get_bstr(unsafe { element.CurrentItemStatus() });
-    let is_offscreen = unsafe { element.CurrentIsOffscreen() }
-        .map(|b| b.as_bool())
-        .unwrap_or(false);
+    let name = element.get_name().unwrap_or_default();
+    let class_name = element.get_classname().unwrap_or_default();
+    let automation_id = element.get_automation_id().unwrap_or_default();
+    let framework_id = element.get_framework_id().unwrap_or_default();
+    let help_text = element.get_help_text().unwrap_or_default();
+    let item_type = element.get_item_type().unwrap_or_default();
+    let item_status = element.get_item_status().unwrap_or_default();
+    let is_offscreen = element.is_offscreen().unwrap_or(false);
 
-    let rect = match unsafe { element.CurrentBoundingRectangle() } {
+    let rect = match element.get_bounding_rectangle() {
         Ok(r) => Some(crate::core::model::Rect {
-            x: r.left,
-            y: r.top,
-            width: r.right - r.left,
-            height: r.bottom - r.top,
+            x: r.get_left(),
+            y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
         }),
         Err(_) => None,
     };
@@ -456,24 +444,24 @@ fn build_inspect_node_inner(
     // 递归遍历子元素
     let mut children = Vec::new();
     if depth < max_depth && *total_count < max_nodes {
-        let child_elements: Vec<IUIAutomationElement> = {
+        let child_elements: Vec<UIElement> = {
             let mut kids = Vec::new();
-            let mut child = unsafe { walker.GetFirstChildElement(element).ok() };
+            let mut child = walker.get_first_child(element).ok();
             while let Some(c) = child {
                 let last = c.clone();
                 kids.push(c);
                 if kids.len() >= max_nodes {
                     break;
                 }
-                child = unsafe { walker.GetNextSiblingElement(&last).ok() };
+                child = walker.get_next_sibling(&last).ok();
             }
             kids
         };
 
         let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for child_elem in &child_elements {
-            let ct = unsafe { child_elem.CurrentControlType() }
-                .map(|id| control_type_name(id))
+            let ct = child_elem.get_control_type_raw()
+                .map(control_type_name)
                 .unwrap_or_default();
             let idx = type_counts.entry(ct.clone()).or_insert(0);
             *idx += 1;
@@ -485,8 +473,8 @@ fn build_inspect_node_inner(
             if *total_count >= max_nodes {
                 break;
             }
-            let ct = unsafe { child_elem.CurrentControlType() }
-                .map(|id| control_type_name(id))
+            let ct = child_elem.get_control_type_raw()
+                .map(control_type_name)
                 .unwrap_or_default();
 
             let seen = type_seen.entry(ct.clone()).or_insert(0);
@@ -534,15 +522,12 @@ fn build_inspect_node_inner(
     }
 }
 
-fn get_value_pattern_text(element: &IUIAutomationElement) -> Option<String> {
-    use windows::Win32::UI::Accessibility::{UIA_ValuePatternId, IValueProvider};
+fn get_value_pattern_text(element: &UIElement) -> Option<String> {
+    use uiautomation::patterns::UIValuePattern;
 
-    let pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }.ok()?;
-    let value_provider: IValueProvider = pattern.cast().ok()?;
-    let value = unsafe { value_provider.Value() }.ok()?;
-    let bstr: BSTR = value.into();
-    let s = bstr.to_string();
-    if s.is_empty() { None } else { Some(s) }
+    let value_pattern = element.get_pattern::<UIValuePattern>().ok()?;
+    let value = value_pattern.get_value().ok()?;
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn format_inspect_tree(node: &InspectNode, indent: usize) -> String {
@@ -623,4 +608,3 @@ fn flatten_inspect_node_recursive(node: &InspectNode, result: &mut Vec<InspectNo
         flatten_inspect_node_recursive(child, result);
     }
 }
-

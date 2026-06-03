@@ -28,7 +28,7 @@ use element_selector::core::model::{
 };
 use element_selector::core::xpath;
 use element_selector::core::{XPathOptimizer, OptimizationResult};
-use element_selector::core::uia as capture;
+use element_selector::core::uia;
 
 use super::highlight;
 use super::multi_highlight::MultiHighlightManager;
@@ -51,6 +51,7 @@ pub enum Message {
     CaptureMenuToggled,
     CaptureMenuDismissed,
     CancelCapture,
+    CancelValidation,
     CompleteCapture,
     EscapePressed,
     LogPanelToggled,
@@ -377,7 +378,7 @@ impl State {
     }
 
     fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String, String, String, Option<WindowInfo>, XPathSource, Vec<bool>, CaptureMode, String) {
-        let result = capture::mock();
+        let result = uia::mock();
         let window_info = result.window_info.clone();
         let xpath_result = xpath::generate(&result.hierarchy, window_info.as_ref(), CaptureMode::Fast);
         let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
@@ -758,6 +759,13 @@ impl State {
     }
 
     fn do_validate(&mut self) {
+        // 如果已有校验在运行，先取消
+        if self.validation_in_progress.load(Ordering::SeqCst) {
+            self.validation_in_progress.store(false, Ordering::SeqCst);
+            self.validation_rx = None;
+            log::info!("[Validation] Cancelling previous validation before starting new one");
+        }
+
         // 清除旧的高亮
         if let Some(ref mut manager) = self.multi_highlight_manager {
             manager.clear();
@@ -780,12 +788,23 @@ impl State {
         self.validation_start_time = Some(Instant::now());
         in_progress.store(true, Ordering::SeqCst);
         std::thread::spawn(move || {
-            let result = capture::validate_selector_and_xpath_detailed(
+            let result = uia::validate_selector_and_xpath_detailed(
                 &window_selector, &element_xpath, &hierarchy,
             );
             let _ = tx.send(Some(result));
             in_progress.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// 取消正在进行的校验
+    fn cancel_validation(&mut self) {
+        self.validation_in_progress.store(false, Ordering::SeqCst);
+        // 丢弃接收器，使校验线程的结果被忽略
+        self.validation_rx = None;
+        self.validation_start_time = None;
+        self.validation = ValidationResult::Idle;
+        self.status_msg = String::from("已取消校验");
+        log::info!("[Validation] Cancelled by user");
     }
 
     fn do_optimize(&mut self) {
@@ -879,8 +898,8 @@ impl State {
             cached
         } else {
             match self.capture_mode {
-                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at_point(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at_point(x, y),
+                CaptureMode::Fast | CaptureMode::FastChild => uia::capture_at_point(x, y),
+                CaptureMode::Full | CaptureMode::FullChild => uia::capture_enhanced_at_point(x, y),
             }
         };
 
@@ -988,8 +1007,8 @@ impl State {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = match mode {
-                CaptureMode::Fast | CaptureMode::FastChild => capture::capture_at_point(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => capture::capture_enhanced_at_point(x, y),
+                CaptureMode::Fast | CaptureMode::FastChild => uia::capture_at_point(x, y),
+                CaptureMode::Full | CaptureMode::FullChild => uia::capture_enhanced_at_point(x, y),
             };
             let _ = tx.send((x, y, result));
         });
@@ -1113,7 +1132,8 @@ impl State {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let results = capture::find_all_elements_from_root(&xpath, 5.0);
+            let results = uia::find_all_elements_from_root(&xpath, 5.0);
+            let results: Vec<element_selector::api::types::ElementInfo> = results.into_iter().map(Into::into).collect();
             let _ = tx.send((seq, results));
             in_progress.store(false, Ordering::SeqCst);
         });
@@ -1236,7 +1256,10 @@ impl State {
 
         if let Some(rx) = self.validation_rx.take() {
             if let Ok(result_opt) = rx.try_recv() {
-                if let Some(start_time) = self.validation_start_time.take() {
+                // 如果已被取消（validation_in_progress == false 且状态不是 Running），忽略结果
+                if !self.validation_in_progress.load(Ordering::SeqCst) && !matches!(self.validation, ValidationResult::Running) {
+                    log::info!("[Validation] Ignoring result from cancelled validation");
+                } else if let Some(start_time) = self.validation_start_time.take() {
                     let elapsed = start_time.elapsed();
                     match result_opt {
                         Some(detailed_result) => {
@@ -1385,7 +1408,10 @@ impl State {
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::ValidatePressed => {
-            if let ValidationResult::Found { count, .. } = state.validation {
+            if matches!(state.validation, ValidationResult::Running) {
+                // 正在校验中 → 取消
+                state.cancel_validation();
+            } else if let ValidationResult::Found { count, .. } = state.validation {
                 if count > 0 {
                     // 清除高亮，恢复按钮
                     if let Some(ref mut manager) = state.multi_highlight_manager {
@@ -1398,6 +1424,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
             } else {
                 state.do_validate();
+            }
+        }
+        Message::CancelValidation => {
+            if matches!(state.validation, ValidationResult::Running) {
+                state.cancel_validation();
             }
         }
         Message::CapturePressed => {
@@ -1752,9 +1783,17 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 let has_pending = state.pending_highlight_rx.is_some();
 
-                if stable_for >= 300 {
+                // Debounce: wait for mouse to stabilize before querying.
+                // Short stable threshold (80ms) for responsive feel.
+                // If no highlight is currently visible, use even shorter threshold (30ms)
+                // to show something as quickly as possible.
+                let has_highlight = state.cached_hover_result.is_some()
+                    && state.last_highlighted_element_id.is_some();
+                let stable_threshold = if has_highlight { 80 } else { 30 };
+
+                if stable_for >= stable_threshold {
                     let should_throttle = if let Some(last_t) = state.last_highlight_time {
-                        now_ms - last_t < 200
+                        now_ms - last_t < 80
                     } else {
                         false
                     };
@@ -1773,11 +1812,21 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
 
                 // If mouse left the highlighted element and no pending query,
-                // hide the highlight immediately
+                // keep the old highlight visible briefly (instead of immediately hiding)
+                // to reduce flicker. The highlight will be replaced when the new result arrives.
+                // Only hide if mouse has been outside for >500ms.
                 if !mouse_still_in_highlight && !has_pending {
-                    highlight::hide();
-                    state.cached_hover_result = None;
-                    state.last_highlighted_element_id = None;
+                    if let Some(change_ms) = state.last_position_change_ms {
+                        if now_ms - change_ms > 500 {
+                            highlight::hide();
+                            state.cached_hover_result = None;
+                            state.last_highlighted_element_id = None;
+                        }
+                    } else {
+                        highlight::hide();
+                        state.cached_hover_result = None;
+                        state.last_highlighted_element_id = None;
+                    }
                 }
             }
         }
@@ -1906,7 +1955,7 @@ fn mouse_move_subscription() -> Subscription<Message> {
                         let _ = output.send(Message::MouseMoved { x: current.0, y: current.1 }).await;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(30)).await;
             }
         }),
     )
@@ -1917,7 +1966,7 @@ fn mouse_move_subscription() -> Subscription<Message> {
 fn view_top_bar(state: &State) -> Element<'_, Message> {
     let colors = &state.colors;
 
-    let validate_btn = button(text(validation_button_label(state)).color(if matches!(&state.validation, ValidationResult::Found { .. }) {
+    let validate_btn = button(text(validation_button_label(state)).color(if matches!(&state.validation, ValidationResult::Found { .. } | ValidationResult::Running) {
             Color::BLACK
         } else {
             colors.text
@@ -2061,7 +2110,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
 fn validation_button_label(state: &State) -> String {
     match &state.validation {
         ValidationResult::Found { count, .. } => format!("找到 {} 个", count),
-        ValidationResult::Running => String::from("校验中…"),
+        ValidationResult::Running => String::from("取消"),
         ValidationResult::NotFound => String::from("未找到"),
         ValidationResult::Error(_) => String::from("校验出错"),
         ValidationResult::Idle => String::from("校验 F7"),
@@ -2070,6 +2119,17 @@ fn validation_button_label(state: &State) -> String {
 
 fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style {
     match &state.validation {
+        ValidationResult::Running => button::Style {
+            background: Some(iced::Background::Color(colors.warn)),
+            border: iced::Border {
+                color: colors.warn,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            text_color: Color::BLACK,
+            shadow: Default::default(),
+            snap: false,
+        },
         ValidationResult::Found { .. } => button::Style {
             background: Some(iced::Background::Color(colors.ok)),
             border: iced::Border {

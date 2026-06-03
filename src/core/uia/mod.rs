@@ -4,34 +4,32 @@
 // Shared between GUI and HTTP API.
 //
 // XPath execution uses uiauto-xpath library for full XPath 1.0 standard support.
+//
+// IMPORTANT: All UIA operations use uiautomation-rs safe wrappers.
+// windows-rs is only used for non-UIA Win32 APIs (EnumWindows, GetCursorPos, etc.)
 
-// Allow non-upper-case globals for UIA constants from windows crate.
-#![allow(non_upper_case_globals)]
-
-use super::model::{CaptureMode, CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo};
+use super::model::{CaptureMode, CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
 use regex::Regex;
-use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_id_to_name, control_type_name_to_id};
+use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_name_to_id};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use windows::core::Interface;
-use windows::{
-    core::BSTR,
-    Win32::{
-        Foundation::{POINT, HWND, LPARAM, RECT},
-        System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
-        UI::{
-            Accessibility::{
-                CUIAutomation, IUIAutomation, IUIAutomationElement,
-                IUIAutomationTreeWalker,
-            },
-            WindowsAndMessaging::{
-                GetCursorPos, EnumChildWindows, EnumWindows, GetWindowThreadProcessId,
-                IsWindowVisible,
-            },
-        },
-    },
+
+// Re-export uiautomation-rs types for use in sub-modules
+pub use uiautomation::core::{UIAutomation, UIElement, UITreeWalker, UICondition, UICacheRequest};
+pub use uiautomation::types::{Rect as UiaRect, Point as UiaPoint, ControlType as UiaControlType, Handle as UiaHandle};
+pub use uiautomation::types::TreeScope;
+pub use uiautomation::types::UIProperty;
+pub use uiautomation::types::PropertyConditionFlags;
+pub use uiautomation::variants::Variant;
+
+// Re-export windows-rs types still needed for non-UIA Win32 APIs
+pub use windows::Win32::Foundation::{HWND, POINT, RECT, LPARAM};
+pub use windows::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, EnumWindows, GetCursorPos, GetWindowThreadProcessId,
+    IsWindowVisible,
 };
+pub use windows::core::BOOL as WinBool;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Sub-modules
