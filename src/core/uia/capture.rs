@@ -1,4 +1,5 @@
 use super::*;
+use uiauto_xpath::control_type_id_to_name;
 
 pub fn capture_at_point(x: i32, y: i32) -> CaptureResult {
     match do_capture(x, y) {
@@ -10,7 +11,9 @@ pub fn capture_at_point(x: i32, y: i32) -> CaptureResult {
                 cursor_x: x, cursor_y: y,
                 error: Some(format!("捕获失败: {}", e)),
                 window_info: None,
-                capture_mode: CaptureMode::Fast,
+                capture_mode: CaptureMode::Normal,
+                locate_mode: LocateMode::Fast,
+                search_context: SearchContext::default_fast(),
             }
         }
     }
@@ -18,22 +21,45 @@ pub fn capture_at_point(x: i32, y: i32) -> CaptureResult {
 
 fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
     let auto = get_automation()?;
+    let capture_start = std::time::Instant::now();
     info!("[Normal] Starting capture at ({}, {})", x, y);
 
     // 1. Get the element at the point
+    let t1 = std::time::Instant::now();
     let point = UiaPoint::new(x, y);
-    let target = auto.element_from_point(point)
+    let hit_elem = auto.element_from_point(point)
         .map_err(|e| anyhow::anyhow!("ElementFromPoint: {e}"))?;
+    let hit_name = hit_elem.get_name().unwrap_or_default();
+    let hit_ct = hit_elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
+    log::info!("[PERF][CAP] ElementFromPoint: {}ms (type='{}' name='{}')", t1.elapsed().as_millis(), hit_ct, hit_name);
+
+    // 1.5. Light BFS to find the deepest leaf element at (x,y)
+    // This solves the issue where ElementFromPoint returns a container (Group/Pane)
+    // instead of the actual target element.
+    let t15 = std::time::Instant::now();
+    let target = light_bfs_to_leaf(&auto, &hit_elem, x, y, 5)
+        .unwrap_or_else(|| hit_elem.clone());
     let target_name = target.get_name().unwrap_or_default();
     let target_ct = target.get_control_type_raw().map(control_type_name).unwrap_or_default();
-    debug!("[Normal] ElementFromPoint: type='{}' name='{}'", target_ct, target_name);
+    if !auto.compare_elements(&target, &hit_elem).unwrap_or(false) {
+        log::info!("[PERF][CAP] BFS found deeper target: {}ms (type='{}' name='{}')", t15.elapsed().as_millis(), target_ct, target_name);
+    } else {
+        log::info!("[PERF][CAP] BFS no deeper target: {}ms", t15.elapsed().as_millis());
+    }
 
     // 2. Build ancestor chain using ControlViewWalker (per design: normal capture uses ControlViewWalker).
-    // ControlViewWalker filters out decorative/intermediate nodes, giving a shorter, faster chain.
-    // For cross-HWND boundary detection, we still enumerate child HWNDs.
-    let walker = auto.get_control_view_walker()
-        .or_else(|_| auto.get_raw_view_walker())
-        .map_err(|e| anyhow::anyhow!("ControlViewWalker: {e}"))?;
+    let t2 = std::time::Instant::now();
+    let mut walker_is_control_view = true;
+    let walker = match auto.get_control_view_walker() {
+        Ok(w) => w,
+        Err(_) => {
+            walker_is_control_view = false;
+            log::warn!("[CAP] ControlViewWalker unavailable, falling back to RawViewWalker");
+            auto.get_raw_view_walker()
+                .map_err(|e| anyhow::anyhow!("RawViewWalker: {e}"))?
+        }
+    };
+    log::info!("[PERF][CAP] Walker type: {}", if walker_is_control_view { "ControlView" } else { "RawView (FALLBACK)" });
     let desktop = auto.get_root_element()?;
 
     let mut chain: Vec<UIElement> = vec![target.clone()];
@@ -47,22 +73,51 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         current = walker.get_parent(&elem).ok();
     }
     chain.reverse(); // now: root → target
+    log::info!("[PERF][CAP] Ancestor chain: {} nodes in {}ms", chain.len(), t2.elapsed().as_millis());
 
     // 3. Build hierarchy (root → target order)
     let window_index = 1;
 
+    // Use BuildCache for batch property prefetch (5-10x faster than individual COM calls)
+    let t3 = std::time::Instant::now();
+    let cache_request = create_hierarchy_cache_request(&auto);
     let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
     for (chain_idx, elem) in chain.iter().enumerate() {
-        if let Some(mut node) = element_to_node(elem, &auto) {
+        let node = if let Some(ref cr) = cache_request {
+            elem.build_updated_cache(cr).ok()
+                .and_then(|cached_elem| element_to_node_cached(&cached_elem))
+        } else {
+            element_to_node(elem, &auto)
+        };
+        if let Some(mut node) = node {
             node.depth_from_window = chain_idx.saturating_sub(window_index);
             hierarchy.push(node);
         }
     }
+    log::info!("[PERF][CAP] Build hierarchy: {} nodes in {}ms", hierarchy.len(), t3.elapsed().as_millis());
 
     // 4. Compute sibling index for the target element
+    // Skip sibling index computation when target is inside an embedded browser (Chrome WebView),
+    // because traversing thousands of DOM siblings is extremely slow (5-7s) and
+    // sibling index is unreliable for web content anyway.
+    let t4 = std::time::Instant::now();
+    // Read parent info before mutable borrow
+    let parent_class_fw = if hierarchy.len() >= 2 {
+        let parent = &hierarchy[hierarchy.len() - 2];
+        Some((parent.class_name.clone(), parent.framework_id.clone()))
+    } else {
+        None
+    };
     if let Some(last) = hierarchy.last_mut() {
         last.is_target = true;
-        if let Ok(ctrl_walker) = auto.get_control_view_walker() {
+        let skip_sibling = parent_class_fw.as_ref().map_or(false, |(cls, fw)| {
+            fw == "Chrome" || cls.contains("Chrome_") || cls.contains("WebView")
+        });
+        if skip_sibling {
+            log::info!("[PERF][CAP] Sibling index: skipped (parent is embedded browser: class='{}' fw='{}')",
+                parent_class_fw.as_ref().map(|(c, _)| c.as_str()).unwrap_or(""),
+                parent_class_fw.as_ref().map(|(_, f)| f.as_str()).unwrap_or(""));
+        } else if let Ok(ctrl_walker) = auto.get_control_view_walker() {
             last.index = sibling_index(&target, &ctrl_walker).unwrap_or(0);
             if last.index > 0 {
                 if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
@@ -73,29 +128,67 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
             }
         }
     }
+    log::info!("[PERF][CAP] Sibling index: {}ms", t4.elapsed().as_millis());
 
     // 5. Set walker hints for faster XPath validation
+    let t5 = std::time::Instant::now();
     let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
     set_walker_hints(&mut hierarchy, window_pid);
+
+    // 5.5. Set included flag: all element nodes (after Window) default to included=true.
+    // Users can manually uncheck nodes in UI to exclude them from XPath.
+    // Window node (index 0) is always excluded from element XPath.
+    for (i, node) in hierarchy.iter_mut().enumerate() {
+        node.included = i != 0;
+    }
 
     // Extract window_info BEFORE truncation
     let window_info = extract_window_info(&hierarchy);
 
     // 6. Detect cross-boundary via child HWND enumeration
-    let mut capture_mode = CaptureMode::Fast;
+    let capture_mode = CaptureMode::Normal;
+    let mut locate_mode = LocateMode::Fast;
+    let mut child_hwnd_hint: Option<crate::core::model::ChildHwndHint> = None;
     if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
         info!("[Normal] Cross-boundary detected at index {} (window_pid={}), switching to FastChild mode",
             boundary_idx, window_pid);
+        // Collect child HWND info before truncation
+        if let Some(boundary_node) = hierarchy.get(boundary_idx) {
+            child_hwnd_hint = Some(crate::core::model::ChildHwndHint {
+                hwnd_class: boundary_node.class_name.clone(),
+                hwnd_title: boundary_node.name.clone(),
+            });
+        }
         hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
-        capture_mode = CaptureMode::FastChild;
+        locate_mode = LocateMode::FastChild;
         for (i, n) in hierarchy.iter().enumerate() {
             info!("[TRUNCATED] idx={} name='{}' class='{}' ctrl='{}' depth={} included={}",
                 i, n.name, n.class_name, n.control_type, n.depth_from_window, n.included);
         }
     }
+    log::info!("[PERF][CAP] Cross-boundary + truncation: {}ms", t5.elapsed().as_millis());
 
-    debug!("[Normal] Capture complete: hierarchy_depth={} target='{}' mode={:?}",
-        hierarchy.len(), target_name, capture_mode);
+    log::info!("[PERF][CAP] Capture total: {}ms (hierarchy_depth={} target='{}' mode={:?})",
+        capture_start.elapsed().as_millis(), hierarchy.len(), target_name, capture_mode);
+
+    let search_root = if locate_mode.is_child_mode() {
+        if let Some(hint) = &child_hwnd_hint {
+            crate::core::model::SearchRoot::ChildHwnd {
+                class: hint.hwnd_class.clone(),
+                title: hint.hwnd_title.clone(),
+            }
+        } else {
+            crate::core::model::SearchRoot::Window
+        }
+    } else {
+        crate::core::model::SearchRoot::Window
+    };
+
+    let search_context = SearchContext {
+        locate_mode,
+        child_hwnd_hint,
+        search_root,
+    };
 
     Ok(CaptureResult {
         hierarchy,
@@ -104,6 +197,8 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         error: None,
         window_info,
         capture_mode,
+        locate_mode,
+        search_context,
     })
 }
 
@@ -147,12 +242,19 @@ fn truncate_hierarchy_to_child(
     info!("[TRUNC_IN] after drain: remaining={} child_count={} (skipped boundary node at idx={})",
         hierarchy.len(), child_nodes.len(), boundary_idx);
 
-    let mut result = vec![window_node];
+    // Keep the boundary node as a sub-window identifier in the hierarchy.
+    // It acts as the first element node (depth=0) and its ClassName/Name
+    // serve as child HWND constraints in XPath, speeding up validation.
+    // Note: In child mode validation, the XPath first step (boundary node)
+    // will be skipped because it's already matched via child_hwnd_hint.
+    let mut boundary_node = hierarchy[boundary_idx].clone();
+    boundary_node.depth_from_window = 0; // Root of the sub-HWND search scope
+    let mut result = vec![window_node, boundary_node];
     for (i, mut node) in child_nodes.into_iter().enumerate() {
-        node.depth_from_window = i;
+        node.depth_from_window = i + 1; // +1 because boundary node occupies depth=0
         result.push(node);
     }
-    info!("[TRUNC_IN] result len={}", result.len());
+    info!("[TRUNC_IN] result len={} (boundary node preserved as sub-window id)", result.len());
     result
 }
 
@@ -164,7 +266,9 @@ pub fn capture_enhanced_at_point(x: i32, y: i32) -> CaptureResult {
                 hierarchy: vec![], cursor_x: x, cursor_y: y,
                 error: Some(format!("COM 初始化失败: {}", e)),
                 window_info: None,
-                capture_mode: CaptureMode::Full,
+                capture_mode: CaptureMode::Enhanced,
+                locate_mode: LocateMode::Full,
+                search_context: SearchContext::default_full(),
             };
         }
     };
@@ -176,7 +280,9 @@ pub fn capture_enhanced_at_point(x: i32, y: i32) -> CaptureResult {
                 hierarchy: vec![], cursor_x: x, cursor_y: y,
                 error: Some(format!("增强捕获失败: {}", e)),
                 window_info: None,
-                capture_mode: CaptureMode::Full,
+                capture_mode: CaptureMode::Enhanced,
+                locate_mode: LocateMode::Full,
+                search_context: SearchContext::default_full(),
             }
         }
     }
@@ -206,7 +312,7 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
             let walker = match auto.get_raw_view_walker().ok()
                 .or_else(|| auto.get_control_view_walker().ok()) {
                 Some(w) => w,
-                None => { info!("[Enhanced] No walker available, skipping self-process fix"); return Ok(CaptureResult { hierarchy: vec![], cursor_x: x, cursor_y: y, error: Some("无法获取 TreeWalker".into()), window_info: None, capture_mode: CaptureMode::Full }); }
+                None => { info!("[Enhanced] No walker available, skipping self-process fix"); return Ok(CaptureResult { hierarchy: vec![], cursor_x: x, cursor_y: y, error: Some("无法获取 TreeWalker".into()), window_info: None, capture_mode: CaptureMode::Enhanced, locate_mode: LocateMode::Full, search_context: SearchContext::default_full() }); }
             };
             let mut child = walker.get_first_child(&desktop).ok();
             while let Some(c) = child {
@@ -310,13 +416,18 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
         .or_else(|_| auto.get_control_view_walker())
         .map_err(|e| anyhow::anyhow!("RawViewWalker: {}", e))?;
 
+    // Create BFS cache request for batch property prefetch (3-5x faster)
+    let bfs_cache = create_bfs_cache_request(&auto);
+
     /// Inner BFS loop: walk the tree from `start_elem` level by level,
     /// returning the deepest element whose BoundingRectangle contains (x, y).
+    /// Uses BuildCache for batch property prefetch when cache_request is available.
     fn bfs_find_deepest(
         walker: &UITreeWalker,
         start_elem: &UIElement,
         x: i32, y: i32,
         my_pid: u32,
+        cache_request: &Option<UICacheRequest>,
     ) -> Option<UIElement> {
         let mut current = start_elem.clone();
         let mut visited_rids: HashSet<Vec<i32>> = HashSet::new();
@@ -332,45 +443,83 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
             let mut best_name = String::new();
             let mut best_is_leaf_with_name = false;
 
-            let mut child = walker.get_first_child(&current).ok();
+            let mut child = match cache_request {
+                Some(cr) => walker.get_first_child_build_cache(&current, cr).ok(),
+                None => walker.get_first_child(&current).ok(),
+            };
             while let Some(c) = child {
                 // Skip elements from our own process
-                if let Ok(pid) = c.get_process_id() {
-                    if pid == my_pid {
-                        child = walker.get_next_sibling(&c).ok();
-                        continue;
-                    }
+                let c_pid: u32 = if cache_request.is_some() {
+                    c.get_cached_process_id().unwrap_or(0) as u32
+                } else {
+                    c.get_process_id().unwrap_or(0)
+                };
+                if c_pid as u32 == my_pid {
+                    child = match cache_request {
+                        Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                        None => walker.get_next_sibling(&c).ok(),
+                    };
+                    continue;
                 }
                 // Skip offscreen elements
                 if let Ok(offscreen) = c.is_offscreen() {
                     if offscreen {
-                        child = walker.get_next_sibling(&c).ok();
+                        child = match cache_request {
+                            Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                            None => walker.get_next_sibling(&c).ok(),
+                        };
                         continue;
                     }
                 }
-                // Cycle detection
-                if let Ok(rid) = c.get_runtime_id() {
-                    if visited_rids.contains(&rid) {
-                        child = walker.get_next_sibling(&c).ok();
+                // Cycle detection (RuntimeId cannot be cached, always read from live)
+                let rid = c.get_runtime_id().ok();
+                if let Some(ref rid) = rid {
+                    if visited_rids.contains(rid) {
+                        child = match cache_request {
+                            Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                            None => walker.get_next_sibling(&c).ok(),
+                        };
                         continue;
                     }
                 }
                 // Check BoundingRectangle contains the point
-                let rect = match c.get_bounding_rectangle() {
+                let rect = if cache_request.is_some() {
+                    c.get_cached_bounding_rectangle()
+                } else {
+                    c.get_bounding_rectangle()
+                };
+                let rect = match rect {
                     Ok(r) => r,
-                    Err(_) => { child = walker.get_next_sibling(&c).ok(); continue; }
+                    Err(_) => {
+                        child = match cache_request {
+                            Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                            None => walker.get_next_sibling(&c).ok(),
+                        };
+                        continue;
+                    }
                 };
                 let sr = SimpleRect::from(&rect);
                 let w = sr.width();
                 let h = sr.height();
                 if w <= 0 || h <= 0 || !point_in_rect(x, y, &sr) {
-                    child = walker.get_next_sibling(&c).ok();
+                    child = match cache_request {
+                        Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                        None => walker.get_next_sibling(&c).ok(),
+                    };
                     continue;
                 }
 
                 let area = w as i64 * h as i64;
-                let ct = c.get_control_type_raw().map(control_type_name).unwrap_or_default();
-                let name = c.get_name().unwrap_or_default();
+                let ct = if cache_request.is_some() {
+                    c.get_cached_control_type().map(|ct| control_type_id_to_name(ct as i32).to_string()).unwrap_or_default()
+                } else {
+                    c.get_control_type_raw().map(control_type_name).unwrap_or_default()
+                };
+                let name = if cache_request.is_some() {
+                    c.get_cached_name().unwrap_or_default()
+                } else {
+                    c.get_name().unwrap_or_default()
+                };
                 let c_is_leaf_with_name = is_leaf_control_type(&ct) && !name.is_empty();
 
                 debug!("[BFS]   depth={} match: type='{}' name='{}' area={} leaf_with_name={}",
@@ -392,7 +541,10 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
                     best_is_leaf_with_name = c_is_leaf_with_name;
                 }
 
-                child = walker.get_next_sibling(&c).ok();
+                child = match cache_request {
+                    Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                    None => walker.get_next_sibling(&c).ok(),
+                };
             }
 
             match best_child {
@@ -411,12 +563,12 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
     }
 
     // Try BFS from the current hit_elem
-    let mut target_elem = bfs_find_deepest(&raw_walker, &hit_elem, x, y, my_pid);
+    let mut target_elem = bfs_find_deepest(&raw_walker, &hit_elem, x, y, my_pid, &bfs_cache);
 
     // Step 2.1: Retry with pre-Step-1.5 element if BFS found nothing and cross-HWND changed
     if target_elem.is_none() && cross_hwnd_changed {
         info!("[Enhanced] BFS from cross-HWND element found no matches, retrying with pre-Step-1.5 element");
-        target_elem = bfs_find_deepest(&raw_walker, &pre_cross_hwnd_elem, x, y, my_pid);
+        target_elem = bfs_find_deepest(&raw_walker, &pre_cross_hwnd_elem, x, y, my_pid, &bfs_cache);
     }
 
     // Step 2.5: Same-process window enumeration
@@ -443,7 +595,7 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
                             let c_name = child_elem.get_name().unwrap_or_default();
                             debug!("[Enhanced] Step 2.5: child HWND type='{}' name='{}' contains point — trying BFS",
                                 c_ct, c_name);
-                            target_elem = bfs_find_deepest(&raw_walker, &child_elem, x, y, my_pid);
+                            target_elem = bfs_find_deepest(&raw_walker, &child_elem, x, y, my_pid, &bfs_cache);
                             if target_elem.is_some() {
                                 info!("[Enhanced] Step 2.5: found element via same-process child HWND");
                                 break;
@@ -478,9 +630,16 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
             }
             ch.reverse();
             let window_index = 1;
+            let cache_request = create_hierarchy_cache_request(&auto);
             let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(ch.len());
             for (chain_idx, elem) in ch.iter().enumerate() {
-                if let Some(mut node) = element_to_node(elem, &auto) {
+                let node = if let Some(ref cr) = cache_request {
+                    elem.build_updated_cache(cr).ok()
+                        .and_then(|cached_elem| element_to_node_cached(&cached_elem))
+                } else {
+                    element_to_node(elem, &auto)
+                };
+                if let Some(mut node) = node {
                     node.depth_from_window = chain_idx.saturating_sub(window_index);
                     hierarchy.push(node);
                 }
@@ -499,7 +658,7 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
             set_walker_hints(&mut hierarchy, window_pid);
             let window_info = extract_window_info(&hierarchy);
             info!("[Enhanced] Fallback hierarchy depth={}", hierarchy.len());
-            return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Full });
+            return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Enhanced, locate_mode: LocateMode::Full, search_context: SearchContext::default_full() });
         }
     };
 
@@ -542,9 +701,16 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
 
     // Step 5: Build hierarchy
     let window_index = 1;
+    let cache_request = create_hierarchy_cache_request(&auto);
     let mut hierarchy: Vec<HierarchyNode> = Vec::with_capacity(chain.len());
     for (chain_idx, elem) in chain.iter().enumerate() {
-        if let Some(mut node) = element_to_node(elem, &auto) {
+        let node = if let Some(ref cr) = cache_request {
+            elem.build_updated_cache(cr).ok()
+                .and_then(|cached_elem| element_to_node_cached(&cached_elem))
+        } else {
+            element_to_node(elem, &auto)
+        };
+        if let Some(mut node) = node {
             node.depth_from_window = chain_idx.saturating_sub(window_index);
             debug!("[Enhanced]   hierarchy[{}]: type='{}' name='{}' depth={}",
                 chain_idx, node.control_type, node.name, node.depth_from_window);
@@ -566,16 +732,40 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
     let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
     set_walker_hints(&mut hierarchy, window_pid);
 
+    // Set included flag: all element nodes (after Window) default to included=true.
+    // Users can manually uncheck nodes in UI to exclude them from XPath.
+    for (i, node) in hierarchy.iter_mut().enumerate() {
+        node.included = i != 0;
+    }
+
     let window_info = extract_window_info(&hierarchy);
 
-    // 6. Detect cross-HWND boundary
-    let mut capture_mode = CaptureMode::Full;
-    if cross_hwnd_changed {
-        info!("[Enhanced] Cross-HWND detected, switching to FullChild mode");
-        if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
-            hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
-            capture_mode = CaptureMode::FullChild;
+    // 6. Detect cross-process boundary
+    //
+    // CORE FIX: Always check find_cross_boundary_index, not just when cross_hwnd_changed.
+    //
+    // Reason: ElementFromPoint may already return a Chrome WebView element directly
+    // (without Step 1.5 changing it), so cross_hwnd_changed=false. But the hierarchy
+    // still contains cross-process nodes (Chrome PID ≠ window PID), which must be
+    // detected to set FullChild mode and generate [full-child] prefix.
+    let capture_mode = CaptureMode::Enhanced;
+    let mut locate_mode = LocateMode::Full;
+    let mut child_hwnd_hint: Option<crate::core::model::ChildHwndHint> = None;
+    if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
+        if cross_hwnd_changed {
+            info!("[Enhanced] Cross-HWND + cross-process detected at index {}, switching to FullChild mode", boundary_idx);
+        } else {
+            info!("[Enhanced] Cross-process detected at index {} (cross_hwnd_changed=false, ElementFromPoint already returned cross-process element), switching to FullChild mode", boundary_idx);
         }
+        // Collect child HWND info before truncation
+        if let Some(boundary_node) = hierarchy.get(boundary_idx) {
+            child_hwnd_hint = Some(crate::core::model::ChildHwndHint {
+                hwnd_class: boundary_node.class_name.clone(),
+                hwnd_title: boundary_node.name.clone(),
+            });
+        }
+        hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
+        locate_mode = LocateMode::FullChild;
     }
     let empty = String::new();
     let empty2 = String::new();
@@ -584,9 +774,256 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
     let normal_ct = original_hit_elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
     let normal_name = original_hit_elem.get_name().unwrap_or_default();
     info!("[Enhanced] hierarchy depth={} target='{}' name='{}' mode={:?} | ElementFromPoint type='{}' name='{}'",
-        hierarchy.len(), target_ct, target_name, capture_mode, normal_ct, normal_name);
+        hierarchy.len(), target_ct, target_name, locate_mode, normal_ct, normal_name);
 
-    Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode })
+    let search_root = if locate_mode.is_child_mode() {
+        if let Some(hint) = &child_hwnd_hint {
+            crate::core::model::SearchRoot::ChildHwnd {
+                class: hint.hwnd_class.clone(),
+                title: hint.hwnd_title.clone(),
+            }
+        } else {
+            crate::core::model::SearchRoot::Window
+        }
+    } else {
+        crate::core::model::SearchRoot::Window
+    };
+
+    let search_context = SearchContext {
+        locate_mode,
+        child_hwnd_hint,
+        search_root,
+    };
+
+    Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode, locate_mode, search_context })
+}
+
+/// Light BFS to find the deepest leaf element at (x, y) from the hit element.
+///
+/// Normal capture's ElementFromPoint often returns a container element (Group, Pane)
+/// instead of the actual interactive target. This function walks down the ControlView
+/// tree to find the smallest element containing (x, y).
+///
+/// Parameters:
+/// - `auto`: UIAutomation instance
+/// - `start_elem`: The element returned by ElementFromPoint
+/// - `x`, `y`: Cursor coordinates
+/// - `max_depth`: Maximum BFS depth (default 5)
+///
+/// Returns: The deepest leaf element, or None if no deeper element found.
+fn light_bfs_to_leaf(
+    auto: &UIAutomation,
+    start_elem: &UIElement,
+    x: i32,
+    y: i32,
+    max_depth: u32,
+) -> Option<UIElement> {
+    let walker = auto.get_control_view_walker().ok()?;
+    let cache_request = create_bfs_cache_request(auto);
+    let mut current = start_elem.clone();
+    let mut visited_rids: HashSet<Vec<i32>> = HashSet::new();
+    if let Ok(rid) = current.get_runtime_id() { visited_rids.insert(rid); }
+
+    for _depth in 0..max_depth {
+        let mut best_child: Option<UIElement> = None;
+        let mut best_area = i64::MAX;
+        let mut best_is_leaf = false;
+
+        // Use BuildCache walker API to get children with prefetched properties
+        let mut child = match &cache_request {
+            Some(cr) => walker.get_first_child_build_cache(&current, cr).ok(),
+            None => walker.get_first_child(&current).ok(),
+        };
+        while let Some(c) = child {
+            // Cycle detection (RuntimeId cannot be cached, always read from live)
+            let rid = c.get_runtime_id().ok();
+            if let Some(ref rid) = rid {
+                if visited_rids.contains(rid) {
+                    child = match &cache_request {
+                        Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                        None => walker.get_next_sibling(&c).ok(),
+                    };
+                    continue;
+                }
+            }
+            // Skip offscreen elements (always from live)
+            if c.is_offscreen().unwrap_or(false) {
+                child = match &cache_request {
+                    Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                    None => walker.get_next_sibling(&c).ok(),
+                };
+                continue;
+            }
+            // Check BoundingRectangle contains the point
+            let rect = if cache_request.is_some() {
+                c.get_cached_bounding_rectangle()
+            } else {
+                c.get_bounding_rectangle()
+            };
+            let rect = match rect {
+                Ok(r) => r,
+                Err(_) => {
+                    child = match &cache_request {
+                        Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                        None => walker.get_next_sibling(&c).ok(),
+                    };
+                    continue;
+                }
+            };
+            let sr = SimpleRect::from(&rect);
+            let w = sr.width();
+            let h = sr.height();
+            if w <= 0 || h <= 0 || !point_in_rect(x, y, &sr) {
+                child = match &cache_request {
+                    Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                    None => walker.get_next_sibling(&c).ok(),
+                };
+                continue;
+            }
+
+            let area = w as i64 * h as i64;
+            let ct = if cache_request.is_some() {
+                c.get_cached_control_type().map(|ct| control_type_id_to_name(ct as i32).to_string()).unwrap_or_default()
+            } else {
+                c.get_control_type_raw().map(control_type_name).unwrap_or_default()
+            };
+            let c_is_leaf = is_leaf_control_type(&ct);
+
+            // Prefer leaf controls (Button, Edit, Text, etc.) over containers,
+            // and among same category, prefer smaller area (more specific)
+            let should_replace = if c_is_leaf && !best_is_leaf {
+                true
+            } else if !c_is_leaf && best_is_leaf {
+                false
+            } else {
+                area < best_area
+            };
+
+            if should_replace {
+                best_child = Some(c.clone());
+                best_area = area;
+                best_is_leaf = c_is_leaf;
+            }
+
+            child = match &cache_request {
+                Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                None => walker.get_next_sibling(&c).ok(),
+            };
+        }
+
+        match best_child {
+            Some(c) => {
+                if let Ok(rid) = c.get_runtime_id() { visited_rids.insert(rid); }
+                current = c;
+            }
+            None => break, // No deeper child found
+        }
+    }
+
+    // Return the found element only if it's different from the start
+    if auto.compare_elements(&current, start_elem).unwrap_or(false) {
+        None
+    } else {
+        Some(current)
+    }
+}
+
+/// Two-phase highlight query result.
+///
+/// Phase 1: ElementFromPoint returns immediately — used for instant highlight.
+/// Phase 2: BFS refines to deeper leaf — updates highlight if a better element is found.
+pub enum HighlightPhase {
+    /// Phase 1: ElementFromPoint direct hit — displayed instantly.
+    Immediate {
+        x: i32,
+        y: i32,
+        rect: ElementRect,
+        control_type: String,
+        name: String,
+        class_name: String,
+    },
+    /// Phase 2: BFS found a deeper/better element at the point.
+    Refined {
+        x: i32,
+        y: i32,
+        rect: ElementRect,
+        control_type: String,
+        name: String,
+        class_name: String,
+    },
+}
+
+/// Extract rect and properties from a UIA element into highlight data.
+fn elem_to_highlight_data(
+    elem: &UIElement,
+    x: i32,
+    y: i32,
+) -> Option<(i32, i32, ElementRect, String, String, String)> {
+    let rect = elem.get_bounding_rectangle().ok()?;
+    let ct = elem.get_control_type_raw()
+        .map(control_type_name)
+        .unwrap_or_default();
+    let name = elem.get_name().unwrap_or_default();
+    let class = elem.get_classname().unwrap_or_default();
+    Some((
+        x, y,
+        ElementRect {
+            x: rect.get_left(),
+            y: rect.get_top(),
+            width: rect.get_width(),
+            height: rect.get_height(),
+        },
+        ct, name, class,
+    ))
+}
+
+/// Lightweight highlight query — ElementFromPoint first (instant), then BFS refine.
+///
+/// This is used during capture hover. The strategy:
+/// 1. ElementFromPoint returns a ControlView element — display highlight immediately.
+/// 2. BFS (max depth 2) searches for a deeper leaf — if found, update highlight.
+///
+/// Uses a channel-based two-phase approach: Immediate sent first, Refined sent later
+/// (only if BFS found a different element).
+pub fn highlight_query(tx: std::sync::mpsc::Sender<HighlightPhase>, x: i32, y: i32) {
+    let auto = match get_automation() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("[Highlight] get_automation failed: {e}");
+            return;
+        }
+    };
+
+    let point = UiaPoint::new(x, y);
+    let hit_elem = match auto.element_from_point(point) {
+        Ok(e) => e,
+        Err(e) => {
+            log::error!("[Highlight] ElementFromPoint failed: {e}");
+            return;
+        }
+    };
+
+    // Phase 1: Send ElementFromPoint result immediately for instant highlight
+    if let Some(data) = elem_to_highlight_data(&hit_elem, x, y) {
+        let (x, y, rect, ct, name, class) = data;
+        if tx.send(HighlightPhase::Immediate {
+            x, y, rect, control_type: ct, name, class_name: class,
+        }).is_err() {
+            return; // Receiver dropped, no point continuing
+        }
+    }
+
+    // Phase 2: BFS to find deeper leaf, send Refined if different
+    if let Some(refined) = light_bfs_to_leaf(&auto, &hit_elem, x, y, 2) {
+        if !auto.compare_elements(&refined, &hit_elem).unwrap_or(true) {
+            if let Some(data) = elem_to_highlight_data(&refined, x, y) {
+                let (x, y, rect, ct, name, class) = data;
+                let _ = tx.send(HighlightPhase::Refined {
+                    x, y, rect, control_type: ct, name, class_name: class,
+                });
+            }
+        }
+    }
 }
 
 /// Enumerate child HWNDs of a given parent HWND

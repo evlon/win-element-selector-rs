@@ -157,8 +157,8 @@ pub fn inspect_subtree(
     }
 
     // Step 2: 在窗口中查找目标元素
-    let (capture_mode, _stripped) = CaptureMode::strip_xpath_prefix(element_xpath);
-    let is_child_mode = capture_mode.map_or(false, |m| m.is_child_mode());
+    let (locate_mode, _, _stripped) = LocateMode::strip_xpath_prefix(element_xpath);
+    let is_child_mode = locate_mode.map_or(false, |m| m.is_child_mode());
 
     let mut target_element: Option<UIElement> = None;
 
@@ -180,7 +180,9 @@ pub fn inspect_subtree(
                     Ok(e) => e,
                     Err(_) => continue,
                 };
-                if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, &child_elem, element_xpath) {
+                // Child HWND filtering via prefix attributes; XPath used as-is
+                let child_xpath = element_xpath;
+                if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, &child_elem, &child_xpath) {
                     if let Some(elem) = elements.into_iter().next() {
                         target_element = Some(elem);
                         break;

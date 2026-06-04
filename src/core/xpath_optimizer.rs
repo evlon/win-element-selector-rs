@@ -442,6 +442,7 @@ impl XPathOptimizer {
                     &window_sel,
                     &full_test_xpath,
                     &hierarchy_clone,
+                    None, None,
                 );
                 // 【关键修复】极简优化要求 XPath 必须找到**恰好1个**元素
                 let is_unique = matches!(validation_result.overall, ValidationResult::Found { count: 1, .. });
@@ -450,7 +451,7 @@ impl XPathOptimizer {
                         ValidationResult::Found { count, .. } => {
                             log::info!("[极简优化-验证] XPath 找到 {} 个元素（需要唯一）: {}", count, full_test_xpath);
                         }
-                        ValidationResult::NotFound => {
+                        ValidationResult::NotFound { .. } => {
                             log::info!("[极简优化-验证] XPath 未找到元素: {}", full_test_xpath);
                         }
                         _ => {}

@@ -59,18 +59,32 @@ pub async fn get_element(
     let element_meta = xpath_meta(&element_query.element);
 
     info!(
-        "[PERF][HTTP][{}] /api/element start window_hash={:016x} {} random_range={}",
-        request_id, window_hash, element_meta, element_query.random_range
+        "[PERF][HTTP][{}] /api/element start window_hash={:016x} {} random_range={} timeout_ms={:?}",
+        request_id, window_hash, element_meta, element_query.random_range, element_query.timeout_ms
     );
 
     // Clone query for spawn_blocking (需要 'static)
     let window = element_query.window.clone();
-    let element = element_query.element.clone();
+    let mut element = element_query.element.clone();
+    // If search_mode is explicitly set, append suffix (overrides any existing suffix)
+    if let Some(ref mode) = element_query.search_mode {
+        // Strip any existing suffix first
+        let (_, stripped) = crate::core::model::SearchMode::strip_suffix(&element);
+        let suffix = match mode {
+            crate::core::model::SearchMode::All => "",
+            crate::core::model::SearchMode::First => ":first",
+            crate::core::model::SearchMode::OnlyOne => ":onlyone",
+        };
+        element = format!("{}{}", stripped, suffix);
+    }
     let random_range = element_query.random_range;
+    let search_context = element_query.search_context.clone();
+    let timeout_ms = element_query.timeout_ms;
+    let find_all_filter = element_query.find_all_filter.clone();
 
     // Direct call to core::uia layer
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::find_all_elements_detailed(&window, &element, random_range)
+        crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref())
     })
     .await;
 
@@ -160,17 +174,30 @@ pub async fn get_all_elements(
     let element_meta = xpath_meta(&element_query.element);
 
     info!(
-        "[PERF][HTTP][{}] /api/element/all start window_hash={:016x} {} random_range={}",
-        request_id, window_hash, element_meta, element_query.random_range
+        "[PERF][HTTP][{}] /api/element/all start window_hash={:016x} {} random_range={} timeout_ms={:?}",
+        request_id, window_hash, element_meta, element_query.random_range, element_query.timeout_ms
     );
 
     let window = element_query.window.clone();
-    let element = element_query.element.clone();
+    let mut element = element_query.element.clone();
+    // If search_mode is explicitly set, append suffix (overrides any existing suffix)
+    if let Some(ref mode) = element_query.search_mode {
+        let (_, stripped) = crate::core::model::SearchMode::strip_suffix(&element);
+        let suffix = match mode {
+            crate::core::model::SearchMode::All => "",
+            crate::core::model::SearchMode::First => ":first",
+            crate::core::model::SearchMode::OnlyOne => ":onlyone",
+        };
+        element = format!("{}{}", stripped, suffix);
+    }
     let random_range = element_query.random_range;
+    let search_context = element_query.search_context.clone();
+    let timeout_ms = element_query.timeout_ms;
+    let find_all_filter = element_query.find_all_filter.clone();
 
     // Direct call to core::uia layer
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::find_all_elements_detailed(&window, &element, random_range)
+        crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref())
     })
     .await;
 
@@ -326,7 +353,7 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 
     // 查找元素获取其矩形区域
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::find_all_elements_detailed(&window, &element, 5.0)
+        crate::core::uia::find_all_elements_detailed(&window, &element, 5.0, None, None, None)
     })
     .await;
 
@@ -619,11 +646,22 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
     );
 
     let runtime_id = body.runtime_id.clone();
-    let xpath = body.xpath.clone();
+    let mut xpath = body.xpath.clone();
+    // If search_mode is explicitly set, append suffix (overrides any existing suffix)
+    if let Some(ref mode) = body.search_mode {
+        let (_, stripped) = crate::core::model::SearchMode::strip_suffix(&xpath);
+        let suffix = match mode {
+            crate::core::model::SearchMode::All => "",
+            crate::core::model::SearchMode::First => ":first",
+            crate::core::model::SearchMode::OnlyOne => ":onlyone",
+        };
+        xpath = format!("{}{}", stripped, suffix);
+    }
     let random_range = body.random_range;
+    let search_strategy = body.search_strategy.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::find_from_element_cached(&runtime_id, &xpath, random_range)
+        crate::core::uia::find_from_element_cached(&runtime_id, &xpath, random_range, search_strategy)
     })
     .await;
 

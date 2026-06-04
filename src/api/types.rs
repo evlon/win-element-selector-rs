@@ -105,10 +105,31 @@ pub struct ElementQuery {
     /// 窗口选择器，如 "Window[@Name='微信' and @ClassName='mmui::MainWindow']"
     pub window: String,
     /// 元素 XPath，如 "//Button[@AutomationId='btnSend']"
+    /// 支持搜索模式后缀：`:first`（第一个）、`:onlyone`（唯一）、`:all`（全部，默认）
+    /// 例：`//Button[@AutomationId='btnSend']:first`
     pub element: String,
+    /// 搜索模式（可选，覆盖 XPath 后缀中的设置）
+    /// - `all`: 返回全部匹配（默认）
+    /// - `first`: 只找第一个
+    /// - `onlyone`: 必须唯一，否则报错
+    #[serde(default, rename = "searchMode")]
+    pub search_mode: Option<crate::core::model::SearchMode>,
     /// 随机坐标范围百分比（默认 0.55）
     #[serde(rename = "randomRange", default = "default_random_range")]
     pub random_range: f32,
+    /// 搜索上下文（来自捕获结果的 SearchContext，None 时回退到解析 XPath 前缀）
+    #[serde(default, rename = "searchContext")]
+    pub search_context: Option<crate::core::model::SearchContext>,
+    /// 搜索超时时间（毫秒），None 时使用默认值
+    /// - Fast/FastChild 模式默认 1500ms
+    /// - Full/FullChild 模式默认 3000ms
+    /// - 未指定模式默认 5000ms
+    #[serde(default, rename = "timeoutMs")]
+    pub timeout_ms: Option<u64>,
+    /// FindAll 后过滤配置（可选，默认全部开启）
+    /// 控制是否排除 offscreen / 零尺寸 / 越界元素
+    #[serde(default, rename = "findAllFilter")]
+    pub find_all_filter: Option<crate::core::model::FindAllFilter>,
 }
 
 fn default_random_range() -> f32 {
@@ -212,10 +233,17 @@ pub struct FindFromElementRequest {
     #[serde(rename = "runtimeId")]
     pub runtime_id: String,
     /// 相对于父元素的 XPath（如 //Text[@Name='标题']）
+    /// 支持搜索模式后缀：`:first`（第一个）、`:onlyone`（唯一）、`:all`（全部，默认）
     pub xpath: String,
+    /// 搜索模式（可选，覆盖 XPath 后缀中的设置）
+    #[serde(default, rename = "searchMode")]
+    pub search_mode: Option<crate::core::model::SearchMode>,
     /// 随机偏移范围 (0.0-1.0)
     #[serde(default, rename = "randomRange")]
     pub random_range: f32,
+    /// 二次定位搜索策略（None 时使用 Adaptive 默认策略）
+    #[serde(default, rename = "searchStrategy")]
+    pub search_strategy: Option<crate::core::model::SearchStrategy>,
 }
 
 /// 从已知元素查找子元素响应

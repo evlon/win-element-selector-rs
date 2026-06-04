@@ -1,4 +1,5 @@
 use super::*;
+use uiauto_xpath::control_type_id_to_name;
 
 pub fn exists_window_by_selector(window_selector: &str) -> bool {
     debug!("Checking window existence: {}", window_selector);
@@ -130,19 +131,22 @@ fn find_window_by_enum_windows(
 ) -> Vec<UIElement> {
     // Collect matching HWNDs via EnumWindows callback
     let matched_hwnds: Vec<HWND> = enumerate_top_level_windows();
-    
+
     if matched_hwnds.is_empty() {
         return vec![];
     }
-    
+
+    // Create cache request to batch-prefetch Name + ClassName (2-3x faster)
+    let window_cache = create_window_cache_request(auto);
+
     let mut results = Vec::new();
-    
+
     for hwnd in matched_hwnds {
         // Skip invisible windows early
         if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
             continue;
         }
-        
+
         // Check PID if ProcessName filter is specified
         if let Some(ref expected_proc) = expected_process {
             let mut pid: u32 = 0;
@@ -155,32 +159,46 @@ fn find_window_by_enum_windows(
                 continue;
             }
         }
-        
-        // Convert HWND to UIA element
-        let elem = match auto.element_from_handle(hwnd.into()) {
-            Ok(e) => e,
-            Err(_) => continue,
+
+        // Convert HWND to UIA element (with cache prefetch if available)
+        let elem = match &window_cache {
+            Some(cr) => match auto.element_from_handle_build_cache(hwnd.into(), cr) {
+                Ok(e) => e,
+                Err(_) => continue,
+            },
+            None => match auto.element_from_handle(hwnd.into()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            },
         };
-        
+
         // Verify Name condition
         if let Some(ref expected) = expected_name {
-            let actual_name = elem.get_name().unwrap_or_default();
+            let actual_name = if window_cache.is_some() {
+                elem.get_cached_name().unwrap_or_default()
+            } else {
+                elem.get_name().unwrap_or_default()
+            };
             if &actual_name != expected {
                 continue;
             }
         }
-        
+
         // Verify ClassName condition
         if let Some(ref expected) = expected_class {
-            let actual_class = elem.get_classname().unwrap_or_default();
+            let actual_class = if window_cache.is_some() {
+                elem.get_cached_classname().unwrap_or_default()
+            } else {
+                elem.get_classname().unwrap_or_default()
+            };
             if &actual_class != expected {
                 continue;
             }
         }
-        
+
         results.push(elem);
     }
-    
+
     results
 }
 
@@ -353,19 +371,40 @@ pub(super) fn find_content_root(auto: &UIAutomation, window: &UIElement) -> Opti
     
     log::info!("[Content Root] Window FrameworkId='{}', scanning children...", window_fwid);
     
+    // Create cache request for window child scanning
+    let window_cache = create_window_cache_request(auto);
+    
     // Track same-framework container candidates for fallback
     let mut same_framework_container: Option<UIElement> = None;
     
-    let mut child = walker.get_first_child(window).ok();
+    let mut child = match &window_cache {
+        Some(cr) => walker.get_first_child_build_cache(window, cr).ok(),
+        None => walker.get_first_child(window).ok(),
+    };
     let mut idx = 0;
     while let Some(c) = child {
-        let ct = c.get_control_type_raw().map(control_type_name).unwrap_or_default();
-        let fwid = c.get_framework_id().unwrap_or_default();
-        let class = c.get_classname().unwrap_or_default();
+        let ct = if window_cache.is_some() {
+            c.get_cached_control_type().map(|ct| control_type_id_to_name(ct as i32).to_string()).unwrap_or_default()
+        } else {
+            c.get_control_type_raw().map(control_type_name).unwrap_or_default()
+        };
+        let fwid = if window_cache.is_some() {
+            c.get_cached_framework_id().unwrap_or_default()
+        } else {
+            c.get_framework_id().unwrap_or_default()
+        };
+        let class = if window_cache.is_some() {
+            c.get_cached_classname().unwrap_or_default()
+        } else {
+            c.get_classname().unwrap_or_default()
+        };
         
         // Skip non-container types (TitleBar, etc.)
         if ct != "Pane" && ct != "Window" && ct != "Group" {
-            child = walker.get_next_sibling(&c).ok();
+            child = match &window_cache {
+                Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                None => walker.get_next_sibling(&c).ok(),
+            };
             idx += 1;
             continue;
         }
@@ -374,7 +413,10 @@ pub(super) fn find_content_root(auto: &UIAutomation, window: &UIElement) -> Opti
         if is_rendering_layer(&class) {
             log::info!("[Content Root] Skipping rendering layer at child[{}]: class='{}' fw='{}'", 
                 idx, class, fwid);
-            child = walker.get_next_sibling(&c).ok();
+            child = match &window_cache {
+                Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+                None => walker.get_next_sibling(&c).ok(),
+            };
             idx += 1;
             continue;
         }
@@ -405,7 +447,10 @@ pub(super) fn find_content_root(auto: &UIAutomation, window: &UIElement) -> Opti
             return Some(c);
         }
         
-        child = walker.get_next_sibling(&c).ok();
+        child = match &window_cache {
+            Some(cr) => walker.get_next_sibling_build_cache(&c, cr).ok(),
+            None => walker.get_next_sibling(&c).ok(),
+        };
         idx += 1;
         if idx > 10 { break; }
     }
@@ -609,6 +654,7 @@ pub(super) fn find_child_process_windows(
     Ok(candidate_windows)
 }
 
+#[allow(dead_code)]
 fn check_window_visibility(hwnd: HWND) -> anyhow::Result<bool> {
     Ok(unsafe { IsWindowVisible(hwnd).as_bool() })
 }

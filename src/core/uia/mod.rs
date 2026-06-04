@@ -8,7 +8,7 @@
 // IMPORTANT: All UIA operations use uiautomation-rs safe wrappers.
 // windows-rs is only used for non-UIA Win32 APIs (EnumWindows, GetCursorPos, etc.)
 
-use super::model::{CaptureMode, CaptureResult, DetailedValidationResult, ElementRect, HierarchyNode, LayerValidationResult, Operator, PredicateFailure, PropertyValidationResult, SegmentValidationResult, ValidationResult, WindowInfo};
+use super::model::{CaptureMode, CaptureResult, ChildHwndHint, DetailedValidationResult, ElementRect, FindAllFilter, HierarchyNode, LayerValidationResult, LocateMode, NotFoundReason, Operator, PredicateFailure, PropertyValidationResult, SearchContext, SearchMode, SegmentValidationResult, ValidationResult, WindowInfo};
 use log::{debug, error, info};
 use regex::Regex;
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_name_to_id};
@@ -26,7 +26,7 @@ pub use uiautomation::variants::Variant;
 // Re-export windows-rs types still needed for non-UIA Win32 APIs
 pub use windows::Win32::Foundation::{HWND, POINT, RECT, LPARAM};
 pub use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetCursorPos, GetWindowThreadProcessId,
+    EnumChildWindows, EnumWindows, GetClientRect, GetCursorPos, GetWindowThreadProcessId,
     IsWindowVisible,
 };
 pub use windows::core::BOOL as WinBool;
@@ -40,6 +40,8 @@ pub mod validation;
 pub mod window;
 pub mod element;
 pub mod cache;
+pub mod find_control;
+pub mod find_raw;
 pub mod find;
 pub mod navigation;
 pub mod inspect;
@@ -89,6 +91,8 @@ pub fn mock() -> CaptureResult {
             process_id: 12345,
             process_name: "MyApp".to_string(),
         }),
-        capture_mode: CaptureMode::Fast,
+        capture_mode: CaptureMode::Normal,
+        locate_mode: LocateMode::Fast,
+        search_context: SearchContext::default_fast(),
     }
 }

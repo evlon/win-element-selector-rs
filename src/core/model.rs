@@ -7,42 +7,76 @@ use serde::{Deserialize, Serialize};
 
 // ─── CaptureMode ─────────────────────────────────────────────────────────────
 
-/// 捕获模式：决定使用哪种 UIA TreeWalker 和策略
+/// 捕获模式 — 用户选择，2种
 ///
-/// - `Fast`：性能极致，只用 ControlViewWalker。适合大多数原生应用（Qt、Win32、WPF）
-/// - `Full`：增强捕获，RawViewWalker + 子进程窗口 + 缓存。能捕获所有元素（包括 WebView/Chrome 嵌入），可接受慢一些
-/// - `FastChild`：目标在子窗口内，从子窗口 Root 开始查找。跳过主窗口 UI 树遍历。XPath 前缀 `[fast-child]`
-/// - `FullChild`：增强捕获 + 子窗口。XPath 前缀 `[full-child]`
+/// 描述"用什么策略去发现元素"。
+/// 与 LocateMode 的区别：CaptureMode 是用户选择的（2值），LocateMode 是系统决定的（4值）。
+///
+/// - `Normal`：普通捕获，ControlViewWalker + 轻量 BFS，适用于原生应用
+/// - `Enhanced`：增强捕获，RawViewWalker + 深度 BFS + Cross-HWND，适用于嵌入式框架
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CaptureMode {
-    /// 性能极致模式：只用 ControlViewWalker，XPath 前缀 `[fast]`
+    /// 普通捕获：ControlViewWalker，轻量 BFS，适用于原生应用
+    Normal,
+    /// 增强捕获：RawViewWalker + 深度 BFS + Cross-HWND，适用于嵌入式框架
+    Enhanced,
+    // ── 旧值（兼容期，将在 v2.0.0 移除）──
+    #[serde(rename = "Fast")]
+    #[deprecated(note = "Use CaptureMode::Normal instead. Will be removed in v2.0.0")]
     Fast,
-    /// 增强捕获模式：RawViewWalker + 子进程窗口 + 缓存，XPath 前缀 `[full]`
+    #[serde(rename = "Full")]
+    #[deprecated(note = "Use CaptureMode::Enhanced instead. Will be removed in v2.0.0")]
     Full,
-    /// 快速捕获 + 子窗口：目标在子 HWND 内，XPath 前缀 `[fast-child]`
+    #[serde(rename = "FastChild")]
+    #[deprecated(note = "Use LocateMode::FastChild instead. Will be removed in v2.0.0")]
     FastChild,
-    /// 增强捕获 + 子窗口：目标在子 HWND 内，XPath 前缀 `[full-child]`
+    #[serde(rename = "FullChild")]
+    #[deprecated(note = "Use LocateMode::FullChild instead. Will be removed in v2.0.0")]
     FullChild,
 }
 
 impl CaptureMode {
-    /// XPath 前缀字符串
+    /// 是否为普通捕获模式
+    pub fn is_normal(&self) -> bool {
+        matches!(self.normalize(), CaptureMode::Normal)
+    }
+
+    /// 是否为增强捕获模式
+    pub fn is_enhanced(&self) -> bool {
+        matches!(self.normalize(), CaptureMode::Enhanced)
+    }
+
+    /// 标准化为 Normal/Enhanced（消除旧值）
+    #[allow(deprecated)]
+    pub fn normalize(&self) -> CaptureMode {
+        match self {
+            CaptureMode::Fast | CaptureMode::FastChild | CaptureMode::Normal => CaptureMode::Normal,
+            CaptureMode::Full | CaptureMode::FullChild | CaptureMode::Enhanced => CaptureMode::Enhanced,
+        }
+    }
+
+    /// XPath 前缀字符串（委托给 LocateMode）
+    #[deprecated(note = "Use LocateMode::xpath_prefix() instead. Will be removed in v2.0.0")]
+    #[allow(deprecated)]
     pub fn xpath_prefix(&self) -> &'static str {
         match self {
-            CaptureMode::Fast => "[fast]",
-            CaptureMode::Full => "[full]",
+            CaptureMode::Normal | CaptureMode::Fast => "[fast]",
+            CaptureMode::Enhanced | CaptureMode::Full => "[full]",
             CaptureMode::FastChild => "[fast-child]",
             CaptureMode::FullChild => "[full-child]",
         }
     }
 
-    /// 是否是子窗口模式
+    /// 是否是子窗口模式（委托给 LocateMode）
+    #[deprecated(note = "Use LocateMode::is_child_mode() instead. Will be removed in v2.0.0")]
+    #[allow(deprecated)]
     pub fn is_child_mode(&self) -> bool {
         matches!(self, CaptureMode::FastChild | CaptureMode::FullChild)
     }
 
-    /// 从 XPath 前缀解析 CaptureMode
-    /// 返回 None 表示没有前缀（向后兼容，走完整 fallback）
+    /// 从 XPath 前缀解析（委托给 LocateMode）
+    #[deprecated(note = "Use LocateMode::from_xpath_prefix() instead. Will be removed in v2.0.0")]
+    #[allow(deprecated)]
     pub fn from_xpath_prefix(xpath: &str) -> Option<CaptureMode> {
         if xpath.starts_with("[fast-child]") {
             Some(CaptureMode::FastChild)
@@ -57,30 +91,512 @@ impl CaptureMode {
         }
     }
 
-    /// 剥离 XPath 前缀，返回 (capture_mode, stripped_xpath)
-    /// 如果没有前缀，返回 (None, original_xpath)
-    pub fn strip_xpath_prefix(xpath: &str) -> (Option<CaptureMode>, &str) {
-        if let Some(rest) = xpath.strip_prefix("[fast-child]") {
-            (Some(CaptureMode::FastChild), rest)
-        } else if let Some(rest) = xpath.strip_prefix("[full-child]") {
-            (Some(CaptureMode::FullChild), rest)
-        } else if let Some(rest) = xpath.strip_prefix("[fast]") {
-            (Some(CaptureMode::Fast), rest)
-        } else if let Some(rest) = xpath.strip_prefix("[full]") {
-            (Some(CaptureMode::Full), rest)
-        } else {
-            (None, xpath)
-        }
+    /// 剥离 XPath 前缀（委托给 LocateMode）
+    #[deprecated(note = "Use LocateMode::strip_xpath_prefix() instead. Will be removed in v2.0.0")]
+    #[allow(deprecated)]
+    pub fn strip_xpath_prefix(xpath: &str) -> (Option<CaptureMode>, Option<ChildHwndHint>, &str) {
+        let (lm, hint, rest) = LocateMode::strip_xpath_prefix(xpath);
+        let cm = lm.map(|m| m.capture_mode());
+        (cm, hint, rest)
+    }
+}
+
+impl Default for CaptureMode {
+    fn default() -> Self {
+        CaptureMode::Normal
     }
 }
 
 impl std::fmt::Display for CaptureMode {
+    #[allow(deprecated)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CaptureMode::Normal => write!(f, "普通捕获"),
+            CaptureMode::Enhanced => write!(f, "增强捕获"),
             CaptureMode::Fast => write!(f, "快速捕获"),
             CaptureMode::Full => write!(f, "增强捕获"),
             CaptureMode::FastChild => write!(f, "快速捕获(子窗口)"),
             CaptureMode::FullChild => write!(f, "增强捕获(子窗口)"),
+        }
+    }
+}
+
+// ─── LocateMode ──────────────────────────────────────────────────────────────
+
+/// 定位模式 — 由捕获模式 + 是否跨进程自动决定，4种
+///
+/// 描述"用这个捕获结果去定位时，应该怎么搜索"。
+/// 与 CaptureMode 的区别：CaptureMode 是用户选择的（2值），LocateMode 是系统决定的（4值）。
+///
+/// 映射关系：
+/// - Normal + 未跨进程 → Fast
+/// - Normal + 跨进程   → FastChild
+/// - Enhanced + 未跨进程 → Full
+/// - Enhanced + 跨进程   → FullChild
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LocateMode {
+    /// ControlView，从窗口根搜索
+    Fast,
+    /// ControlView，从子HWND根搜索
+    FastChild,
+    /// RawView，从窗口根搜索
+    Full,
+    /// RawView，从子HWND根搜索
+    FullChild,
+}
+
+impl LocateMode {
+    /// 从捕获模式和是否跨进程构造 LocateMode
+    pub fn from_capture_mode(capture_mode: CaptureMode, is_cross_process: bool) -> Self {
+        match (capture_mode.normalize(), is_cross_process) {
+            (CaptureMode::Normal, false)  => LocateMode::Fast,
+            (CaptureMode::Normal, true)   => LocateMode::FastChild,
+            (CaptureMode::Enhanced, false) => LocateMode::Full,
+            (CaptureMode::Enhanced, true)  => LocateMode::FullChild,
+            _ => LocateMode::Fast, // fallback for deprecated variants
+        }
+    }
+
+    /// XPath 前缀字符串（不带属性）
+    pub fn xpath_prefix(&self) -> &'static str {
+        match self {
+            LocateMode::Fast      => "[fast]",
+            LocateMode::FastChild => "[fast-child]",
+            LocateMode::Full      => "[full]",
+            LocateMode::FullChild => "[full-child]",
+        }
+    }
+
+    /// XPath 前缀字符串（带子窗口筛选属性）
+    /// 例如：`[fast-child @ClassName='Chrome_WidgetWin_0']`
+    pub fn xpath_prefix_with_hint(&self, hint: Option<&ChildHwndHint>) -> String {
+        let base = self.xpath_prefix().trim_end_matches(']');
+        if let Some(h) = hint {
+            if !h.hwnd_class.is_empty() {
+                return format!("{} @ClassName='{}']", base, h.hwnd_class);
+            }
+        }
+        format!("{}]", base)
+    }
+
+    /// 是否是子窗口模式
+    pub fn is_child_mode(&self) -> bool {
+        matches!(self, LocateMode::FastChild | LocateMode::FullChild)
+    }
+
+    /// 对应的 WalkerHint
+    pub fn walker_hint(&self) -> WalkerHint {
+        match self {
+            LocateMode::Fast | LocateMode::FastChild => WalkerHint::ControlView,
+            LocateMode::Full | LocateMode::FullChild => WalkerHint::RawView,
+        }
+    }
+
+    /// 从 XPath 前缀解析 LocateMode
+    /// 返回 None 表示没有前缀（向后兼容）
+    /// 支持新格式: `[fast-child @ClassName='Chrome_WidgetWin_0']`
+    pub fn from_xpath_prefix(xpath: &str) -> Option<LocateMode> {
+        if xpath.starts_with("[fast-child") {
+            Some(LocateMode::FastChild)
+        } else if xpath.starts_with("[full-child") {
+            Some(LocateMode::FullChild)
+        } else if xpath.starts_with("[fast]") {
+            Some(LocateMode::Fast)
+        } else if xpath.starts_with("[full]") {
+            Some(LocateMode::Full)
+        } else {
+            None
+        }
+    }
+
+    /// 剥离 XPath 前缀，返回 (locate_mode, child_hwnd_hint, stripped_xpath)
+    ///
+    /// 支持两种格式：
+    /// - 旧格式: `[fast-child]/Pane[...]/Document/Text`
+    /// - 新格式: `[fast-child @ClassName='Chrome_WidgetWin_0']/Document/Text`
+    ///
+    /// 新格式中属性筛选直接放在前缀内，语义更清晰：
+    /// - `@ClassName='...'` → 精确匹配子窗口类名
+    /// - `@Name='...'` → 精确匹配子窗口标题
+    ///
+    /// 如果没有前缀，返回 (None, None, original_xpath)
+    pub fn strip_xpath_prefix(xpath: &str) -> (Option<LocateMode>, Option<ChildHwndHint>, &str) {
+        let s = xpath.as_bytes();
+
+        // Try [fast-child @...] or [fast-child]
+        if s.starts_with(b"[fast-child") {
+            let (hint, rest) = parse_child_prefix_attrs(&xpath["[fast-child".len()..]);
+            return (Some(LocateMode::FastChild), hint, rest);
+        }
+        // Try [full-child @...] or [full-child]
+        if s.starts_with(b"[full-child") {
+            let (hint, rest) = parse_child_prefix_attrs(&xpath["[full-child".len()..]);
+            return (Some(LocateMode::FullChild), hint, rest);
+        }
+        // Try [fast]
+        if let Some(rest) = xpath.strip_prefix("[fast]") {
+            return (Some(LocateMode::Fast), None, rest);
+        }
+        // Try [full]
+        if let Some(rest) = xpath.strip_prefix("[full]") {
+            return (Some(LocateMode::Full), None, rest);
+        }
+        (None, None, xpath)
+    }
+
+    /// 对应的 CaptureMode（丢失 child 信息）
+    pub fn capture_mode(&self) -> CaptureMode {
+        match self {
+            LocateMode::Fast | LocateMode::FastChild => CaptureMode::Normal,
+            LocateMode::Full | LocateMode::FullChild => CaptureMode::Enhanced,
+        }
+    }
+}
+
+impl std::fmt::Display for LocateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LocateMode::Fast      => write!(f, "普通定位"),
+            LocateMode::FastChild => write!(f, "普通定位(子窗口)"),
+            LocateMode::Full      => write!(f, "增强定位"),
+            LocateMode::FullChild => write!(f, "增强定位(子窗口)"),
+        }
+    }
+}
+
+// ─── Child prefix attribute parser ───────────────────────────────────────────
+
+/// Parse attributes from a child mode prefix suffix.
+///
+/// Input: ` @ClassName='Chrome_WidgetWin_0']/Document/Text` (after `[fast-child`)
+///        or `]/Document/Text` (old format, no attrs)
+///
+/// Returns `(Option<ChildHwndHint>, remaining_xpath)`.
+/// `remaining_xpath` starts from the first `/` after the closing `]`.
+fn parse_child_prefix_attrs(suffix: &str) -> (Option<ChildHwndHint>, &str) {
+    let bytes = suffix.as_bytes();
+    if bytes.is_empty() {
+        return (None, "");
+    }
+
+    let mut pos = 0;
+
+    // Skip whitespace before attributes
+    while pos < bytes.len() && bytes[pos] == b' ' {
+        pos += 1;
+    }
+
+    // Check if there are attributes (starts with @)
+    let hint = if pos < bytes.len() && bytes[pos] == b'@' {
+        let attrs_start = pos;
+        // Find closing ]
+        let close_pos = match bytes[pos..].iter().position(|&b| b == b']') {
+            Some(p) => pos + p,
+            None => return (None, ""), // Malformed, no closing ]
+        };
+        let attrs_str = std::str::from_utf8(&bytes[attrs_start..close_pos]).unwrap_or("");
+        pos = close_pos + 1; // Skip past ']'
+
+        let mut hwnd_class = String::new();
+        let mut hwnd_title = String::new();
+
+        // Parse @ClassName='value' or @Name='value'
+        let mut attr_pos = 0;
+        let attr_bytes = attrs_str.as_bytes();
+        while attr_pos < attr_bytes.len() {
+            // Skip whitespace
+            while attr_pos < attr_bytes.len() && attr_bytes[attr_pos] == b' ' {
+                attr_pos += 1;
+            }
+            if attr_pos >= attr_bytes.len() {
+                break;
+            }
+
+            // Expect @attr_name='
+            if attr_bytes[attr_pos] != b'@' {
+                break; // Malformed
+            }
+            attr_pos += 1;
+
+            let name_start = attr_pos;
+            while attr_pos < attr_bytes.len() && (attr_bytes[attr_pos].is_ascii_alphanumeric() || attr_bytes[attr_pos] == b'_') {
+                attr_pos += 1;
+            }
+            let attr_name = std::str::from_utf8(&attr_bytes[name_start..attr_pos]).unwrap_or("");
+
+            // Expect ='
+            if attr_pos < attr_bytes.len() && attr_bytes[attr_pos] == b'=' {
+                attr_pos += 1;
+            } else {
+                break;
+            }
+
+            // Expect opening quote
+            let quote = if attr_pos < attr_bytes.len() && (attr_bytes[attr_pos] == b'\'' || attr_bytes[attr_pos] == b'"') {
+                let q = attr_bytes[attr_pos];
+                attr_pos += 1;
+                q
+            } else {
+                break;
+            };
+
+            let val_start = attr_pos;
+            while attr_pos < attr_bytes.len() && attr_bytes[attr_pos] != quote {
+                attr_pos += 1;
+            }
+            let val = std::str::from_utf8(&attr_bytes[val_start..attr_pos]).unwrap_or("");
+            // Skip closing quote
+            if attr_pos < attr_bytes.len() {
+                attr_pos += 1;
+            }
+
+            match attr_name {
+                "ClassName" => hwnd_class = val.to_string(),
+                "Name" => hwnd_title = val.to_string(),
+                _ => {}
+            }
+        }
+
+        if hwnd_class.is_empty() && hwnd_title.is_empty() {
+            None
+        } else {
+            Some(ChildHwndHint { hwnd_class, hwnd_title })
+        }
+    } else {
+        // No attributes, just expect closing ']'
+        if pos < bytes.len() && bytes[pos] == b']' {
+            pos += 1;
+        }
+        None
+    };
+
+    // Skip any leading whitespace or slashes in remaining
+    let remaining = &suffix[pos..];
+    (hint, remaining)
+}
+
+// ─── FindAllFilter ────────────────────────────────────────────────────────────
+
+/// 控制 FindAll(Subtree) 结果的后过滤行为。
+///
+/// 在每次 UIA `FindAll(Subtree)` 调用后，可选择性地排除：
+/// - 屏幕外元素（is_offscreen == true）
+/// - 零尺寸元素（width <= 0 或 height <= 0）
+/// - 完全越界元素（与搜索根窗口无交集）
+///
+/// 默认全部开启（最严格过滤）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindAllFilter {
+    /// 排除 is_offscreen == true 的元素（默认 true）
+    #[serde(default = "default_true")]
+    pub exclude_offscreen: bool,
+    /// 排除 width <= 0 或 height <= 0 的元素（默认 true）
+    #[serde(default = "default_true")]
+    pub exclude_zero_size: bool,
+    /// 排除完全在搜索根窗口 bounding rect 之外的元素（默认 true）
+    #[serde(default = "default_true")]
+    pub exclude_out_of_bounds: bool,
+    /// 启用 FindAll(Subtree) 搜索策略（默认 false）
+    ///
+    /// 默认情况下，multi-step XPath 只使用 Chain FindFirst 逐层查找，
+    /// 速度快且足够定位单个元素。启用此选项后，当 Chain 找不到时
+    /// 会回退到 FindAll(Subtree) 做更全面的搜索（更慢但更全面），
+    /// 适合需要找多个匹配元素的场景。
+    #[serde(default)]
+    pub enable_findall: bool,
+}
+
+fn default_true() -> bool { true }
+
+impl Default for FindAllFilter {
+    fn default() -> Self {
+        Self {
+            exclude_offscreen: true,
+            exclude_zero_size: true,
+            exclude_out_of_bounds: true,
+            enable_findall: false,
+        }
+    }
+}
+
+impl FindAllFilter {
+    /// 创建无过滤实例（全部关闭）
+    pub fn none() -> Self {
+        Self {
+            exclude_offscreen: false,
+            exclude_zero_size: false,
+            exclude_out_of_bounds: false,
+            enable_findall: false,
+        }
+    }
+
+    /// 是否所有过滤都关闭
+    pub fn is_all_disabled(&self) -> bool {
+        !self.exclude_offscreen && !self.exclude_zero_size && !self.exclude_out_of_bounds
+    }
+}
+
+// ─── SearchContext ────────────────────────────────────────────────────────────
+
+/// 捕获时的搜索上下文，供后续定位/校验使用。
+///
+/// 捕获时生成，随 CaptureResult 返回前端；定位/校验时前端原样传回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchContext {
+    /// 定位模式（由捕获模式 + 是否跨进程决定）
+    pub locate_mode: LocateMode,
+    /// 命中的子 HWND 信息（FastChild/FullChild 时有值）
+    pub child_hwnd_hint: Option<ChildHwndHint>,
+    /// 搜索起点类型
+    pub search_root: SearchRoot,
+}
+
+impl SearchContext {
+    /// 创建默认 SearchContext（Fast 模式，从窗口根搜索）
+    pub fn default_fast() -> Self {
+        Self {
+            locate_mode: LocateMode::Fast,
+            child_hwnd_hint: None,
+            search_root: SearchRoot::Window,
+        }
+    }
+
+    /// 创建默认 SearchContext（Full 模式，从窗口根搜索）
+    pub fn default_full() -> Self {
+        Self {
+            locate_mode: LocateMode::Full,
+            child_hwnd_hint: None,
+            search_root: SearchRoot::Window,
+        }
+    }
+}
+
+/// 命中的子 HWND 信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildHwndHint {
+    /// 子 HWND 的窗口类名（如 "Chrome_WidgetWin_1"）
+    pub hwnd_class: String,
+    /// 子 HWND 的窗口标题
+    pub hwnd_title: String,
+}
+
+/// 搜索起点类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SearchRoot {
+    /// 从窗口根搜索
+    Window,
+    /// 从特定子 HWND 根搜索
+    ChildHwnd { class: String, title: String },
+    /// 从缓存元素搜索（二次定位）
+    Element { runtime_id: String },
+}
+
+// ─── SearchMode ──────────────────────────────────────────────────────────────
+
+/// XPath 搜索模式后缀（`:first` / `:onlyone` / `:all`）
+///
+/// 自定义后缀语法，风格与 `[fast]` 前缀统一，用 `:` 分隔符区分搜索意图。
+///
+/// | 后缀 | 语义 | UIA 策略 |
+/// |------|------|----------|
+/// | `:all`（默认） | 返回全部 | `FindAll` |
+/// | `:first` | 找第一个 | 纯 equality → `FindFirst`；复杂谓词 → `FindAll` + 取第一个 |
+/// | `:onlyone` | 必须唯一 | 纯 equality → `FindFirst` + `FindNext` 确认；复杂谓词 → `FindAll` + count 检查 |
+///
+/// 示例：
+/// ```text
+/// //Text[@Name='确定']:first            → FindFirst（最大优化）
+/// //Text[@Name='确定']:onlyone          → FindFirst + FindNext 确认唯一
+/// //Text[starts-with(@Name,'abc')]:first → FindAll(Text) + 过滤 + 取第一个
+/// [fast-child @ClassName='xxx']/Button:first → 窗口筛选后，找第一个Button
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchMode {
+    /// 返回全部匹配元素（默认）
+    All,
+    /// 只找第一个匹配元素
+    First,
+    /// 必须唯一，否则报错
+    OnlyOne,
+}
+
+impl Default for SearchMode {
+    fn default() -> Self {
+        SearchMode::First
+    }
+}
+
+impl std::fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchMode::All => write!(f, "全部匹配 (:all)"),
+            SearchMode::First => write!(f, "只取第一个 (默认)"),
+            SearchMode::OnlyOne => write!(f, "必须唯一 (:onlyone)"),
+        }
+    }
+}
+
+impl SearchMode {
+    /// 从 XPath 后缀解析 SearchMode
+    /// 剥离 `:first` / `:onlyone` / `:all` 后缀，返回 (SearchMode, stripped_xpath)
+    /// 注意：无后缀时默认为 First（只取第一个，代价最小）
+    pub fn strip_suffix(xpath: &str) -> (Self, &str) {
+        if let Some(stripped) = xpath.strip_suffix(":first") {
+            (SearchMode::First, stripped)
+        } else if let Some(stripped) = xpath.strip_suffix(":onlyone") {
+            (SearchMode::OnlyOne, stripped)
+        } else if let Some(stripped) = xpath.strip_suffix(":all") {
+            (SearchMode::All, stripped)
+        } else {
+            (SearchMode::First, xpath)
+        }
+    }
+}
+
+// ─── SearchStrategy ──────────────────────────────────────────────────────────
+
+/// 二次定位的搜索策略
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SearchStrategy {
+    /// 快速搜索：ControlViewWalker，限制深度
+    Fast { max_depth: u32 },
+    /// 深度搜索：RawViewWalker，可深入子树
+    Full { max_depth: u32 },
+    /// 自适应：先 Fast，失败回退 Full（默认）
+    Adaptive,
+}
+
+impl Default for SearchStrategy {
+    fn default() -> Self {
+        SearchStrategy::Adaptive
+    }
+}
+
+// ─── NotFoundReason ──────────────────────────────────────────────────────────
+
+/// 校验失败原因
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NotFoundReason {
+    /// 窗口未找到
+    WindowNotFound,
+    /// 子窗口未找到（Child 模式）
+    ChildHwndNotFound { class: String },
+    /// XPath 第 N 步匹配失败
+    XPathStepFailed { step: usize, detail: String },
+    /// 元素已消失（窗口在但元素不在）
+    ElementGone,
+    /// 搜索超时
+    Timeout { budget_ms: u64, elapsed_ms: u64 },
+}
+
+impl std::fmt::Display for NotFoundReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotFoundReason::WindowNotFound => write!(f, "窗口未找到"),
+            NotFoundReason::ChildHwndNotFound { class } => write!(f, "子窗口未找到(class={})", class),
+            NotFoundReason::XPathStepFailed { step, detail } => write!(f, "XPath第{}步失败: {}", step, detail),
+            NotFoundReason::ElementGone => write!(f, "元素已消失"),
+            NotFoundReason::Timeout { budget_ms, elapsed_ms } => write!(f, "搜索超时(预算{}ms, 耗时{}ms)", budget_ms, elapsed_ms),
         }
     }
 }
@@ -658,8 +1174,12 @@ pub struct CaptureResult {
     pub error:      Option<String>,
     /// Window information extracted from hierarchy (for fast validation).
     pub window_info: Option<WindowInfo>,
-    /// 捕获模式：标识此捕获结果是用哪种策略生成的
+    /// 捕获模式：标识此捕获结果是用哪种策略生成的（Normal/Enhanced，2值）
     pub capture_mode: CaptureMode,
+    /// 定位模式：系统自动决定的定位策略（Fast/FastChild/Full/FullChild，4值）
+    pub locate_mode: LocateMode,
+    /// 搜索上下文：供后续定位/校验使用
+    pub search_context: SearchContext,
 }
 
 // ─── ValidationResult ────────────────────────────────────────────────────────
@@ -743,6 +1263,8 @@ pub struct DetailedValidationResult {
     pub total_duration_ms: u64,
     /// 第一个匹配元素是否在屏幕外
     pub is_offscreen: Option<bool>,
+    /// 校验失败原因（当 overall = NotFound 时有值）
+    pub not_found_reason: Option<NotFoundReason>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -750,7 +1272,7 @@ pub enum ValidationResult {
     Idle,
     Running,
     Found { count: usize, first_rect: Option<ElementRect>, rects: Vec<ElementRect> },
-    NotFound,
+    NotFound { reason: Option<NotFoundReason> },
     Error(String),
 }
 
@@ -760,7 +1282,7 @@ impl ValidationResult {
             Self::Idle       => "校验元素  F7".into(),
             Self::Running    => "校验中…".into(),
             Self::Found { count, .. } => format!("✔ 找到 {} 个", count),
-            Self::NotFound   => "✘ 未找到".into(),
+            Self::NotFound { .. } => "✘ 未找到".into(),
             Self::Error(_)   => "⚠ 校验错误".into(),
         }
     }
@@ -1030,6 +1552,8 @@ mod tests {
                 process_name: "notepad".to_string(),
             }),
             capture_mode: CaptureMode::Fast,
+            locate_mode: LocateMode::Fast,
+            search_context: SearchContext::default_fast(),
         };
         
         assert!(result.window_info.is_some());
@@ -1051,6 +1575,8 @@ mod tests {
             error: None,
             window_info: None,
             capture_mode: CaptureMode::Fast,
+            locate_mode: LocateMode::Fast,
+            search_context: SearchContext::default_fast(),
         };
         
         assert!(result.window_info.is_none());

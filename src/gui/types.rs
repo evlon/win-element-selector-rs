@@ -74,6 +74,9 @@ pub struct PersistedCapture {
     /// 捕获模式（快速捕获 vs 增强捕获）
     #[serde(default)]
     pub capture_mode:           Option<CaptureMode>,
+    /// 搜索模式（全部/只取第一个/必须唯一）
+    #[serde(default)]
+    pub search_mode:            Option<element_selector::core::model::SearchMode>,
 }
 
 /// 优化摘要持久化格式

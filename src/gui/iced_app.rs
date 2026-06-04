@@ -23,7 +23,7 @@ use log::info;
 
 use element_selector::core::model::{
     AppConfig, DetailedValidationResult, ElementTab, HistoryEntry,
-    HierarchyNode, Operator, PropertyFilter, ValidationResult, WindowInfo,
+    HierarchyNode, LocateMode, Operator, PropertyFilter, SearchMode, ValidationResult, WindowInfo,
     SimilarElementSample,
 };
 use element_selector::core::xpath;
@@ -72,6 +72,7 @@ pub enum Message {
     XPathSyncPressed,
     ResultIndexChanged(String),
     XPathEditToggled,
+    SearchModeChanged(SearchMode),
 
     // Tree interaction
     TreeNodeSelected(usize),
@@ -157,6 +158,7 @@ pub struct State {
     pub xpath_edit_mode: bool,      // true = show editable input, false = show read-only display
     pub xpath_error: Option<String>,
     pub xpath_source: XPathSource,
+    pub search_mode: SearchMode,    // XPath 搜索模式后缀（:first / :onlyone / :all）
 
     // Validation
     pub validation: ValidationResult,
@@ -167,6 +169,8 @@ pub struct State {
     pub capture_mode: CaptureMode,
     pub capture_menu_open: bool,
     pub overlay: CaptureOverlay,
+    /// Search context from capture — passed to validation for precise locate mode
+    pub search_context: Option<element_selector::core::model::SearchContext>,
 
     // Status & history
     pub status_msg: String,
@@ -214,8 +218,9 @@ pub struct State {
     pub validation_start_time: Option<Instant>,
 
     // Highlight async
-    pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<(i32, i32, element_selector::core::model::CaptureResult)>>,
+    pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<element_selector::core::uia::HighlightPhase>>,
     pub cached_hover_result: Option<element_selector::core::model::CaptureResult>,
+    pub last_highlight_rect: Option<element_selector::core::model::ElementRect>,
     pub last_highlighted_element_id: Option<String>,
     pub highlight_query_sequence: u64,
     pub last_highlight_pos: Option<(i32, i32)>,
@@ -242,21 +247,22 @@ impl State {
         let config = persistence::load_config();
 
         // Try to restore last capture, track source for status message
-        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled, capture_mode, result_index, load_source) =
+        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled, capture_mode, result_index, search_mode, load_source) =
             if let Some(json) = persistence::load_capture_json() {
                 match serde_json::from_str::<PersistedCapture>(&json) {
                     Ok(c) => {
+                        let sm = c.search_mode.unwrap_or(SearchMode::All);
                         let result = Self::restore_from_persisted(c);
-                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, "loaded")
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, sm, "loaded")
                     }
                     Err(_) => {
                         let result = Self::mock_capture();
-                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, "corrupt")
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "corrupt")
                     }
                 }
             } else {
                 let result = Self::mock_capture();
-                (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, "empty")
+                (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "empty")
             };
 
         let status_msg = match load_source {
@@ -307,6 +313,7 @@ impl State {
             result_index,
             xpath_edit_mode: false,
             xpath_source,
+            search_mode,
 
             validation: ValidationResult::Idle,
             detailed_validation: None,
@@ -315,6 +322,7 @@ impl State {
             capture_mode,
             capture_menu_open: false,
             overlay: CaptureOverlay::new(),
+            search_context: None,
 
             status_msg,
             history: config.history.clone(),
@@ -362,6 +370,7 @@ impl State {
 
             pending_highlight_rx: None,
             cached_hover_result: None,
+            last_highlight_rect: None,
             last_highlighted_element_id: None,
             highlight_query_sequence: 0,
             last_highlight_pos: None,
@@ -380,9 +389,9 @@ impl State {
     fn mock_capture() -> (Vec<HierarchyNode>, Option<usize>, String, String, String, Option<WindowInfo>, XPathSource, Vec<bool>, CaptureMode, String) {
         let result = uia::mock();
         let window_info = result.window_info.clone();
-        let xpath_result = xpath::generate(&result.hierarchy, window_info.as_ref(), CaptureMode::Fast);
+        let xpath_result = xpath::generate(&result.hierarchy, window_info.as_ref(), LocateMode::Fast);
         let xpath = format!("{}, {}", xpath_result.window_selector, xpath_result.element_xpath);
-        (result.hierarchy, Some(3), xpath, xpath_result.window_selector, xpath_result.element_xpath, window_info, XPathSource::AutoGenerated, Vec::new(), CaptureMode::Fast, String::new())
+        (result.hierarchy, Some(3), xpath, xpath_result.window_selector, xpath_result.element_xpath, window_info, XPathSource::AutoGenerated, Vec::new(), CaptureMode::Normal, String::new())
     }
 
     fn restore_from_persisted(c: PersistedCapture) -> (Vec<HierarchyNode>, Option<usize>, String, String, String, Option<WindowInfo>, XPathSource, Vec<bool>, CaptureMode, String) {
@@ -417,11 +426,12 @@ impl State {
         let (window_selector, element_xpath) = if let Some(comma_pos) = xpath_text.find(", ") {
             (xpath_text[..comma_pos].to_string(), xpath_text[comma_pos + 2..].to_string())
         } else {
-            let capture_mode = c.capture_mode.unwrap_or(CaptureMode::Fast);
-            let xpath_result = xpath::generate(&hierarchy, window_info.as_ref(), capture_mode);
+            let capture_mode = c.capture_mode.unwrap_or(CaptureMode::Normal);
+            let locate_mode = LocateMode::from_capture_mode(capture_mode, false);
+            let xpath_result = xpath::generate(&hierarchy, window_info.as_ref(), locate_mode);
             (xpath_result.window_selector, xpath_result.element_xpath)
         };
-        let capture_mode = c.capture_mode.unwrap_or(CaptureMode::Fast);
+        let capture_mode = c.capture_mode.unwrap_or(CaptureMode::Normal);
         (hierarchy, c.selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, c.window_filters_enabled, capture_mode, result_index)
     }
 
@@ -450,6 +460,7 @@ impl State {
             optimization_summary,
             result_index: if self.result_index.is_empty() { None } else { Some(self.result_index.clone()) },
             capture_mode: Some(self.capture_mode),
+            search_mode: Some(self.search_mode),
         };
         if let Ok(json) = serde_json::to_string_pretty(&data) {
             persistence::save_capture(&json);
@@ -467,9 +478,27 @@ impl State {
 
     fn rebuild_xpath(&mut self) {
         let window_selector = self.build_window_selector_from_info();
-        let element_xpath_inner = xpath::generate_elements(&self.hierarchy, self.capture_mode);
-        // Add capture mode prefix based on current mode
-        let prefix = self.capture_mode.xpath_prefix();
+        let is_cross_process = self.search_context.as_ref()
+            .map(|ctx| ctx.locate_mode.is_child_mode())
+            .unwrap_or(false);
+        let locate_mode = LocateMode::from_capture_mode(self.capture_mode, is_cross_process);
+        // self.hierarchy already excludes the Window node (see complete_capture / handle_hover_capture).
+        // In child mode (cross-process / embedded WebView), use full hierarchy
+        // to preserve all intermediate nodes (e.g., Document → Group → Text).
+        // In normal mode, use simplified XPath that skips nodes without Name/AutomationId.
+        let element_xpath_inner = if !self.hierarchy.is_empty() {
+            if is_cross_process {
+                xpath::generate_elements(&self.hierarchy, locate_mode)
+            } else {
+                xpath::generate_simplified_elements(&self.hierarchy, locate_mode)
+            }
+        } else {
+            String::new()
+        };
+        // Add locate mode prefix with child HWND hint for child modes
+        let hint = self.search_context.as_ref()
+            .and_then(|ctx| ctx.child_hwnd_hint.as_ref());
+        let prefix = locate_mode.xpath_prefix_with_hint(hint);
         let element_xpath = format!("{}{}", prefix, element_xpath_inner);
         self.window_selector = window_selector;
         self.element_xpath = element_xpath;
@@ -479,14 +508,22 @@ impl State {
         self.xpath_source = XPathSource::AutoGenerated;
     }
 
-    /// Apply result index to element_xpath: wrap as `(xpath)[N]` if index is set.
+    /// Apply result index and search mode suffix to element_xpath.
     fn final_element_xpath(&self) -> String {
-        if let Ok(idx) = self.result_index.trim().parse::<u32>() {
+        let base = if let Ok(idx) = self.result_index.trim().parse::<u32>() {
             if idx > 0 {
-                return format!("({})[{}]", self.element_xpath, idx);
+                format!("({})[{}]", self.element_xpath, idx)
+            } else {
+                self.element_xpath.clone()
             }
+        } else {
+            self.element_xpath.clone()
+        };
+        match self.search_mode {
+            SearchMode::First => base, // 默认，不加后缀
+            SearchMode::OnlyOne => format!("{}:onlyone", base),
+            SearchMode::All => format!("{}:all", base),
         }
-        self.element_xpath.clone()
     }
 
     /// 解析手动编辑的 XPath，同步到 hierarchy 的 included 状态。
@@ -660,6 +697,7 @@ impl State {
         self.pending_highlight_rx = None;
         self.last_highlighted_element_id = None;
         self.cached_hover_result = None;
+        self.last_highlight_rect = None;
         self.capture_state = CaptureState::WaitingClick {
             deadline: Instant::now() + Duration::from_secs(30),
         };
@@ -679,6 +717,7 @@ impl State {
         self.capture_state = CaptureState::Idle;
         self.status_msg = String::from("捕获已取消");
         self.cached_hover_result = None;
+        self.last_highlight_rect = None;
         self.pending_highlight_rx = None;
         self.last_highlighted_element_id = None;
         self.highlight_query_sequence = 0;
@@ -712,9 +751,10 @@ impl State {
                 self.overlay.hide();
                 self.capture_state = CaptureState::Capturing;
 
-                let result = match self.capture_mode {
-                    CaptureMode::Fast | CaptureMode::FastChild => element_selector::core::uia::capture_at_point(mx, my),
-                    CaptureMode::Full | CaptureMode::FullChild => element_selector::core::uia::capture_enhanced_at_point(mx, my),
+                let result = if self.capture_mode.is_normal() {
+                    element_selector::core::uia::capture_at_point(mx, my)
+                } else {
+                    element_selector::core::uia::capture_enhanced_at_point(mx, my)
                 };
 
                 if let Some(err) = &result.error {
@@ -749,11 +789,13 @@ impl State {
                     self.last_highlighted_element_id = None;
                     self.result_index.clear();
                     self.capture_mode = result.capture_mode;
+                    self.search_context = Some(result.search_context);
                     self.rebuild_xpath();
                     self.save_to_file();
                     info!("capture done: {}", self.xpath_text);
                 }
                 self.cached_hover_result = None;
+                self.last_highlight_rect = None;
             }
         }
     }
@@ -782,6 +824,7 @@ impl State {
         let window_selector = self.window_selector.clone();
         let element_xpath = self.final_element_xpath();
         let hierarchy = self.hierarchy.clone();
+        let search_context = self.search_context.clone();
         let in_progress = self.validation_in_progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.validation_rx = Some(rx);
@@ -789,7 +832,7 @@ impl State {
         in_progress.store(true, Ordering::SeqCst);
         std::thread::spawn(move || {
             let result = uia::validate_selector_and_xpath_detailed(
-                &window_selector, &element_xpath, &hierarchy,
+                &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None,
             );
             let _ = tx.send(Some(result));
             in_progress.store(false, Ordering::SeqCst);
@@ -817,8 +860,14 @@ impl State {
         let result = optimizer.optimize(&self.hierarchy);
         self.hierarchy = result.optimized_hierarchy.clone();
         let window_selector = self.build_window_selector_from_info();
-        // Use optimizer's output XPath directly, adding capture mode prefix
-        let prefix = self.capture_mode.xpath_prefix();
+        // Use optimizer's output XPath directly, adding locate mode prefix
+        let is_cross_process = self.search_context.as_ref()
+            .map(|ctx| ctx.locate_mode.is_child_mode())
+            .unwrap_or(false);
+        let locate_mode = LocateMode::from_capture_mode(self.capture_mode, is_cross_process);
+        let hint = self.search_context.as_ref()
+            .and_then(|ctx| ctx.child_hwnd_hint.as_ref());
+        let prefix = locate_mode.xpath_prefix_with_hint(hint);
         self.window_selector = window_selector;
         self.element_xpath = format!("{}{}", prefix, result.optimized_xpath);
         self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
@@ -856,7 +905,7 @@ impl State {
         let window_selector = self.window_selector.clone();
         let optimization_in_progress = self.optimization_in_progress.clone();
         let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
-        let xpath_prefix = self.capture_mode.xpath_prefix().to_string();
+        let xpath_prefix = LocateMode::from_capture_mode(self.capture_mode, false).xpath_prefix().to_string();
         self.optimization_cancel_flag = Some(cancel_flag.clone());
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -897,9 +946,10 @@ impl State {
         let result = if let Some(cached) = self.cached_hover_result.take() {
             cached
         } else {
-            match self.capture_mode {
-                CaptureMode::Fast | CaptureMode::FastChild => uia::capture_at_point(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => uia::capture_enhanced_at_point(x, y),
+            if self.capture_mode.is_normal() {
+                uia::capture_at_point(x, y)
+            } else {
+                uia::capture_enhanced_at_point(x, y)
             }
         };
 
@@ -934,11 +984,13 @@ impl State {
             self.last_highlighted_element_id = None;
             self.result_index.clear();
             self.capture_mode = result.capture_mode;
+            self.search_context = Some(result.search_context);
             self.rebuild_xpath();
             self.save_to_file();
             info!("capture done: {}", self.xpath_text);
         }
         self.cached_hover_result = None;
+        self.last_highlight_rect = None;
     }
 
     fn find_window_idx(result: &element_selector::core::model::CaptureResult) -> usize {
@@ -1003,14 +1055,12 @@ impl State {
 
     #[allow(unused_variables)]
     fn highlight_element_at(&mut self, x: i32, y: i32) {
-        let mode = self.capture_mode;
+        // Two-phase highlight:
+        // Phase 1: ElementFromPoint → Immediate highlight (instant)
+        // Phase 2: BFS deeper leaf → Refined highlight (if found)
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = match mode {
-                CaptureMode::Fast | CaptureMode::FastChild => uia::capture_at_point(x, y),
-                CaptureMode::Full | CaptureMode::FullChild => uia::capture_enhanced_at_point(x, y),
-            };
-            let _ = tx.send((x, y, result));
+            uia::highlight_query(tx, x, y);
         });
         self.pending_highlight_rx = Some(rx);
     }
@@ -1203,8 +1253,14 @@ impl State {
                     match result {
                         Some(opt_result) => {
                             self.hierarchy = opt_result.optimized_hierarchy.clone();
-                            // Add capture mode prefix to the optimized XPath
-                            let prefix = self.capture_mode.xpath_prefix();
+                            // Add locate mode prefix to the optimized XPath
+                            let is_cross_process = self.search_context.as_ref()
+                                .map(|ctx| ctx.locate_mode.is_child_mode())
+                                .unwrap_or(false);
+                            let locate_mode = LocateMode::from_capture_mode(self.capture_mode, is_cross_process);
+                            let hint = self.search_context.as_ref()
+                                .and_then(|ctx| ctx.child_hwnd_hint.as_ref());
+                            let prefix = locate_mode.xpath_prefix_with_hint(hint);
                             self.element_xpath = format!("{}{}", prefix, opt_result.optimized_xpath);
                             self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
                             self.xpath_error = xpath::lint(&self.xpath_text);
@@ -1284,7 +1340,7 @@ impl State {
                             self.status_msg = match &detailed_result.overall {
                                 ValidationResult::Found { count, .. } =>
                                     format!("✓ 校验通过 — 找到 {} 个（{}ms）", count, elapsed.as_millis()),
-                                ValidationResult::NotFound => String::from("✗ 未找到匹配元素"),
+                                ValidationResult::NotFound { .. } => String::from("✗ 未找到匹配元素"),
                                 ValidationResult::Error(e) => format!("⚠ {}", e),
                                 _ => String::new(),
                             };
@@ -1301,38 +1357,44 @@ impl State {
             }
         }
 
+        // Drain all available highlight phases (may have Immediate + Refined)
         if let Some(rx) = self.pending_highlight_rx.take() {
-            if let Ok((_x, _y, result)) = rx.try_recv() {
-                if result.error.is_none() {
-                    if let Some(last) = result.hierarchy.last() {
-                        let current_element_id = format!(
-                            "{}|d{}|{},{}-{}x{}",
-                            last.control_type, last.depth_from_window,
-                            last.rect.x, last.rect.y, last.rect.width, last.rect.height
-                        );
-                        let should_show_path = if result.hierarchy.len() >= 2 {
-                            let current = &result.hierarchy[result.hierarchy.len() - 1];
-                            let parent = &result.hierarchy[result.hierarchy.len() - 2];
-                            current.rect.is_visually_overlapping(&parent.rect)
-                        } else {
-                            false
+            let mut had_message = false;
+            // Loop to drain all pending phases
+            loop {
+                match rx.try_recv() {
+                    Ok(phase) => {
+                        had_message = true;
+                        let (rect, ct) = match phase {
+                            element_selector::core::uia::HighlightPhase::Immediate { rect, control_type, .. } => {
+                                (rect, control_type)
+                            }
+                            element_selector::core::uia::HighlightPhase::Refined { rect, control_type, .. } => {
+                                (rect, control_type)
+                            }
                         };
-                        if should_show_path {
-                            use element_selector::core::model::HighlightInfo;
-                            let path = build_hierarchy_path(&result.hierarchy);
-                            let info = HighlightInfo::new(last.rect.clone(), &path);
-                            highlight::update_highlight(&info);
-                        } else {
-                            use element_selector::core::model::HighlightInfo;
-                            let info = HighlightInfo::new(last.rect.clone(), &last.control_type);
-                            highlight::update_highlight(&info);
-                        }
+                        let current_element_id = format!(
+                            "{}|{},{}-{}x{}",
+                            ct, rect.x, rect.y, rect.width, rect.height
+                        );
+                        use element_selector::core::model::HighlightInfo;
+                        let info = HighlightInfo::new(rect.clone(), &ct);
+                        highlight::update_highlight(&info);
                         self.last_highlighted_element_id = Some(current_element_id);
-                        self.cached_hover_result = Some(result.clone());
+                        self.last_highlight_rect = Some(rect);
+                        // Don't cache hover result — Ctrl+Click will do full capture.
+                        self.cached_hover_result = None;
                     }
-                } else {
-                    info!("[悬停高亮] 收到错误结果: {:?}", result.error);
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break;
+                    }
                 }
+            }
+            if had_message {
+                // Don't put back — fully drained
             } else {
                 self.pending_highlight_rx = Some(rx);
             }
@@ -1530,6 +1592,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.xpath_content = text_editor::Content::with_text(&state.element_xpath);
             }
         }
+        Message::SearchModeChanged(mode) => {
+            state.search_mode = mode;
+            state.xpath_text = format!("{}, {}", state.window_selector, state.final_element_xpath());
+            state.xpath_error = xpath::lint(&state.xpath_text);
+            state.validation = ValidationResult::Idle;
+        }
         Message::CopyXPath => {
             state.status_msg = "元素 XPath 已复制到剪贴板".to_string();
             return iced::clipboard::write(state.final_element_xpath());
@@ -1722,8 +1790,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.do_validate();
             }
             match &state.validation {
-                ValidationResult::NotFound => {
-                    state.status_msg = String::from("校验未通过，元素未找到。如需强制保存请先点击取消");
+                ValidationResult::NotFound { reason } => {
+                    let reason_msg = match reason {
+                        Some(r) => format!("：{}", r),
+                        None => String::new(),
+                    };
+                    state.status_msg = format!("校验未通过，元素未找到{}。如需强制保存请先点击取消", reason_msg);
                     return Task::none();
                 }
                 ValidationResult::Error(e) => {
@@ -1765,14 +1837,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 // Check if mouse is still within current highlight bounds
                 // If so, keep the highlight visible (don't hide until new result arrives)
-                let mouse_still_in_highlight = if let Some(ref result) = state.cached_hover_result {
-                    if let Some(last) = result.hierarchy.last() {
-                        let r = &last.rect;
-                        mx >= r.x && mx <= r.x + r.width as i32
-                            && my >= r.y && my <= r.y + r.height as i32
-                    } else {
-                        false
-                    }
+                let mouse_still_in_highlight = if let Some(ref rect) = state.last_highlight_rect {
+                    mx >= rect.x && mx <= rect.x + rect.width as i32
+                        && my >= rect.y && my <= rect.y + rect.height as i32
                 } else {
                     false
                 };
@@ -1820,11 +1887,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                         if now_ms - change_ms > 500 {
                             highlight::hide();
                             state.cached_hover_result = None;
+                            state.last_highlight_rect = None;
                             state.last_highlighted_element_id = None;
                         }
                     } else {
                         highlight::hide();
                         state.cached_hover_result = None;
+                        state.last_highlight_rect = None;
                         state.last_highlighted_element_id = None;
                     }
                 }
@@ -2030,7 +2099,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
                     border: iced::Border::default(),
                     ..Default::default()
                 })
-                .on_press(Message::CaptureActionSelected(CaptureMode::Fast)),
+                .on_press(Message::CaptureActionSelected(CaptureMode::Normal)),
             button("增强捕获")
                 .width(Length::Fill)
                 .padding([6, 10])
@@ -2040,7 +2109,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
                     border: iced::Border::default(),
                     ..Default::default()
                 })
-                .on_press(Message::CaptureActionSelected(CaptureMode::Full)),
+                .on_press(Message::CaptureActionSelected(CaptureMode::Enhanced)),
         ]
         .spacing(1)
         .padding(4);
@@ -2111,7 +2180,7 @@ fn validation_button_label(state: &State) -> String {
     match &state.validation {
         ValidationResult::Found { count, .. } => format!("找到 {} 个", count),
         ValidationResult::Running => String::from("取消"),
-        ValidationResult::NotFound => String::from("未找到"),
+        ValidationResult::NotFound { .. } => String::from("未找到"),
         ValidationResult::Error(_) => String::from("校验出错"),
         ValidationResult::Idle => String::from("校验 F7"),
     }
@@ -2141,7 +2210,7 @@ fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style
             shadow: Default::default(),
             snap: false,
         },
-        ValidationResult::NotFound => button::Style {
+        ValidationResult::NotFound { .. } => button::Style {
             border: iced::Border {
                 color: colors.err,
                 width: 1.0,
@@ -2165,12 +2234,7 @@ fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style
 fn capture_button_label(state: &State) -> String {
     match &state.capture_state {
         CaptureState::Idle => {
-            let mode_str = match state.capture_mode {
-                CaptureMode::Fast => "普通",
-                CaptureMode::Full => "增强",
-                CaptureMode::FastChild => "普通",
-                CaptureMode::FullChild => "增强",
-            };
+            let mode_str = if state.capture_mode.is_normal() { "普通" } else { "增强" };
             format!("{mode_str}捕获 F4")
         }
         CaptureState::WaitingClick { deadline } => {
@@ -2319,16 +2383,36 @@ fn view_xpath_frame(state: &State) -> Element<'_, Message> {
     .spacing(4)
     .align_y(Alignment::Center);
 
+    // 搜索模式下拉框
+    let search_modes: &[SearchMode] = &[SearchMode::All, SearchMode::First, SearchMode::OnlyOne];
+    let search_mode_pick = pick_list(search_modes, Some(state.search_mode), Message::SearchModeChanged)
+        .padding([4, 8]);
+    let search_mode_row = row![
+        text("搜索模式").size(11).color(colors.muted),
+        search_mode_pick,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    // 合并为底部控件行
+    let bottom_controls = row![
+        result_index_row,
+        Space::new().width(Length::Fixed(16.0)),
+        search_mode_row,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
     let xpath_area: Element<'_, Message> = if state.xpath_edit_mode {
-        // Edit mode: multi-line text editor + result index
+        // Edit mode: multi-line text editor + bottom controls
         column![
             text_editor(&state.xpath_content)
                 .height(80)
                 .on_action(Message::XPathEdited),
-            result_index_row,
+            bottom_controls,
         ].spacing(4).into()
     } else {
-        // View mode: multi-line read-only display + result index
+        // View mode: multi-line read-only display + bottom controls
         let xpath_display = text(&state.xpath_text)
             .size(11)
             .color(colors.mono_fg)
@@ -2346,7 +2430,7 @@ fn view_xpath_frame(state: &State) -> Element<'_, Message> {
                     },
                     ..Default::default()
                 }),
-            result_index_row,
+            bottom_controls,
         ].spacing(4).into()
     };
 
@@ -2616,7 +2700,7 @@ fn view_validation_detail<'a>(detail: &'a DetailedValidationResult, colors: &'a 
     let status_text = match &detail.overall {
         ValidationResult::Found { count, .. } =>
             text(format!("✓ 通过 — 找到 {} 个元素", count)).color(colors.ok),
-        ValidationResult::NotFound =>
+        ValidationResult::NotFound { .. } =>
             text("✗ 未找到匹配元素").color(colors.err),
         ValidationResult::Error(e) =>
             text(format!("⚠ 错误: {}", e)).color(colors.warn_detail_fg),
@@ -2627,7 +2711,7 @@ fn view_validation_detail<'a>(detail: &'a DetailedValidationResult, colors: &'a 
         .size(11)
         .color(colors.muted);
 
-    let frame_bg = if matches!(detail.overall, ValidationResult::NotFound) {
+    let frame_bg = if matches!(detail.overall, ValidationResult::NotFound { .. }) {
         colors.val_notfound_bg
     } else {
         colors.val_found_bg
@@ -2640,7 +2724,7 @@ fn view_validation_detail<'a>(detail: &'a DetailedValidationResult, colors: &'a 
     ];
 
     // Show failed steps when not found
-    if matches!(detail.overall, ValidationResult::NotFound) {
+    if matches!(detail.overall, ValidationResult::NotFound { .. }) {
         items.push(text("失败步骤分析:").size(11).color(colors.muted).into());
         for (_si, seg) in detail.segments.iter().enumerate() {
             if seg.matched || seg.match_count > 0 {
@@ -3299,6 +3383,7 @@ fn escape_backtick(s: &str) -> String {
     s.replace('`', "\\`")
 }
 
+#[allow(dead_code)]
 fn build_hierarchy_path(hierarchy: &[HierarchyNode]) -> String {
     if hierarchy.is_empty() {
         return String::new();

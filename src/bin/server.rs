@@ -61,11 +61,12 @@ async fn main() -> anyhow::Result<()> {
         _ => LevelFilter::Trace,
     };
 
-    // 初始化日志
+    // 初始化日志（带毫秒时间戳，方便排查性能问题）
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
     .filter_level(log_level)
+    .format_timestamp_millis()
     .init();
 
     let bind_addr = format!("{}:{}", args.bind, args.port);

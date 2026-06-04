@@ -382,7 +382,9 @@ pub fn capture_at_cursor() -> CaptureResult {
                 cursor_x: 0, cursor_y: 0,
                 error: Some("GetCursorPos 失败".to_string()),
                 window_info: None,
-                capture_mode: CaptureMode::Fast,
+                capture_mode: CaptureMode::Normal,
+                locate_mode: LocateMode::Fast,
+                search_context: SearchContext::default_fast(),
             };
         }
         p
@@ -465,6 +467,160 @@ pub(super) fn is_control_type_clickable(control_type: &str) -> bool {
     matches!(control_type, "Button" | "Hyperlink" | "ListItem" | "MenuItem"
         | "TabItem" | "TreeItem" | "RadioButton" | "CheckBox"
         | "ComboBox" | "Link" | "Image" | "Document")
+}
+
+/// Create a UICacheRequest pre-loaded with all properties needed for hierarchy node construction.
+/// This enables batch property prefetch via `build_updated_cache()`, avoiding 14+ individual COM calls.
+pub(super) fn create_hierarchy_cache_request(auto: &UIAutomation) -> Option<UICacheRequest> {
+    let cr = auto.create_cache_request().ok()?;
+    // Core hierarchy properties
+    let props = [
+        UIProperty::ControlType,
+        UIProperty::AutomationId,
+        UIProperty::ClassName,
+        UIProperty::Name,
+        UIProperty::ProcessId,
+        UIProperty::FrameworkId,
+        UIProperty::HelpText,
+        UIProperty::LocalizedControlType,
+        UIProperty::IsEnabled,
+        UIProperty::IsOffscreen,
+        UIProperty::IsPassword,
+        UIProperty::AcceleratorKey,
+        UIProperty::AccessKey,
+        UIProperty::ItemType,
+        UIProperty::ItemStatus,
+        UIProperty::BoundingRectangle,
+        UIProperty::NativeWindowHandle,
+    ];
+    for prop in &props {
+        if cr.add_property(*prop).is_err() {
+            return None;
+        }
+    }
+    Some(cr)
+}
+
+/// Create a UICacheRequest for BFS traversal: properties needed for point-containment filtering.
+/// Prefetches BoundingRectangle + ControlType + IsOffscreen + Name + ProcessId + RuntimeId.
+/// Estimated speedup: 3-5x vs individual COM calls per child.
+pub(super) fn create_bfs_cache_request(auto: &UIAutomation) -> Option<UICacheRequest> {
+    let cr = auto.create_cache_request().ok()?;
+    let props = [
+        UIProperty::BoundingRectangle,
+        UIProperty::ControlType,
+        UIProperty::IsOffscreen,
+        UIProperty::Name,
+        UIProperty::ProcessId,
+        UIProperty::RuntimeId,
+    ];
+    for prop in &props {
+        if cr.add_property(*prop).is_err() {
+            return None;
+        }
+    }
+    Some(cr)
+}
+
+/// Create a UICacheRequest for validation property comparison.
+/// Prefetches all filter-relevant properties (Name, ClassName, AutomationId, ControlType,
+/// ProcessId, FrameworkId, HelpText, IsEnabled, IsOffscreen, etc.).
+/// Estimated speedup: 3-5x vs individual COM calls.
+pub(super) fn create_validation_cache_request(auto: &UIAutomation) -> Option<UICacheRequest> {
+    let cr = auto.create_cache_request().ok()?;
+    let props = [
+        UIProperty::ControlType,
+        UIProperty::AutomationId,
+        UIProperty::ClassName,
+        UIProperty::Name,
+        UIProperty::ProcessId,
+        UIProperty::FrameworkId,
+        UIProperty::HelpText,
+        UIProperty::LocalizedControlType,
+        UIProperty::IsEnabled,
+        UIProperty::IsOffscreen,
+        UIProperty::IsPassword,
+        UIProperty::AcceleratorKey,
+        UIProperty::AccessKey,
+        UIProperty::ItemType,
+        UIProperty::ItemStatus,
+        UIProperty::BoundingRectangle,
+        UIProperty::NativeWindowHandle,
+    ];
+    for prop in &props {
+        if cr.add_property(*prop).is_err() {
+            return None;
+        }
+    }
+    Some(cr)
+}
+
+/// Create a UICacheRequest for window matching.
+/// Prefetches Name, ClassName, ProcessId, BoundingRectangle, NativeWindowHandle.
+/// Estimated speedup: 2-3x vs individual COM calls.
+pub(super) fn create_window_cache_request(auto: &UIAutomation) -> Option<UICacheRequest> {
+    let cr = auto.create_cache_request().ok()?;
+    let props = [
+        UIProperty::Name,
+        UIProperty::ClassName,
+        UIProperty::ProcessId,
+        UIProperty::BoundingRectangle,
+        UIProperty::NativeWindowHandle,
+        UIProperty::FrameworkId,
+    ];
+    for prop in &props {
+        if cr.add_property(*prop).is_err() {
+            return None;
+        }
+    }
+    Some(cr)
+}
+
+/// Build a HierarchyNode from a cached UIElement (obtained via build_updated_cache).
+/// Reads all properties from cache instead of individual COM calls.
+pub(super) fn element_to_node_cached(elem: &UIElement) -> Option<HierarchyNode> {
+    let control_type = elem.get_cached_control_type()
+        .map(|ct| control_type_id_to_name(ct as i32))
+        .unwrap_or_default();
+
+    let automation_id = elem.get_cached_automation_id().unwrap_or_default();
+    let class_name    = elem.get_cached_classname().unwrap_or_default();
+    let name          = elem.get_cached_name().unwrap_or_default();
+    let process_id    = elem.get_cached_process_id().unwrap_or(0) as u32;
+
+    let framework_id = elem.get_cached_framework_id().unwrap_or_default();
+    let help_text = elem.get_cached_help_text().unwrap_or_default();
+    let localized_control_type = elem.get_cached_localized_control_type().unwrap_or_default();
+    let is_enabled = elem.is_enabled().unwrap_or(true);
+    let is_offscreen = elem.is_offscreen().unwrap_or(false);
+    let is_password = elem.is_password().unwrap_or(false);
+
+    let rect = elem.get_cached_bounding_rectangle()
+        .map(|r| ElementRect {
+            x:      r.get_left(),
+            y:      r.get_top(),
+            width:  r.get_right()  - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
+        })
+        .unwrap_or_default();
+
+    let mut node = HierarchyNode::new(
+        control_type, automation_id, class_name, name,
+        0, rect, process_id,
+    );
+
+    node.framework_id = framework_id;
+    node.help_text = help_text;
+    node.localized_control_type = localized_control_type;
+    node.is_enabled = is_enabled;
+    node.is_offscreen = is_offscreen;
+    node.is_password = is_password;
+    node.accelerator_key = elem.get_cached_accelerator_key().unwrap_or_default();
+    node.access_key = elem.get_cached_access_key().unwrap_or_default();
+    node.item_type = elem.get_cached_item_type().unwrap_or_default();
+    node.item_status = elem.get_cached_item_status().unwrap_or_default();
+
+    Some(node)
 }
 
 pub(super) fn element_to_node(
@@ -616,6 +772,7 @@ pub(super) fn control_type_name(id: i32) -> String {
 }
 
 /// Convert a uiautomation-rs ControlType to its string name
+#[allow(dead_code)]
 pub(super) fn control_type_name_from_enum(ct: &ControlType) -> String {
     control_type_id_to_name(*ct as i32).to_string()
 }

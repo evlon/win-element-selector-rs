@@ -3,14 +3,14 @@
 // XPath generation and validation utilities.
 // Shared between GUI and HTTP API.
 
-use super::model::{HierarchyNode, XPathResult, WindowInfo, CaptureMode};
+use super::model::{HierarchyNode, XPathResult, WindowInfo, LocateMode};
 
 /// Build the complete XPath result from the captured hierarchy.
 /// The hierarchy now starts from the Window node.
 /// Returns:
 ///   - window_selector: XPath-like string for the window (first node)
-///   - element_xpath: XPath for elements inside the window, with capture mode prefix (e.g. "[fast]/Group/Button")
-pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>, capture_mode: CaptureMode) -> XPathResult {
+///   - element_xpath: XPath for elements inside the window, with locate mode prefix (e.g. "[fast]/Group/Button")
+pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>, locate_mode: LocateMode) -> XPathResult {
     if nodes.is_empty() {
         panic!("Hierarchy must not be empty");
     }
@@ -23,10 +23,10 @@ pub fn generate(nodes: &[HierarchyNode], window_info: Option<&WindowInfo>, captu
     // Element XPath should start from nodes[1] (after the window root)
     // 元素 XPath 从窗口节点之后开始，跳过窗口根节点
     let element_nodes = &nodes[1..];
-    let element_xpath_inner = generate_element_xpath(element_nodes, capture_mode);
+    let element_xpath_inner = generate_element_xpath(element_nodes, locate_mode);
     
-    // 添加捕获模式前缀
-    let element_xpath = format!("{}{}", capture_mode.xpath_prefix(), element_xpath_inner);
+    // 添加定位模式前缀
+    let element_xpath = format!("{}{}", locate_mode.xpath_prefix(), element_xpath_inner);
     
     XPathResult {
         window_selector,
@@ -60,39 +60,49 @@ fn generate_window_selector(node: &HierarchyNode, window_info: Option<&WindowInf
 
 /// Generate element XPath directly from element hierarchy (nodes after Window).
 /// Uses "/" for direct children, "//" when intermediate nodes are skipped.
-pub fn generate_elements(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
-    generate_element_xpath(nodes, capture_mode)
+pub fn generate_elements(nodes: &[HierarchyNode], locate_mode: LocateMode) -> String {
+    generate_element_xpath(nodes, locate_mode)
 }
 
 /// Generate simplified element XPath from element hierarchy.
 /// Keeps only nodes with AutomationId or Name, plus the target.
-pub fn generate_simplified_elements(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
+pub fn generate_simplified_elements(nodes: &[HierarchyNode], locate_mode: LocateMode) -> String {
     if nodes.is_empty() {
         return String::new();
     }
     
     let last_idx = nodes.len() - 1;
     
-    // Create a filtered version with simplified inclusion
+    // Create a filtered version with simplified inclusion.
+    // Rule: respect user's "uncheck" (included=false) unconditionally,
+    // then auto-simplify: keep nodes with AutomationId or Name (or the target if user didn't uncheck it).
     let simplified_nodes: Vec<HierarchyNode> = nodes
         .iter()
         .enumerate()
         .map(|(i, n)| {
             let mut node = n.clone();
-            node.included = i == last_idx
-                || (n.included && (!n.automation_id.is_empty() || !n.name.is_empty()));
+            if !n.included {
+                // User explicitly unchecked this node → always exclude
+                node.included = false;
+            } else if i == last_idx {
+                // Target node (user didn't uncheck) → always include
+                node.included = true;
+            } else {
+                // Non-target node (user didn't uncheck) → include only if it has AutomationId or Name
+                node.included = !n.automation_id.is_empty() || !n.name.is_empty();
+            }
             node
         })
         .collect();
     
-    generate_element_xpath(&simplified_nodes, capture_mode)
+    generate_element_xpath(&simplified_nodes, locate_mode)
 }
 
 /// Generate element XPath from nodes after the Window node.
 /// Uses `depth_from_window` to determine the correct prefix:
 /// - depth差值=1 → 父子关系，用 `/`
 /// - depth差值>1 → 跳过中间层，用 `//`
-fn generate_element_xpath(nodes: &[HierarchyNode], capture_mode: CaptureMode) -> String {
+fn generate_element_xpath(nodes: &[HierarchyNode], locate_mode: LocateMode) -> String {
     if nodes.is_empty() {
         return String::new();
     }
@@ -105,7 +115,7 @@ fn generate_element_xpath(nodes: &[HierarchyNode], capture_mode: CaptureMode) ->
         return String::new();
     }
     
-    let is_child_mode = matches!(capture_mode, CaptureMode::FastChild | CaptureMode::FullChild);
+    let is_child_mode = locate_mode.is_child_mode();
     
     included.iter().enumerate().map(|(i, &node)| {
         if i == 0 {
@@ -168,18 +178,8 @@ pub fn lint(xpath: &str) -> Option<String> {
         }
         
         // Validate element XPath (should start with /, ( for indexed, or [fast]/[full] prefix)
-        // Strip capture mode prefix first
-        let element_stripped = if element_part.starts_with("[fast-child]") {
-            &element_part[12..]
-        } else if element_part.starts_with("[full-child]") {
-            &element_part[12..]
-        } else if element_part.starts_with("[fast]") {
-            &element_part[6..]
-        } else if element_part.starts_with("[full]") {
-            &element_part[6..]
-        } else {
-            element_part
-        };
+        // Strip capture mode prefix using LocateMode parser (handles new format with attrs)
+        let (_, _, element_stripped) = LocateMode::strip_xpath_prefix(element_part);
         
         let inner_xpath = if element_stripped.starts_with('(') {
             // Indexed form: (//xpath)[N] — validate the inner part
@@ -192,17 +192,7 @@ pub fn lint(xpath: &str) -> Option<String> {
             element_stripped
         };
         // Also strip capture mode prefix from inner_xpath (prefix may be inside indexed form)
-        let inner_stripped = if inner_xpath.starts_with("[fast-child]") {
-            &inner_xpath[12..]
-        } else if inner_xpath.starts_with("[full-child]") {
-            &inner_xpath[12..]
-        } else if inner_xpath.starts_with("[fast]") {
-            &inner_xpath[6..]
-        } else if inner_xpath.starts_with("[full]") {
-            &inner_xpath[6..]
-        } else {
-            inner_xpath
-        };
+        let (_, _, inner_stripped) = LocateMode::strip_xpath_prefix(inner_xpath);
         if !inner_stripped.starts_with('/') {
             return Some("元素 XPath 必须以 / 开头".into());
         }
@@ -267,6 +257,7 @@ fn check_brackets(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::model::LocateMode;
     use super::*;
     use super::super::model::{ElementRect, HierarchyNode};
 
@@ -274,14 +265,21 @@ mod tests {
         HierarchyNode::new(ct, aid, "", name, 0, ElementRect::default(), 0)
     }
 
+    /// Create a node with explicit depth_from_window for tests
+    fn node_with_depth(ct: &str, aid: &str, name: &str, depth: usize) -> HierarchyNode {
+        let mut n = HierarchyNode::new(ct, aid, "", name, 0, ElementRect::default(), 0);
+        n.depth_from_window = depth;
+        n
+    }
+
     #[test]
     fn basic_generation() {
         // Hierarchy now starts from Window
         let nodes = vec![
             node("Window", "main", ""),
-            node("Button", "btnOk", "OK")
+            node_with_depth("Button", "btnOk", "OK", 1),  // depth=1: direct child of Window
         ];
-        let result = generate(&nodes, None, CaptureMode::Fast);
+        let result = generate(&nodes, None, LocateMode::Fast);
         
         // Window selector should not start with //
         assert!(!result.window_selector.starts_with("//"));
@@ -312,7 +310,7 @@ mod tests {
         
         // Generate simplified element XPath from element nodes (after Window)
         let element_nodes = &full_nodes[1..];
-        let element_xpath = generate_simplified_elements(element_nodes, CaptureMode::Fast);
+        let element_xpath = generate_simplified_elements(element_nodes, LocateMode::Fast);
         
         // Window selector should be present
         assert!(window_selector.contains("Window"));
@@ -342,7 +340,7 @@ mod tests {
     #[test]
     fn wechat_xpath_format() {
         // Simulate the captured WeChat hierarchy (starts from Window, 8 nodes)
-        let nodes = vec![
+        let mut nodes = vec![
             HierarchyNode::new("Window", "", "mmui::MainWindow", "微信", 0, ElementRect::default(), 0),
             HierarchyNode::new("Group", "", "QWidget", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Custom", "", "QStackedWidget", "", 0, ElementRect::default(), 0),
@@ -352,8 +350,12 @@ mod tests {
             HierarchyNode::new("Group", "", "QWidget", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Button", "", "mmui::XImage", "", 1, ElementRect::default(), 0),
         ];
+        // Set depth_from_window for each node (depth=0 is Window, depth=1+ for elements)
+        for (i, n) in nodes.iter_mut().enumerate() {
+            n.depth_from_window = i; // Simple sequential depth for test
+        }
 
-        let result = generate(&nodes, None, CaptureMode::Fast);
+        let result = generate(&nodes, None, LocateMode::Fast);
         
         println!("Window selector:\n{}", result.window_selector);
         println!("Element XPath:\n{}", result.element_xpath);
@@ -369,9 +371,6 @@ mod tests {
         assert!(result.element_xpath.contains("ToolBar["), "Should have ToolBar");
         assert!(result.element_xpath.contains("Button["), "Should have Button");
         
-        // Note: Since test nodes don't have depth_from_window set, consecutive nodes may use //
-        // This is expected behavior for test data. In real usage, depth_from_window is properly set.
-        
         // Verify that @ControlType predicate is NOT included
         assert!(!result.element_xpath.contains("@ControlType="), 
             "Element XPath should not contain @ControlType predicate");
@@ -382,20 +381,25 @@ mod tests {
     /// Test XPath with skipped nodes (should use //)
     #[test]
     fn skipped_nodes_use_double_slash() {
-        let nodes = vec![
+        let mut nodes = vec![
             node("Window", "main", ""),
             HierarchyNode::new("Group", "", "Class1", "", 0, ElementRect::default(), 0),
             HierarchyNode::new("Pane", "", "Class2", "", 0, ElementRect::default(), 0),  // Will be excluded
             HierarchyNode::new("Button", "btn1", "", "", 0, ElementRect::default(), 0),
         ];
         
+        // Set depth_from_window: Window=0, Group=1, Pane=2, Button=3
+        nodes[0].depth_from_window = 0;
+        nodes[1].depth_from_window = 1;
+        nodes[2].depth_from_window = 2;
+        nodes[3].depth_from_window = 3;
+        
         // Exclude the Pane node (index 2)
-        let mut nodes = nodes;
         nodes[2].included = false;
         
-        let result = generate(&nodes, None, CaptureMode::Fast);
+        let result = generate(&nodes, None, LocateMode::Fast);
         
-        // Should have // because Pane was skipped
+        // Should have // because Pane was skipped (depth diff from 1 to 3 = 2 > 1)
         assert!(result.element_xpath.contains("//Button"), "Should use // when intermediate node skipped");
         assert!(result.element_xpath.contains("[fast]/Group"), "Should start with [fast]/Group");
         
@@ -412,7 +416,7 @@ mod tests {
             HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0),
         ];
 
-        let result = generate(&nodes, None, CaptureMode::Fast);
+        let result = generate(&nodes, None, LocateMode::Fast);
         
         // Check that first() is used for position 1
         assert!(result.element_xpath.contains("first()"), "Should use first() for position 1");
@@ -546,7 +550,7 @@ mod tests {
             );
         }
 
-        let result = generate(&nodes, None, CaptureMode::Fast);
+        let result = generate(&nodes, None, LocateMode::Fast);
         
         // Count / vs // to verify optimization
         let single_slash_count = result.element_xpath.matches('/').count();

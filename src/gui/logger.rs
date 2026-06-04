@@ -19,6 +19,22 @@ pub struct LogEntry {
     pub timestamp: std::time::SystemTime,
 }
 
+/// 获取当前 UTC 时间字符串（精确到毫秒），格式: HH:MM:SS.sss
+fn local_time_ms() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = now.as_secs();
+    let millis = now.subsec_millis();
+    // 提取时分秒（UTC）
+    let day_secs = total_secs % 86400;
+    let h = day_secs / 3600;
+    let m = (day_secs / 60) % 60;
+    let s = day_secs % 60;
+    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
+}
+
 impl GuiLogger {
     pub fn new(max_lines: usize) -> Self {
         Self {
@@ -82,8 +98,8 @@ impl Log for CombinedLogger {
                 Level::Debug => "DEBUG",
                 Level::Trace => "TRACE",
             };
-            // 输出到控制台
-            println!("[{}] {}", level_str, msg);
+            // 输出到控制台（带毫秒级时间戳）
+            println!("{} [{}] {}", local_time_ms(), level_str, msg);
             // 同时添加到 GUI 日志面板
             self.gui.add_log(record.level(), msg);
         }

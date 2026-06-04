@@ -112,12 +112,12 @@ pub fn get_element_visibility(
     use crate::core::model::ValidationResult;
 
     let detailed = super::validate_selector_and_xpath_detailed(
-        window_selector, element_xpath, &[],
+        window_selector, element_xpath, &[], None, None,
     );
 
     let (element_rect, is_offscreen) = match &detailed.overall {
         ValidationResult::Found { first_rect, .. } => (first_rect.clone(), detailed.is_offscreen),
-        ValidationResult::NotFound => return visibility_not_found("元素未找到"),
+        ValidationResult::NotFound { .. } => return visibility_not_found("元素未找到"),
         ValidationResult::Error(e) => return visibility_error(e),
         _ => return visibility_not_found("校验状态未知"),
     };
@@ -140,7 +140,7 @@ pub fn get_element_visibility(
     let vp_api_rect = Rect { x: viewport_rect.x, y: viewport_rect.y, width: viewport_rect.width, height: viewport_rect.height };
 
     let container_api_rect = if let Some(cxpath) = container_xpath {
-        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[]);
+        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None);
         match &container_detailed.overall {
             ValidationResult::Found { first_rect: Some(cr), .. } => {
                 Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })
