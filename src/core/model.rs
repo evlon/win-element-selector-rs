@@ -377,12 +377,67 @@ fn parse_child_prefix_attrs(suffix: &str) -> (Option<ChildHwndHint>, &str) {
 
 // ─── FindAllFilter ────────────────────────────────────────────────────────────
 
+/// `findAll` / `findAllFrom` 的属性过滤条件。
+/// 需求 §8.4: 非 Eq 操作在 FindAll 后客户端过滤。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterOp {
+    /// 等于（可尝试 UIA 原生条件）
+    Eq,
+    /// 不等于（客户端过滤）
+    NotEq,
+    /// 包含（客户端过滤）
+    Contains,
+    /// 正则匹配（客户端过滤）
+    Regex,
+    /// 属性存在（客户端过滤）
+    Exists,
+}
+
+/// `findAll` 的属性过滤条件（需求 §8.4）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributeFilter {
+    /// 属性名，如 "Name", "ControlType", "ClassName"
+    pub property: String,
+    /// 过滤操作符
+    pub operator: FilterOp,
+    /// 比较值（Exists 时可省略）
+    pub value: String,
+}
+
+impl AttributeFilter {
+    /// 创建 Eq 过滤
+    pub fn eq(property: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { property: property.into(), operator: FilterOp::Eq, value: value.into() }
+    }
+
+    /// 创建 NotEq 过滤
+    pub fn not_eq(property: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { property: property.into(), operator: FilterOp::NotEq, value: value.into() }
+    }
+
+    /// 创建 Contains 过滤
+    pub fn contains(property: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { property: property.into(), operator: FilterOp::Contains, value: value.into() }
+    }
+
+    /// 创建 Regex 过滤
+    pub fn regex(property: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self { property: property.into(), operator: FilterOp::Regex, value: pattern.into() }
+    }
+
+    /// 创建 Exists 过滤（只检查属性是否存在）
+    pub fn exists(property: impl Into<String>) -> Self {
+        Self { property: property.into(), operator: FilterOp::Exists, value: String::new() }
+    }
+}
+
 /// 控制 FindAll(Subtree) 结果的后过滤行为。
 ///
 /// 在每次 UIA `FindAll(Subtree)` 调用后，可选择性地排除：
 /// - 屏幕外元素（is_offscreen == true）
 /// - 零尺寸元素（width <= 0 或 height <= 0）
 /// - 完全越界元素（与搜索根窗口无交集）
+/// - 不满足属性过滤条件的元素（FilterCondition）
 ///
 /// 默认全部开启（最严格过滤）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +459,10 @@ pub struct FindAllFilter {
     /// 适合需要找多个匹配元素的场景。
     #[serde(default)]
     pub enable_findall: bool,
+    /// 属性过滤条件列表（需求 §8.4）
+    /// 空表示不做属性过滤。
+    #[serde(default)]
+    pub attribute_filters: Vec<AttributeFilter>,
 }
 
 fn default_true() -> bool { true }
@@ -415,6 +474,7 @@ impl Default for FindAllFilter {
             exclude_zero_size: true,
             exclude_out_of_bounds: true,
             enable_findall: false,
+            attribute_filters: Vec::new(),
         }
     }
 }
@@ -427,12 +487,14 @@ impl FindAllFilter {
             exclude_zero_size: false,
             exclude_out_of_bounds: false,
             enable_findall: false,
+            attribute_filters: Vec::new(),
         }
     }
 
-    /// 是否所有过滤都关闭
+    /// 是否所有过滤都关闭（包括属性过滤）
     pub fn is_all_disabled(&self) -> bool {
         !self.exclude_offscreen && !self.exclude_zero_size && !self.exclude_out_of_bounds
+            && self.attribute_filters.is_empty()
     }
 }
 
@@ -587,6 +649,10 @@ pub enum NotFoundReason {
     ElementGone,
     /// 搜索超时
     Timeout { budget_ms: u64, elapsed_ms: u64 },
+    /// findOne 叶子节点在父节点下不唯一
+    LeafNotUnique { candidates: usize },
+    /// 二次定位时父元素无效（不在缓存中）
+    InvalidParent { runtime_id: String },
 }
 
 impl std::fmt::Display for NotFoundReason {
@@ -597,6 +663,8 @@ impl std::fmt::Display for NotFoundReason {
             NotFoundReason::XPathStepFailed { step, detail } => write!(f, "XPath第{}步失败: {}", step, detail),
             NotFoundReason::ElementGone => write!(f, "元素已消失"),
             NotFoundReason::Timeout { budget_ms, elapsed_ms } => write!(f, "搜索超时(预算{}ms, 耗时{}ms)", budget_ms, elapsed_ms),
+            NotFoundReason::LeafNotUnique { candidates } => write!(f, "叶子节点不唯一(找到{}个候选)", candidates),
+            NotFoundReason::InvalidParent { runtime_id } => write!(f, "父元素无效(不在缓存中: {})", runtime_id),
         }
     }
 }

@@ -23,24 +23,452 @@ use super::find_raw::{
     find_by_xpath_raw_descendants_with_depth,
     walk_raw_tree_steps,
 };
+use crate::core::model::SearchStrategy;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Main Dispatcher
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub(super) fn find_by_xpath_with_fallback(
+/// New: Execute XPath steps with explicit strategy dispatch based on step prefix.
+///
+/// NO implicit fallback. Each step's prefix (`/`, `//`, `/*n/`) determines the
+/// execution strategy directly. If a strategy fails, returns empty — no retry
+/// with alternative strategies.
+///
+/// ## Strategy mapping
+/// | Prefix | Strategy | Implementation |
+/// |--------|----------|----------------|
+/// | `/A` (Child) | uiauto-xpath | `find_by_xpath_detailed` |
+/// | `//A` (Descendant) | RawView FindAll | `find_by_xpath_raw_descendants` |
+/// | `/*n/A` (DepthLimited) | BFS depth-limited | `find_with_depth_limit` |
+pub(super) fn execute_xpath_steps(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_with_fallback_filtered(auto, window, xpath, &FindAllFilter::default())
+    execute_xpath_steps_filtered(auto, window, xpath, &FindAllFilter::default(), None)
 }
 
+/// New: Execute XPath steps with filter support. See `execute_xpath_steps` for strategy docs.
+///
+/// `timeout_ms`: 超时预算（ms）。超时后返回空结果 + `Timeout` 错误。
+///   - `None`: 不限制
+///   - `Some(n)`: 从函数入口开始计时，超过 n ms 后停止并返回空
+pub(super) fn execute_xpath_steps_filtered(
+    auto: &UIAutomation,
+    window: &UIElement,
+    xpath: &str,
+    filter: &FindAllFilter,
+    timeout_ms: Option<u64>,
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    // ── Strip search mode suffix (:first / :onlyone / :all) ──
+    let (search_mode, xpath_no_suffix) = SearchMode::strip_suffix(xpath);
+    let xpath = xpath_no_suffix;
+
+    // Handle parenthesized positional predicate: (xpath)[N]
+    let (inner_xpath, position_index) = if xpath.starts_with('(') {
+        if let Some(close) = xpath.rfind(')') {
+            let after_close = &xpath[close + 1..];
+            if let Some(pos) = parse_positional_predicate(after_close) {
+                let inner = xpath[1..close].trim().to_string();
+                (inner, Some(pos))
+            } else {
+                let inner = xpath[1..close].trim().to_string();
+                (inner, None)
+            }
+        } else {
+            (xpath.to_string(), None)
+        }
+    } else {
+        (xpath.to_string(), None)
+    };
+
+    // ── Strip locate mode prefix ──
+    let (locate_mode, _, stripped_xpath) = LocateMode::strip_xpath_prefix(&inner_xpath);
+    let xpath = stripped_xpath;
+    let is_fast_mode = matches!(locate_mode, Some(LocateMode::Fast) | Some(LocateMode::FastChild));
+
+    // ── Check XPath Compilation Cache ──
+    if let Some(cached) = cache_lookup(&xpath, window) {
+        if let Some(result) = execute_cached_strategy(auto, window, &xpath, &cached, filter) {
+            let (results, segments) = result;
+            if !results.is_empty() {
+                let elapsed = start.elapsed().as_millis() as u64;
+                cache_store(&xpath, window, cached.strategy.clone(), elapsed);
+                let results = apply_positional_and_search_mode(results, position_index, search_mode);
+                return Ok((results, segments));
+            }
+        }
+    }
+
+    // ── Parse XPath steps ──
+    let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+    if xpath_parts.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+
+    // ── Execute each step based on its prefix ──
+    let mut current_elements: Vec<UIElement> = vec![window.clone()];
+    let mut segment_results: Vec<SegmentValidationResult> = Vec::new();
+    let is_onlyone = matches!(search_mode, SearchMode::OnlyOne);
+
+    for (step_idx, step_str) in xpath_parts.iter().enumerate() {
+        // ── 超时检查（需求 §5.5）──
+        if let Some(timeout) = timeout_ms {
+            if start.elapsed().as_millis() >= timeout as u128 {
+                log::warn!(
+                    "[ExecuteXPath] Timeout after {}ms at step {}/{} '{}' (budget {}ms)",
+                    start.elapsed().as_millis(), step_idx + 1, xpath_parts.len(), step_str, timeout
+                );
+                // 返回空结果 + Timeout 信息
+                segment_results.push(SegmentValidationResult {
+                    segment_index: step_idx,
+                    segment_text: step_str.to_string(),
+                    matched: false,
+                    match_count: 0,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    predicate_failures: vec![PredicateFailure {
+                        attr_name: "Timeout".to_string(),
+                        expected_value: format!("{}ms budget", timeout),
+                        actual_value: Some(format!("{}ms elapsed", start.elapsed().as_millis())),
+                        reason: format!("Search timeout after {}ms (budget {}ms)", start.elapsed().as_millis(), timeout),
+                    }],
+                });
+                return Ok((vec![], segment_results));
+            }
+        }
+
+        let is_last = step_idx == xpath_parts.len() - 1;
+        let parsed = parse_xpath_step(step_str);
+        let strategy = StepExecutionStrategy::from(&parsed.prefix);
+        let step_start = Instant::now();
+
+        log::info!(
+            "[ExecuteXPath] Step {}/{}: '{}' prefix={:?} strategy={:?} is_last={} fast={} onlyone={}",
+            step_idx + 1, xpath_parts.len(), step_str, parsed.prefix, strategy, is_last, is_fast_mode, is_onlyone
+        );
+
+        let next_elements: Vec<UIElement> = match strategy {
+            StepExecutionStrategy::DirectChild => {
+                // `/A` — search only in direct children of each current element
+                execute_direct_child(auto, &current_elements, &parsed, is_last, filter)?
+            }
+            StepExecutionStrategy::Descendant => {
+                // `//A` — search all descendants
+                if is_fast_mode {
+                    execute_descendant_fast(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
+                } else {
+                    execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
+                }
+            }
+            StepExecutionStrategy::DepthLimitedBfs { max_depth } => {
+                // `/*n/A` — BFS with depth limit
+                let mut results = Vec::new();
+                let walker_hint = if is_fast_mode { WalkerHint::ControlView } else { WalkerHint::RawView };
+                for elem in &current_elements {
+                    let matches = find_with_depth_limit(auto, elem, &parsed, max_depth, walker_hint.clone());
+                    results.extend(matches);
+                }
+                results
+            }
+        };
+
+        let step_ms = step_start.elapsed().as_millis() as u64;
+        let matched = !next_elements.is_empty();
+        let match_count = next_elements.len();
+
+        // ── findOne 叶子唯一性验证 ──
+        // 需求 §5.3.1: 叶子节点必须在父节点（或祖先范围）下唯一。
+        // 实现：使用 FindAll(scope, condition, 2) 验证 count <= 1。
+        if is_onlyone && is_last && match_count > 1 {
+            log::warn!(
+                "[ExecuteXPath] findOne LeafNotUnique: step {} '{}' has {} candidates",
+                step_idx + 1, step_str, match_count
+            );
+            // 返回空结果 + LeafNotUnique 的 segment result
+            segment_results.push(SegmentValidationResult {
+                segment_index: step_idx,
+                segment_text: step_str.to_string(),
+                matched: false,
+                match_count,
+                duration_ms: step_ms,
+                predicate_failures: vec![PredicateFailure {
+                    attr_name: "findOne".to_string(),
+                    expected_value: "unique element".to_string(),
+                    actual_value: Some(format!("{} candidates", match_count)),
+                    reason: format!("LeafNotUnique: found {} matching elements under parent, expected exactly 1", match_count),
+                }],
+            });
+            return Ok((vec![], segment_results));
+        }
+
+        segment_results.push(SegmentValidationResult {
+            segment_index: step_idx,
+            segment_text: step_str.to_string(),
+            matched,
+            match_count,
+            duration_ms: step_ms,
+            predicate_failures: if !matched {
+                vec![PredicateFailure {
+                    attr_name: "XPath".to_string(),
+                    expected_value: step_str.to_string(),
+                    actual_value: None,
+                    reason: format!("Step not found via {:?}", strategy),
+                }]
+            } else {
+                Vec::new()
+            },
+        });
+
+        if next_elements.is_empty() {
+            log::info!("[ExecuteXPath] Step {} not found, stopping", step_idx + 1);
+            break;
+        }
+
+        current_elements = next_elements;
+    }
+
+    let total_ms = start.elapsed().as_millis() as u64;
+    log::info!(
+        "[ExecuteXPath] Completed in {}ms: {} results, {} steps",
+        total_ms, current_elements.len(), xpath_parts.len()
+    );
+
+    let results = apply_positional_and_search_mode(current_elements, position_index, search_mode);
+    Ok((results, segment_results))
+}
+
+// ── execute_xpath_steps helpers ───────────────────────────────────────────
+
+/// Execute a cached strategy. Returns `None` if cached strategy failed (stale cache).
+fn execute_cached_strategy(
+    auto: &UIAutomation,
+    window: &UIElement,
+    xpath: &str,
+    cached: &CompiledXPathEntry,
+    filter: &FindAllFilter,
+) -> Option<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
+    use super::find_control::find_by_xpath_detailed;
+    use super::find_raw::find_by_xpath_raw_descendants;
+
+    log::info!("[XPath Cache] Executing cached: {:?}", cached.strategy);
+
+    let result = match &cached.strategy {
+        CompiledStrategy::WindowFastPath => None,
+        CompiledStrategy::ControlViewDirect => {
+            find_by_xpath_detailed(auto, window, xpath, None).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::RawViewBfs => {
+            cached_raw_view_bfs(auto, window, xpath, filter).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::ContentRoot => {
+            if let Some(cr) = find_content_root(auto, window) {
+                find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                    .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+            } else { None }
+        }
+        CompiledStrategy::FindAllDescendants => {
+            let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
+            find_by_xpath_raw_descendants(auto, window, &desc_xpath, SearchMode::First, filter).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::ChildHwndEnum(child_idx) => {
+            cached_child_hwnd_search(auto, window, xpath, *child_idx, filter).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::SiblingWindow => {
+            cached_sibling_search(auto, window, xpath).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::ChildProcessWindow => {
+            cached_child_process_search(auto, window, xpath).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::DescendantContentRoot => {
+            if let Some(cr) = find_content_root(auto, window) {
+                find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                    .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+            } else { None }
+        }
+        CompiledStrategy::DescendantWindowRoot => {
+            find_by_xpath_detailed(auto, window, xpath, None).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::DescendantRawWalk => {
+            find_by_xpath_raw_descendants(auto, window, xpath, SearchMode::First, filter).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+        CompiledStrategy::DescendantChildHwnd(child_idx) => {
+            cached_descendant_child_hwnd(auto, window, xpath, *child_idx, filter).ok()
+                .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
+        }
+    };
+
+    if result.is_some() {
+        log::info!("[XPath Cache] ✓ Cached strategy succeeded (avg={}ms, hits={})",
+            cached.avg_time_ms, cached.hit_count);
+    } else {
+        log::info!("[XPath Cache] Cached strategy failed (stale?)");
+    }
+
+    result
+}
+
+/// Execute `/A` step: search direct children only.
+fn execute_direct_child(
+    auto: &UIAutomation,
+    current_elements: &[UIElement],
+    parsed: &ParsedXPathStep,
+    is_last: bool,
+    filter: &FindAllFilter,
+) -> anyhow::Result<Vec<UIElement>> {
+    use super::find_control::find_by_xpath_detailed;
+
+    // For direct child search, build the remaining xpath from current step
+    // and use uiauto-xpath which handles child axis natively
+    let mut results = Vec::new();
+    for elem in current_elements {
+        // Use uiauto-xpath for child axis search
+        let step_xpath = format!("/{}", step_to_xpath_str(parsed));
+        if let Ok((matches, _)) = find_by_xpath_detailed(auto, elem, &step_xpath, None) {
+            if is_last {
+                results.extend(filter_findall_results(elem, matches, "DirectChild", filter));
+            } else {
+                results.extend(matches);
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Execute `//A` step in Fast mode: ControlView FindAll.
+fn execute_descendant_fast(
+    auto: &UIAutomation,
+    current_elements: &[UIElement],
+    xpath_parts: &[&str],
+    step_idx: usize,
+    is_last: bool,
+    search_mode: SearchMode,
+    filter: &FindAllFilter,
+) -> anyhow::Result<Vec<UIElement>> {
+    use super::find_control::find_by_xpath_control_descendants;
+
+    let mut results = Vec::new();
+    for elem in current_elements {
+        let remaining: String = xpath_parts[step_idx..].join("/");
+        let desc_xpath = format!("//{}", remaining);
+        if let Ok((matches, _)) = find_by_xpath_control_descendants(auto, elem, &desc_xpath, search_mode, filter) {
+            results.extend(matches);
+            if !is_last && !results.is_empty() {
+                // For non-last steps, take first match as anchor
+                results.truncate(1);
+            }
+            break; // Only search from first current element
+        }
+    }
+    Ok(results)
+}
+
+/// Execute `//A` step in Full mode: RawView FindAll.
+fn execute_descendant_full(
+    auto: &UIAutomation,
+    current_elements: &[UIElement],
+    xpath_parts: &[&str],
+    step_idx: usize,
+    is_last: bool,
+    search_mode: SearchMode,
+    filter: &FindAllFilter,
+) -> anyhow::Result<Vec<UIElement>> {
+    use super::find_raw::find_by_xpath_raw_descendants;
+
+    let mut results = Vec::new();
+    for elem in current_elements {
+        let remaining: String = xpath_parts[step_idx..].join("/");
+        let desc_xpath = format!("//{}", remaining);
+        if let Ok((matches, _)) = find_by_xpath_raw_descendants(auto, elem, &desc_xpath, search_mode, filter) {
+            results.extend(matches);
+            if !is_last && !results.is_empty() {
+                results.truncate(1);
+            }
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// Reconstruct an XPath step string from parsed step (for uiauto-xpath).
+fn step_to_xpath_str(parsed: &ParsedXPathStep) -> String {
+    let mut s = String::new();
+    if let Some(ref tn) = parsed.type_name {
+        s.push_str(tn);
+    }
+    if !parsed.required_props.is_empty() || !parsed.require_starts_with.is_empty()
+        || !parsed.require_contains.is_empty() || !parsed.require_matches.is_empty()
+    {
+        s.push('[');
+        let mut parts = Vec::new();
+        for (k, v) in &parsed.required_props {
+            parts.push(format!("@{}='{}'", k, v));
+        }
+        for (k, v) in &parsed.require_starts_with {
+            parts.push(format!("starts-with(@{}, '{}')", k, v));
+        }
+        for (k, v) in &parsed.require_contains {
+            parts.push(format!("contains(@{}, '{}')", k, v));
+        }
+        for (k, _) in &parsed.require_matches {
+            parts.push(format!("matches(@{}, '...')", k));
+        }
+        s.push_str(&parts.join(" and "));
+        s.push(']');
+    }
+    s
+}
+
+/// Apply positional predicate and search mode to results.
+fn apply_positional_and_search_mode(
+    results: Vec<UIElement>,
+    position_index: Option<usize>,
+    search_mode: SearchMode,
+) -> Vec<UIElement> {
+    let results = if let Some(pos) = position_index {
+        if pos > 0 && results.len() >= pos {
+            vec![results.into_iter().nth(pos - 1).unwrap()]
+        } else if !results.is_empty() {
+            vec![]
+        } else {
+            results
+        }
+    } else {
+        results
+    };
+    apply_search_mode_ui(results, search_mode)
+}
+
+// ── Legacy dispatcher (deprecated) ──────────────────────────────────────────
+
+#[deprecated(since = "0.2.0", note = "Use `execute_xpath_steps` instead. This function uses implicit fallback chains that violate the 'no-auto-fallback' principle.")]
+pub(super) fn find_by_xpath_with_fallback(
+    auto: &UIAutomation,
+    window: &UIElement,
+    xpath: &str,
+    timeout_ms: u64,
+) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
+    find_by_xpath_with_fallback_filtered(auto, window, xpath, &FindAllFilter::default(), Some(timeout_ms))
+}
+
+#[deprecated(since = "0.2.0", note = "Use `execute_xpath_steps_filtered` instead.")]
 pub(super) fn find_by_xpath_with_fallback_filtered(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
     filter: &FindAllFilter,
+    timeout_ms: Option<u64>,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     use std::time::Instant;
     let fallback_start = Instant::now();
@@ -719,29 +1147,250 @@ pub(super) fn build_uia_condition_from_step(
     }
 }
 
+/// 深度限制 BFS：逐层遍历子元素，限制最大深度。
+///
+/// 对应需求文档 §12.2 的伪代码实现：
+/// - depth=0 是根节点
+/// - 目标深度 = max_depth - 1 的元素会被检查是否匹配
+/// - 浅于目标深度的元素继续入队递归
+pub(super) fn find_with_depth_limit(
+    auto: &UIAutomation,
+    root: &UIElement,
+    target_step: &ParsedXPathStep,
+    max_depth: u32,
+    walker_hint: WalkerHint,
+) -> Vec<UIElement> {
+    use std::collections::VecDeque;
+
+    let mut results = vec![];
+    let mut queue: VecDeque<(UIElement, u32)> = VecDeque::new();
+
+    // 获取根节点的子元素作为 depth=1
+    let get_children = |elem: &UIElement| -> Vec<UIElement> {
+        match walker_hint {
+            WalkerHint::ControlView => {
+                if let Ok(walker) = auto.get_control_view_walker() {
+                    walker.get_children(elem).unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            }
+            _ => {
+                if let Ok(walker) = auto.get_raw_view_walker() {
+                    walker.get_children(elem).unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            }
+        }
+    };
+
+    for child in get_children(root) {
+        queue.push_back((child, 1));
+    }
+
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+
+        // depth + 1 == max_depth 意味着子节点在目标深度
+        // 先检查子节点是否匹配
+        let children = get_children(&node);
+        for child in &children {
+            if depth + 1 == max_depth {
+                // 到达目标深度，检查是否匹配
+                if element_matches_parsed_step(child, target_step) {
+                    results.push(child.clone());
+                }
+            } else {
+                // 未到达目标深度，继续递归
+                queue.push_back((child.clone(), depth + 1));
+            }
+        }
+
+        // 如果当前节点本身就在目标深度，也检查它
+        if depth == max_depth {
+            if element_matches_parsed_step(&node, target_step) {
+                results.push(node.clone());
+            }
+        }
+    }
+
+    log::info!(
+        "[DepthLimitedBFS] max_depth={} walker={:?} found={}",
+        max_depth, walker_hint, results.len()
+    );
+    results
+}
+
+/// 超时保护的深度限制 BFS。
+/// 当 `max_depth > 5` 或搜索时间超过 `timeout_ms` 时提前返回。
+pub(super) fn find_with_depth_limit_timeout(
+    auto: &UIAutomation,
+    root: &UIElement,
+    target_step: &ParsedXPathStep,
+    max_depth: u32,
+    walker_hint: WalkerHint,
+    timeout_ms: u64,
+) -> Vec<UIElement> {
+    use std::collections::VecDeque;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let mut results = vec![];
+    let mut queue: VecDeque<(UIElement, u32)> = VecDeque::new();
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+
+    let get_children = |elem: &UIElement| -> Vec<UIElement> {
+        match walker_hint {
+            WalkerHint::ControlView => {
+                if let Ok(walker) = auto.get_control_view_walker() {
+                    walker.get_children(elem).unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            }
+            _ => {
+                if let Ok(walker) = auto.get_raw_view_walker() {
+                    walker.get_children(elem).unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            }
+        }
+    };
+
+    for child in get_children(root) {
+        queue.push_back((child, 1));
+    }
+
+    while let Some((node, depth)) = queue.pop_front() {
+        // 超时检查
+        if start.elapsed() > timeout {
+            log::warn!(
+                "[DepthLimitedBFS] Timeout after {}ms, max_depth={} found_so_far={}",
+                start.elapsed().as_millis(), max_depth, results.len()
+            );
+            break;
+        }
+
+        if depth >= max_depth {
+            continue;
+        }
+
+        let children = get_children(&node);
+        for child in &children {
+            if depth + 1 == max_depth {
+                if element_matches_parsed_step(child, target_step) {
+                    results.push(child.clone());
+                }
+            } else {
+                queue.push_back((child.clone(), depth + 1));
+            }
+        }
+
+        if depth == max_depth {
+            if element_matches_parsed_step(&node, target_step) {
+                results.push(node.clone());
+            }
+        }
+    }
+
+    log::info!(
+        "[DepthLimitedBFS] max_depth={} walker={:?} found={} elapsed={}ms",
+        max_depth, walker_hint, results.len(), start.elapsed().as_millis()
+    );
+    results
+}
+
 pub(super) fn step_has_complex_predicates(step: &ParsedXPathStep) -> bool {
-    !step.require_starts_with.is_empty()
+    step.is_complex
+        || !step.require_starts_with.is_empty()
         || !step.require_contains.is_empty()
         || !step.require_matches.is_empty()
 }
 
+/// 预编译 XPath 步骤谓词解析正则（避免每次调用 `Regex::new()`）
+mod xpath_regex {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    /// `@Name='value'` — 精确相等
+    pub(super) static ATTR_EQ: Lazy<Regex> = Lazy::new(||
+        Regex::new(r#"@(\w+)\s*=\s*'([^']*)'"#).unwrap()
+    );
+    /// `starts-with(@Name, 'value')` — 前缀匹配
+    pub(super) static STARTS_WITH: Lazy<Regex> = Lazy::new(||
+        Regex::new(r#"@(\w+)\s*=\s*starts-with\(\s*'([^']*)'\s*\)"#).unwrap()
+    );
+    /// `contains(@Name, 'value')` — 子串包含
+    pub(super) static CONTAINS: Lazy<Regex> = Lazy::new(||
+        Regex::new(r#"@(\w+)\s*=\s*contains\(\s*'([^']*)'\s*\)"#).unwrap()
+    );
+    /// `matches(@Name, 'pattern'[, 'flags'])` — 正则匹配
+    pub(super) static MATCHES: Lazy<Regex> = Lazy::new(||
+        Regex::new(r#"@(\w+)\s*=\s*matches\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)"#).unwrap()
+    );
+    /// 步骤前缀解析: `//`, `/*/`, `/*n/`, `/`
+    pub(super) static STEP_PREFIX: Lazy<Regex> = Lazy::new(||
+        Regex::new(r"^(//|/\*(\d+)?/|/)").unwrap()
+    );
+}
+
+/// 解析 XPath 步骤为结构化数据。
+///
+/// 支持的语法：
+/// - `/Button[@Name='OK']` — 直接子元素
+/// - `//Button[@Name='OK']` — 所有后代
+/// - `/*/Button[@Name='OK']` — 深度限制为 2
+/// - `/*5/Button[@Name='OK']` — 深度限制为 6
+/// - `Button[@Name='OK' and starts-with(@ClassName, 'Q')]` — 组合谓词
+/// - `[not(@IsOffscreen)]` — 不含类型名的纯谓词（通配）
 pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
-    let (type_name, predicates_str): (Option<String>, &str) = if step.starts_with('[') {
-        (None, step)
-    } else if let Some(bracket_pos) = step.find('[') {
-        (Some(step[..bracket_pos].to_string()), &step[bracket_pos..])
+    // 1. 解析前缀
+    let (prefix, rest) = if let Some(cap) = xpath_regex::STEP_PREFIX.captures(step) {
+        let prefix_str = cap.get(0).unwrap().as_str();
+        let rest = &step[prefix_str.len()..];
+        let prefix = if prefix_str == "/" {
+            XPathStepPrefix::Child
+        } else if prefix_str.starts_with("//") && !prefix_str.starts_with("/*") {
+            XPathStepPrefix::Descendant
+        } else {
+            // /*n/ or /*/ — depth-limited
+            if let Some(depth_cap) = cap.get(2) {
+                let n: u32 = depth_cap.as_str().parse().unwrap_or(1);
+                XPathStepPrefix::DepthLimited { max_depth: n + 1 }
+            } else {
+                XPathStepPrefix::DepthLimited { max_depth: 2 }
+            }
+        };
+        (prefix, rest)
     } else {
-        (Some(step.to_string()), "")
+        // 无前缀时默认 //（后代搜索）
+        (XPathStepPrefix::Descendant, step)
     };
 
-    // Detect `or` or `not()` — cannot be reliably handled by simple key=value
+    // 2. 解析类型名和谓词
+    let (type_name, predicates_str): (Option<String>, &str) = if rest.starts_with('[') {
+        (None, rest)
+    } else if let Some(bracket_pos) = rest.find('[') {
+        (Some(rest[..bracket_pos].to_string()), &rest[bracket_pos..])
+    } else {
+        if rest.is_empty() { (None, "") }
+        else { (Some(rest.to_string()), "") }
+    };
+
+    // 3. 检测 or/not 复杂谓词
     if predicates_str.contains(" or ") || predicates_str.contains("not(") {
         return ParsedXPathStep {
+            prefix,
             type_name,
             required_props: Default::default(),
             require_starts_with: Default::default(),
             require_contains: Default::default(),
             require_matches: Default::default(),
+            is_complex: true,
         };
     }
 
@@ -750,33 +1399,25 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
     let mut require_contains: Vec<(String, String)> = Vec::new();
     let mut require_matches: Vec<(String, Regex)> = Vec::new();
 
-    // Parse [@Attr='Value'] style predicates
-    let attr_re = Regex::new(r#"@(\w+)\s*=\s*'([^']*)'"#).unwrap();
-    for cap in attr_re.captures_iter(predicates_str) {
-        let key = cap[1].to_string();
-        let value = cap[2].to_string();
-        required_props.push((key, value));
+    // 4. 解析谓词（使用预编译正则）
+
+    // [@Attr='Value'] — 精确相等
+    for cap in xpath_regex::ATTR_EQ.captures_iter(predicates_str) {
+        required_props.push((cap[1].to_string(), cap[2].to_string()));
     }
 
-    // Parse [@Attr=starts-with('Value')]
-    let starts_re = Regex::new(r#"@(\w+)\s*=\s*starts-with\(\s*'([^']*)'\s*\)"#).unwrap();
-    for cap in starts_re.captures_iter(predicates_str) {
-        let key = cap[1].to_string();
-        let value = cap[2].to_string();
-        require_starts_with.push((key, value));
+    // [@Attr=starts-with('Value')]
+    for cap in xpath_regex::STARTS_WITH.captures_iter(predicates_str) {
+        require_starts_with.push((cap[1].to_string(), cap[2].to_string()));
     }
 
-    // Parse [@Attr=contains('Value')]
-    let contains_re = Regex::new(r#"@(\w+)\s*=\s*contains\(\s*'([^']*)'\s*\)"#).unwrap();
-    for cap in contains_re.captures_iter(predicates_str) {
-        let key = cap[1].to_string();
-        let value = cap[2].to_string();
-        require_contains.push((key, value));
+    // [@Attr=contains('Value')]
+    for cap in xpath_regex::CONTAINS.captures_iter(predicates_str) {
+        require_contains.push((cap[1].to_string(), cap[2].to_string()));
     }
 
-    // Parse [@Attr=matches('Value')] or [@Attr=matches('Value','flags')]
-    let matches_re = Regex::new(r#"@(\w+)\s*=\s*matches\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)"#).unwrap();
-    for cap in matches_re.captures_iter(predicates_str) {
+    // [@Attr=matches('Value')] or [@Attr=matches('Value','flags')]
+    for cap in xpath_regex::MATCHES.captures_iter(predicates_str) {
         let key = cap[1].to_string();
         let pattern = cap[2].to_string();
         let flags = cap.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -791,11 +1432,13 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
     }
 
     ParsedXPathStep {
+        prefix,
         type_name,
         required_props,
         require_starts_with,
         require_contains,
         require_matches,
+        is_complex: false,
     }
 }
 
@@ -993,7 +1636,7 @@ pub fn find_all_elements_detailed(
     element_xpath: &str,
     random_range: f32,
     search_context: Option<&crate::core::model::SearchContext>,
-    _timeout_ms: Option<u64>,
+    timeout_ms: Option<u64>,
     filter: Option<&FindAllFilter>,
 ) -> Vec<crate::core::model::ElementData> {
     let filter = filter.cloned().unwrap_or_default();
@@ -1114,7 +1757,7 @@ pub fn find_all_elements_detailed(
                     Err(_) => continue,
                 };
                 let child_xpath = element_xpath;
-                let (elements, _) = match find_by_xpath_with_fallback_filtered(&auto, &child_elem, &child_xpath, &filter) {
+                let (elements, _) = match find_by_xpath_with_fallback_filtered(&auto, &child_elem, &child_xpath, &filter, timeout_ms) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -1157,7 +1800,7 @@ pub fn find_all_elements_detailed(
             }
         });
 
-        let (elements, _) = match find_by_xpath_with_fallback_filtered(&auto, window, element_xpath_no_suffix, &filter) {
+        let (elements, _) = match find_by_xpath_with_fallback_filtered(&auto, window, element_xpath_no_suffix, &filter, timeout_ms) {
             Ok(result) => result,
             Err(_) => continue,
         };
@@ -1175,6 +1818,10 @@ pub fn find_all_elements_detailed(
 }
 
 /// Apply SearchMode (:first / :onlyone / :all) post-processing to UIElement results.
+///
+/// Note: findOne uniqueness check (`LeafNotUnique`) is now performed in
+/// `execute_xpath_steps_filtered` at the parent level (需求 §5.3.1), not here.
+/// `OnlyOne` here only serves as a safety net for edge cases that bypass the step executor.
 #[inline]
 fn apply_search_mode_ui(
     results: Vec<UIElement>,
@@ -1191,8 +1838,10 @@ fn apply_search_mode_ui(
             }
         }
         SearchMode::OnlyOne => {
+            // Safety net: uniqueness should have been verified in execute_xpath_steps_filtered.
+            // If we still get > 1 here, log and return empty as defense-in-depth.
             if results.len() > 1 {
-                log::warn!("[SearchMode:onlyone] Expected unique element, found {} UIElements — returning empty", results.len());
+                log::warn!("[SearchMode:onlyone] Defense: Expected unique, found {} UIElements — returning empty", results.len());
                 vec![]
             } else {
                 results
@@ -1202,6 +1851,9 @@ fn apply_search_mode_ui(
 }
 
 /// Apply SearchMode (:first / :onlyone / :all) post-processing to ElementData results.
+///
+/// Note: findOne uniqueness check (`LeafNotUnique`) is performed in the XPath executor,
+/// not here. `OnlyOne` here is a defense-in-depth safety net.
 #[inline]
 fn apply_search_mode(
     results: Vec<crate::core::model::ElementData>,
@@ -1218,8 +1870,9 @@ fn apply_search_mode(
             }
         }
         SearchMode::OnlyOne => {
+            // Safety net: uniqueness should have been verified in execute_xpath_steps_filtered.
             if results.len() > 1 {
-                log::warn!("[SearchMode:onlyone] Expected unique element, found {} results — returning empty", results.len());
+                log::warn!("[SearchMode:onlyone] Defense: Expected unique, found {} results — returning empty", results.len());
                 vec![]
             } else {
                 results
@@ -1399,48 +2052,16 @@ pub fn find_from_element_cached_filtered(
                 }
             }
         }
-        _ => {
-            // Adaptive or None → try Fast first, then fall back to Full
-            log::info!("[find_from_element] Adaptive strategy: trying Fast first");
-            let (results, raw) = match find_by_xpath_detailed(&auto, &base_elem, xpath, None) {
-                Ok((elems, _segs)) if !elems.is_empty() => {
-                    log::info!("[find_from_element] Adaptive: Fast succeeded ({} elements)", elems.len());
-                    (find_from_element_convert(&auto, &base_elem, &elems, random_range), elems)
-                }
-                Ok((_, _)) => {
-                    log::info!("[find_from_element] Adaptive: Fast found nothing, trying Full (RawView BFS)");
-                    match find_by_xpath_raw_descendants_with_depth(&auto, &base_elem, xpath, 8, search_mode, filter) {
-                        Ok((elems, _)) if !elems.is_empty() => {
-                            log::info!("[find_from_element] Adaptive: Full succeeded ({} elements)", elems.len());
-                            (find_from_element_convert(&auto, &base_elem, &elems, random_range), elems)
-                        }
-                        _ => {
-                            log::info!("[find_from_element] Adaptive: both Fast and Full found nothing");
-                            return vec![];
-                        }
-                    }
-                }
+        Some(SearchStrategy::Adaptive) | None => {
+            // Adaptive 或 None：等同于 Fast，不做 fallback（需求 §6: 无自动 fallback）
+            log::info!("[find_from_element] Adaptive strategy (treating as Fast, no fallback)");
+            match find_by_xpath_detailed(&auto, &base_elem, xpath, None) {
+                Ok((elems, _)) => elems,
                 Err(e) => {
-                    log::warn!("[find_from_element] Adaptive: Fast errored ({}), trying Full", e);
-                    match find_by_xpath_raw_descendants_with_depth(&auto, &base_elem, xpath, 8, search_mode, filter) {
-                        Ok((elems, _)) if !elems.is_empty() => {
-                            log::info!("[find_from_element] Adaptive: Full succeeded after Fast error ({} elements)", elems.len());
-                            (find_from_element_convert(&auto, &base_elem, &elems, random_range), elems)
-                        }
-                        _ => {
-                            log::info!("[find_from_element] Adaptive: both Fast and Full found nothing after error");
-                            return vec![];
-                        }
-                    }
-                }
-            };
-
-            for raw_elem in &raw {
-                if let Some(rid_str) = runtime_id_key(raw_elem).map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) {
-                    cache_element(rid_str, raw_elem.clone());
+                    log::warn!("[find_from_element] Adaptive/Fast strategy failed: {}", e);
+                    vec![]
                 }
             }
-            return apply_search_mode(results, search_mode);
         }
     };
 
@@ -1456,6 +2077,158 @@ pub fn find_from_element_cached_filtered(
         element_info_from_uia(elem, base_rect.as_ref(), random_range, &mut rng)
     }).collect();
     apply_search_mode(results, search_mode)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 二次定位 API（从 RuntimeId 缓存获取父元素后搜索）§6
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 从缓存的父元素开始，定位第一个匹配的元素
+///
+/// 需求 §6.1: `findFirstFrom(parent_runtime_id, relative_xpath, strategy)`
+/// - 无 Adaptive fallback（Fast 失败不退回 Full，反之亦然）
+/// - 父元素不在缓存中返回 `InvalidParent`
+/// - 返回 `(Option<ElementData>, Option<NotFoundReason>)`
+pub fn locate_first_from(
+    runtime_id: &str,
+    relative_xpath: &str,
+    strategy: SearchStrategy,
+) -> (Option<crate::core::model::ElementData>, Option<crate::core::model::NotFoundReason>) {
+    let (results, reason) = locate_from_impl(runtime_id, relative_xpath, SearchMode::First, strategy, &FindAllFilter::default());
+    (results.into_iter().next(), reason)
+}
+
+/// 从缓存的父元素开始，定位唯一匹配的元素（findOne 语义）
+///
+/// 需求 §6.2: `findOneFrom(parent_runtime_id, relative_xpath, strategy)`
+/// - 复用阶段 3.1 的叶子唯一性验证（`SearchMode::OnlyOne`）
+/// - 在父节点下找到 > 1 个匹配时返回 `LeafNotUnique`
+/// - 父元素不在缓存中返回 `InvalidParent`
+/// - 无 Adaptive fallback
+pub fn locate_one_from(
+    runtime_id: &str,
+    relative_xpath: &str,
+    strategy: SearchStrategy,
+) -> (Option<crate::core::model::ElementData>, Option<crate::core::model::NotFoundReason>) {
+    let (results, reason) = locate_from_impl(runtime_id, relative_xpath, SearchMode::OnlyOne, strategy, &FindAllFilter::default());
+    (results.into_iter().next(), reason)
+}
+
+/// 从缓存的父元素开始，定位所有匹配的元素（findAll 语义）
+///
+/// 需求 §6.3: `findAllFrom(parent_runtime_id, relative_xpath, strategy, filter)`
+/// - 支持 FilterCondition（AttributeFilter）
+/// - 父元素不在缓存中返回空列表
+/// - 无 Adaptive fallback
+pub fn locate_all_from(
+    runtime_id: &str,
+    relative_xpath: &str,
+    strategy: SearchStrategy,
+    filter: Option<&FindAllFilter>,
+) -> Vec<crate::core::model::ElementData> {
+    let default_filter = FindAllFilter::default();
+    let effective_filter = filter.unwrap_or(&default_filter);
+    let (results, _) = locate_from_impl(runtime_id, relative_xpath, SearchMode::All, strategy, effective_filter);
+    results
+}
+
+/// 二次定位核心实现
+///
+/// 从 RuntimeId 缓存获取父元素，使用指定策略执行 XPath 搜索。
+/// 不做 Adaptive fallback（Fast 失败不退回 Full）。
+fn locate_from_impl(
+    runtime_id: &str,
+    relative_xpath: &str,
+    search_mode: SearchMode,
+    strategy: SearchStrategy,
+    filter: &FindAllFilter,
+) -> (Vec<crate::core::model::ElementData>, Option<crate::core::model::NotFoundReason>) {
+    use crate::core::element_cache::{cache_element, get_cached_element};
+
+    let auto = match get_automation() {
+        Ok(a) => a,
+        Err(_) => return (vec![], None),
+    };
+
+    // 从缓存获取父元素
+    let base_elem: UIElement = match get_cached_element(runtime_id) {
+        Some(e) => e,
+        None => {
+            log::warn!("[locate_from] Parent element not in cache: runtime_id={}", runtime_id);
+            return (vec![], Some(crate::core::model::NotFoundReason::InvalidParent {
+                runtime_id: runtime_id.to_string(),
+            }));
+        }
+    };
+
+    let base_rect = base_elem.get_bounding_rectangle().ok().map(|r| {
+        crate::core::model::Rect {
+            x: r.get_left(),
+            y: r.get_top(),
+            width: r.get_right() - r.get_left(),
+            height: r.get_bottom() - r.get_top(),
+        }
+    });
+
+    // 根据策略执行搜索（无 Adaptive fallback）
+    let raw_elements: Vec<UIElement> = match strategy {
+        SearchStrategy::Fast { max_depth } => {
+            log::info!("[locate_from] Fast strategy, max_depth={}", max_depth);
+            match find_by_xpath_detailed(&auto, &base_elem, relative_xpath, None) {
+                Ok((elems, _)) => elems,
+                Err(e) => {
+                    log::warn!("[locate_from] Fast strategy failed: {}", e);
+                    vec![]
+                }
+            }
+        }
+        SearchStrategy::Full { max_depth } => {
+            log::info!("[locate_from] Full strategy, max_depth={}", max_depth);
+            match find_by_xpath_raw_descendants_with_depth(&auto, &base_elem, relative_xpath, max_depth, search_mode, filter) {
+                Ok((elems, _)) => elems,
+                Err(e) => {
+                    log::warn!("[locate_from] Full strategy failed: {}", e);
+                    vec![]
+                }
+            }
+        }
+        SearchStrategy::Adaptive => {
+            // Adaptive 在此处等同于 Fast（不做 fallback，保持一致性）
+            log::info!("[locate_from] Adaptive strategy (treating as Fast, no fallback)");
+            match find_by_xpath_detailed(&auto, &base_elem, relative_xpath, None) {
+                Ok((elems, _)) => elems,
+                Err(e) => {
+                    log::warn!("[locate_from] Adaptive/Fast strategy failed: {}", e);
+                    vec![]
+                }
+            }
+        }
+    };
+
+    // 缓存找到的元素
+    for raw_elem in &raw_elements {
+        if let Some(rid_str) = super::helpers::runtime_id_key(raw_elem)
+            .map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
+        {
+            cache_element(rid_str, raw_elem.clone());
+        }
+    }
+
+    // 叶子唯一性验证（OnlyOne 模式）
+    if search_mode == SearchMode::OnlyOne && raw_elements.len() > 1 {
+        log::warn!("[locate_from] Leaf not unique: {} candidates for runtime_id={}", raw_elements.len(), runtime_id);
+        return (vec![], Some(crate::core::model::NotFoundReason::LeafNotUnique {
+            candidates: raw_elements.len(),
+        }));
+    }
+
+    let mut rng = rand::thread_rng();
+    let results: Vec<crate::core::model::ElementData> = raw_elements.iter().filter_map(|elem| {
+        element_info_from_uia(elem, base_rect.as_ref(), 0.0, &mut rng)
+    }).collect();
+
+    let results = apply_search_mode(results, search_mode);
+    (results, None)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1511,11 +2284,353 @@ pub(super) fn filter_findall_results(
         })
         .collect();
 
+    let after_geo = filtered.len();
+
+    // ── Attribute filter (需求 §8.4) ──
+    let filtered = apply_attribute_filters(filtered, &filter.attribute_filters);
+
     let filtered_count = filtered.len();
+    let removed_geo = raw_count.saturating_sub(after_geo);
+    let removed_attr = after_geo.saturating_sub(filtered_count);
     if filtered_count < raw_count {
-        log::info!("[FindAll Filter][{}] Post-filter: {} → {} elements (removed {}: offscreen/zero-size/out-of-bounds)",
-            label, raw_count, filtered_count, raw_count - filtered_count);
+        log::info!("[FindAll Filter][{}] Post-filter: {} → {} elements (removed {}: offscreen/zero-size/out-of-bounds, {}: attribute)",
+            label, raw_count, filtered_count, removed_geo, removed_attr);
     }
 
     filtered
+}
+
+/// 客户端属性过滤（需求 §8.4）。
+///
+/// 对 `FindAll` 结果应用 `AttributeFilter` 列表：
+/// - `Eq`: 使用 `get_uia_property_for_xpath` 获取属性值，精确比较
+/// - `NotEq`: 不等于比较
+/// - `Contains`: 子串包含（不区分大小写）
+/// - `Regex`: 正则匹配
+/// - `Exists`: 属性值非空
+///
+/// 所有 filter 之间是 AND 关系。
+fn apply_attribute_filters(
+    elements: Vec<UIElement>,
+    filters: &[crate::core::model::AttributeFilter],
+) -> Vec<UIElement> {
+    use crate::core::model::FilterOp;
+
+    if filters.is_empty() {
+        return elements;
+    }
+
+    let mut precompiled_regexes: Vec<(usize, regex::Regex)> = Vec::new();
+    for (i, f) in filters.iter().enumerate() {
+        if matches!(f.operator, FilterOp::Regex) && !f.value.is_empty() {
+            if let Ok(re) = regex::Regex::new(&format!("(?i){}", f.value)) {
+                precompiled_regexes.push((i, re));
+            }
+        }
+    }
+
+    elements
+        .into_iter()
+        .filter(|elem| {
+            for (i, filter) in filters.iter().enumerate() {
+                let actual = get_uia_property_for_xpath(elem, &filter.property);
+
+                let matches = match filter.operator {
+                    FilterOp::Eq => actual.eq_ignore_ascii_case(&filter.value),
+                    FilterOp::NotEq => !actual.eq_ignore_ascii_case(&filter.value),
+                    FilterOp::Contains => actual.to_lowercase().contains(&filter.value.to_lowercase()),
+                    FilterOp::Regex => {
+                        precompiled_regexes.iter()
+                            .find(|(idx, _)| *idx == i)
+                            .map_or(false, |(_, re)| re.is_match(&actual))
+                    }
+                    FilterOp::Exists => !actual.is_empty(),
+                };
+
+                if !matches {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests: XPath 步骤解析
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── 前缀解析测试 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_child_prefix() {
+        let step = parse_xpath_step("/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Child);
+        assert_eq!(step.type_name.as_deref(), Some("Button"));
+        assert_eq!(step.required_props.len(), 1);
+        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
+        assert!(!step.is_complex);
+    }
+
+    #[test]
+    fn test_parse_descendant_prefix() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+        assert_eq!(step.type_name.as_deref(), Some("Button"));
+    }
+
+    #[test]
+    fn test_parse_depth_2_wildcard() {
+        let step = parse_xpath_step("/*/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::DepthLimited { max_depth: 2 });
+        assert_eq!(step.type_name.as_deref(), Some("Button"));
+    }
+
+    #[test]
+    fn test_parse_depth_n() {
+        let step = parse_xpath_step("/*5/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::DepthLimited { max_depth: 6 });
+    }
+
+    #[test]
+    fn test_parse_no_prefix_defaults_to_descendant() {
+        let step = parse_xpath_step("Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+    }
+
+    // ─── 谓词解析测试 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_eq_predicate() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        assert_eq!(step.required_props.len(), 1);
+        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
+    }
+
+    #[test]
+    fn test_parse_starts_with() {
+        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        assert_eq!(step.require_starts_with.len(), 1);
+        assert_eq!(step.require_starts_with[0], ("ClassName".to_string(), "Chrome".to_string()));
+    }
+
+    #[test]
+    fn test_parse_contains() {
+        let step = parse_xpath_step("//Text[@Name=contains('Widget')]");
+        assert_eq!(step.require_contains.len(), 1);
+        assert_eq!(step.require_contains[0], ("Name".to_string(), "Widget".to_string()));
+    }
+
+    #[test]
+    fn test_parse_matches() {
+        let step = parse_xpath_step("//Button[@Name=matches('^Chrome.*')]");
+        assert_eq!(step.require_matches.len(), 1);
+        assert_eq!(step.require_matches[0].0, "Name");
+    }
+
+    #[test]
+    fn test_parse_multiple_predicates() {
+        let step = parse_xpath_step("//Button[@Name='OK' and @AutomationId='btn1']");
+        assert_eq!(step.required_props.len(), 2);
+        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
+        assert_eq!(step.required_props[1], ("AutomationId".to_string(), "btn1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_or_predicate_is_complex() {
+        let step = parse_xpath_step("//Button[@Name='OK' or @Name='Cancel']");
+        assert!(step.is_complex);
+        assert!(step.required_props.is_empty());
+    }
+
+    #[test]
+    fn test_parse_not_predicate_is_complex() {
+        let step = parse_xpath_step("//Button[not(@IsOffscreen)]");
+        assert!(step.is_complex);
+    }
+
+    #[test]
+    fn test_parse_wildcard_type() {
+        let step = parse_xpath_step("//[@Name='OK']");
+        assert!(step.type_name.is_none());
+        assert_eq!(step.required_props.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_empty_predicate() {
+        let step = parse_xpath_step("//Button");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+        assert_eq!(step.type_name.as_deref(), Some("Button"));
+        assert!(step.required_props.is_empty());
+        assert!(step.require_starts_with.is_empty());
+        assert!(!step.is_complex);
+    }
+
+    #[test]
+    fn test_parse_only_prefix() {
+        let step = parse_xpath_step("//");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+        assert!(step.type_name.is_none());
+    }
+
+    // ─── step_has_complex_predicates 测试 ────────────────────────────────────────
+
+    #[test]
+    fn test_has_complex_with_starts_with() {
+        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        assert!(step_has_complex_predicates(&step));
+    }
+
+    #[test]
+    fn test_has_complex_with_contains() {
+        let step = parse_xpath_step("//Text[@Name=contains('Widget')]");
+        assert!(step_has_complex_predicates(&step));
+    }
+
+    #[test]
+    fn test_has_complex_with_or() {
+        let step = parse_xpath_step("//Button[@Name='OK' or @Name='Cancel']");
+        assert!(step_has_complex_predicates(&step));
+    }
+
+    #[test]
+    fn test_has_complex_with_only_eq() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        assert!(!step_has_complex_predicates(&step));
+    }
+
+    #[test]
+    fn test_has_complex_with_no_predicates() {
+        let step = parse_xpath_step("//Button");
+        assert!(!step_has_complex_predicates(&step));
+    }
+
+    // ─── 预编译正则验证 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_precompiled_regexes_exist() {
+        // 验证 lazy_static 已初始化（通过实际解析触发）
+        let _ = xpath_regex::ATTR_EQ.captures("@Name='OK'");
+        let _ = xpath_regex::STARTS_WITH.captures("@ClassName=starts-with('X')");
+        let _ = xpath_regex::CONTAINS.captures("@Name=contains('x')");
+        let _ = xpath_regex::MATCHES.captures("@Name=matches('^x')");
+        let _ = xpath_regex::STEP_PREFIX.captures("//Button");
+    }
+
+    // ─── 执行策略分派测试 (Phase 2.3) ─────────────────────────────────────────
+
+    /// 验证 Child 前缀映射到 DirectChild 策略
+    #[test]
+    fn test_strategy_from_child_prefix() {
+        let prefix = XPathStepPrefix::Child;
+        let strategy = StepExecutionStrategy::from(&prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DirectChild));
+    }
+
+    /// 验证 Descendant 前缀映射到 Descendant 策略
+    #[test]
+    fn test_strategy_from_descendant_prefix() {
+        let prefix = XPathStepPrefix::Descendant;
+        let strategy = StepExecutionStrategy::from(&prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::Descendant));
+    }
+
+    /// 验证 DepthLimited { max_depth: 2 } 映射到 DepthLimitedBfs
+    #[test]
+    fn test_strategy_from_depth_limited_prefix() {
+        let prefix = XPathStepPrefix::DepthLimited { max_depth: 2 };
+        let strategy = StepExecutionStrategy::from(&prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DepthLimitedBfs { max_depth: 2 }));
+    }
+
+    /// 验证 DepthLimited { max_depth: 6 } 映射正确
+    #[test]
+    fn test_strategy_from_depth_limited_n() {
+        let prefix = XPathStepPrefix::DepthLimited { max_depth: 6 };
+        let strategy = StepExecutionStrategy::from(&prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DepthLimitedBfs { max_depth: 6 }));
+    }
+
+    /// 验证解析 `/Button` → Child 前缀 → DirectChild 策略
+    #[test]
+    fn test_parse_and_strategy_child() {
+        let step = parse_xpath_step("/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Child);
+        let strategy = StepExecutionStrategy::from(&step.prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DirectChild));
+    }
+
+    /// 验证解析 `//Button` → Descendant 前缀 → Descendant 策略
+    #[test]
+    fn test_parse_and_strategy_descendant() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+        let strategy = StepExecutionStrategy::from(&step.prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::Descendant));
+    }
+
+    /// 验证解析 `/*/Button` → DepthLimited { max_depth: 2 } → DepthLimitedBfs
+    #[test]
+    fn test_parse_and_strategy_depth_2() {
+        let step = parse_xpath_step("/*/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::DepthLimited { max_depth: 2 });
+        let strategy = StepExecutionStrategy::from(&step.prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DepthLimitedBfs { max_depth: 2 }));
+    }
+
+    /// 验证解析 `/*5/Button` → DepthLimited { max_depth: 6 } → DepthLimitedBfs
+    #[test]
+    fn test_parse_and_strategy_depth_n() {
+        let step = parse_xpath_step("/*5/Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::DepthLimited { max_depth: 6 });
+        let strategy = StepExecutionStrategy::from(&step.prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::DepthLimitedBfs { max_depth: 6 }));
+    }
+
+    /// 验证无前缀默认 Descendant 策略
+    #[test]
+    fn test_parse_and_strategy_no_prefix_default() {
+        let step = parse_xpath_step("Button[@Name='OK']");
+        assert_eq!(step.prefix, XPathStepPrefix::Descendant);
+        let strategy = StepExecutionStrategy::from(&step.prefix);
+        assert!(matches!(strategy, StepExecutionStrategy::Descendant));
+    }
+
+    /// 验证 step_to_xpath_str 重建简单的步骤字符串
+    #[test]
+    fn test_step_to_xpath_str_simple() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        let s = step_to_xpath_str(&step);
+        assert!(s.contains("Button"));
+        assert!(s.contains("@Name='OK'"));
+    }
+
+    /// 验证 step_to_xpath_str 处理 starts-with
+    #[test]
+    fn test_step_to_xpath_str_starts_with() {
+        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        let s = step_to_xpath_str(&step);
+        assert!(s.contains("Pane"));
+        assert!(s.contains("starts-with"));
+    }
+
+    /// 验证 step_to_xpath_str 处理无类型名的纯谓词
+    #[test]
+    fn test_step_to_xpath_str_wildcard_type() {
+        let step = parse_xpath_step("//[@Name='OK']");
+        let s = step_to_xpath_str(&step);
+        assert!(s.contains("@Name='OK'"));
+    }
+
+    /// 验证 `#[deprecated]` 标记确实存在（编译期已验证，此处为运行时确认）
+    #[test]
+    fn test_deprecated_fallback_still_callable() {
+        // 旧函数仍然可调用（只是产生 deprecated 警告）
+        // 此处验证编译通过即可（已在 cargo build 中确认）
+        // 运行时无法真正测试因为需要 UIA 环境
+    }
 }

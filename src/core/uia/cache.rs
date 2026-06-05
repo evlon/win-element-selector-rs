@@ -171,11 +171,62 @@ pub fn xpath_cache_stats() -> (usize, u64) {
     }
 }
 
+/// XPath 步骤前缀类型
+///
+/// 对应需求文档 §5.2 的 XPath 语法：
+/// - `/A` — 直接子元素
+/// - `//A` — 所有后代（无限深度）
+/// - `/*/A` — 深度限制为 2（孙子）
+/// - `/*n/A` — 深度限制为 n+1
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum XPathStepPrefix {
+    /// `/A` — 直接子元素
+    Child,
+    /// `//A` — 所有后代（无限深度）
+    Descendant,
+    /// `/*n/A` — 深度限制为 n+1（`/*/A` → max_depth=2, `/*5/A` → max_depth=6）
+    DepthLimited { max_depth: u32 },
+}
+
+/// XPath 步骤的执行策略
+///
+/// 根据 `XPathStepPrefix` 决定如何执行搜索。
+#[derive(Debug, Clone)]
+pub(super) enum StepExecutionStrategy {
+    /// 直接子元素：`FindFirst(TreeScope::Children, condition)`
+    DirectChild,
+    /// 后代搜索：`FindFirst(TreeScope::Descendants, condition)` 或 `FindAll(Subtree, condition)`
+    Descendant,
+    /// 深度限制 BFS：逐层 Children 遍历，限制深度
+    DepthLimitedBfs { max_depth: u32 },
+}
+
+impl From<&XPathStepPrefix> for StepExecutionStrategy {
+    fn from(prefix: &XPathStepPrefix) -> Self {
+        match prefix {
+            XPathStepPrefix::Child => StepExecutionStrategy::DirectChild,
+            XPathStepPrefix::Descendant => StepExecutionStrategy::Descendant,
+            XPathStepPrefix::DepthLimited { max_depth } => {
+                StepExecutionStrategy::DepthLimitedBfs { max_depth: *max_depth }
+            }
+        }
+    }
+}
+
 pub(super) struct ParsedXPathStep {
+    /// 步骤前缀类型
+    pub(super) prefix: XPathStepPrefix,
+    /// ControlType 名称（如 "Button", "Text", None 表示通配 *）
     pub(super) type_name: Option<String>,
+    /// 精确匹配属性: @Name='value'
     pub(super) required_props: Vec<(String, String)>,
+    /// starts-with 谓词: starts-with(@Name, 'value')
     pub(super) require_starts_with: Vec<(String, String)>,
+    /// contains 谓词: contains(@Name, 'value')
     pub(super) require_contains: Vec<(String, String)>,
+    /// 正则匹配谓词: matches(@Name, 'pattern')
     pub(super) require_matches: Vec<(String, regex::Regex)>,
+    /// 是否为 or/not 复杂谓词（无法用简单属性表达，需客户端二次过滤）
+    pub(super) is_complex: bool,
 }
 

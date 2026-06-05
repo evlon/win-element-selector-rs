@@ -180,7 +180,7 @@ pub fn validate_selector_and_xpath_detailed(
                 let child_xpath = element_xpath;
                 
                 let t_find = Instant::now();
-                match find_by_xpath_with_fallback(&auto, &child_elem, &child_xpath) {
+                match find_by_xpath_with_fallback(&auto, &child_elem, &child_xpath, effective_timeout) {
                     Ok((results, segments)) => {
                         log::info!("[PERF][CHILD] HWND[{}] find_by_xpath_with_fallback: {}ms, {} results", 
                             hwnd_idx, t_find.elapsed().as_millis(), results.len());
@@ -316,7 +316,7 @@ pub fn validate_selector_and_xpath_detailed(
             }
         }
 
-        match find_by_xpath_with_fallback(&auto, search_root, element_xpath) {
+        match find_by_xpath_with_fallback(&auto, search_root, element_xpath, effective_timeout) {
             Ok((results, segments)) => {
                 let window_duration = stage2_window_start.elapsed().as_millis();
                 if !results.is_empty() {
