@@ -656,9 +656,64 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
             }
             let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
             set_walker_hints(&mut hierarchy, window_pid);
+
+            // Set included flag for fallback path (same as main path)
+            for (i, node) in hierarchy.iter_mut().enumerate() {
+                node.included = i != 0;
+            }
+
             let window_info = extract_window_info(&hierarchy);
             info!("[Enhanced] Fallback hierarchy depth={}", hierarchy.len());
-            return Ok(CaptureResult { hierarchy, cursor_x: x, cursor_y: y, error: None, window_info, capture_mode: CaptureMode::Enhanced, locate_mode: LocateMode::Full, search_context: SearchContext::default_full() });
+
+            // Cross-process detection for fallback path
+            // (Same logic as main path — BFS may have failed because the element
+            // is in a different process, e.g. Chrome WebView)
+            let mut locate_mode = LocateMode::Full;
+            let mut child_hwnd_hint: Option<crate::core::model::ChildHwndHint> = None;
+            if let Some(boundary_idx) = find_cross_boundary_index(&hierarchy, window_pid) {
+                info!("[Enhanced] Fallback: cross-process detected at index {} (class='{}'), switching to FullChild mode",
+                    boundary_idx, hierarchy.get(boundary_idx).map(|n| n.class_name.as_str()).unwrap_or("?"));
+                if let Some(boundary_node) = hierarchy.get(boundary_idx) {
+                    child_hwnd_hint = Some(crate::core::model::ChildHwndHint {
+                        hwnd_class: boundary_node.class_name.clone(),
+                        hwnd_title: boundary_node.name.clone(),
+                    });
+                }
+                hierarchy = truncate_hierarchy_to_child(hierarchy, boundary_idx, window_pid);
+                locate_mode = LocateMode::FullChild;
+            }
+
+            let empty = String::new();
+            let empty2 = String::new();
+            let target_ct = hierarchy.last().map(|n| &n.control_type).unwrap_or(&empty);
+            let target_name = hierarchy.last().map(|n| &n.name).unwrap_or(&empty2);
+            info!("[Enhanced] Fallback hierarchy: depth={} target='{}' name='{}' mode={:?}",
+                hierarchy.len(), target_ct, target_name, locate_mode);
+
+            let search_root = if locate_mode.is_child_mode() {
+                if let Some(hint) = &child_hwnd_hint {
+                    crate::core::model::SearchRoot::ChildHwnd {
+                        class: hint.hwnd_class.clone(),
+                        title: hint.hwnd_title.clone(),
+                    }
+                } else {
+                    crate::core::model::SearchRoot::Window
+                }
+            } else {
+                crate::core::model::SearchRoot::Window
+            };
+
+            let search_context = SearchContext {
+                locate_mode,
+                child_hwnd_hint,
+                search_root,
+            };
+
+            return Ok(CaptureResult {
+                hierarchy, cursor_x: x, cursor_y: y, error: None, window_info,
+                capture_mode: CaptureMode::Enhanced, locate_mode,
+                search_context,
+            });
         }
     };
 

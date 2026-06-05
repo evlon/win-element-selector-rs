@@ -45,10 +45,11 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Initialize the global input hook system (rdev grab).
+    // Initialize input hook channels (hook installs lazily on capture, not at startup).
+    // This avoids WH_MOUSE_LL running all the time, which freezes the mouse
+    // when the debugger hits a breakpoint.
     input_hook::init()
         .expect("Failed to initialize input hook system");
-    info!("Input hook system initialized");
 
     // Load fonts from Windows system fonts
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = {

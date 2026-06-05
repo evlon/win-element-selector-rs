@@ -368,7 +368,7 @@ pub(super) fn find_by_xpath_with_fallback_filtered(
             has_webview_class || has_chrome_fwid
         });
         
-        // Strategy 1: Try from window root (ControlViewWalker/uiauto-xpath)
+        // Strategy 1: Try from window root (RawViewWalker/uiauto-xpath)
         if first_step_is_webview {
             log::info!("[XPath Fallback] /XPath — Strategy 1: SKIPPED (first step has WebView class, ControlViewWalker won't find it)");
         } else {
