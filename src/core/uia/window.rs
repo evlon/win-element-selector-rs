@@ -59,7 +59,7 @@ pub fn activate_and_focus_element(window_selector: &str, xpath: &str) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(100));
         
         // Find target element using find_by_xpath_detailed
-        if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window_element, xpath, 5000) {
+        if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
             if !elements.is_empty() {
                 if elements[0].set_focus().ok().is_some() {
                     return true;

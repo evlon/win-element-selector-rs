@@ -643,8 +643,8 @@ pub enum NotFoundReason {
     WindowNotFound,
     /// 子窗口未找到（Child 模式）
     ChildHwndNotFound { class: String },
-    /// XPath 第 N 步匹配失败
-    XPathStepFailed { step: usize, detail: String },
+    /// XPath 第 N 步匹配失败（需求 §7.2）
+    StepNotFound { step: usize, xpath_step: String },
     /// 元素已消失（窗口在但元素不在）
     ElementGone,
     /// 搜索超时
@@ -660,7 +660,7 @@ impl std::fmt::Display for NotFoundReason {
         match self {
             NotFoundReason::WindowNotFound => write!(f, "窗口未找到"),
             NotFoundReason::ChildHwndNotFound { class } => write!(f, "子窗口未找到(class={})", class),
-            NotFoundReason::XPathStepFailed { step, detail } => write!(f, "XPath第{}步失败: {}", step, detail),
+            NotFoundReason::StepNotFound { step, xpath_step } => write!(f, "XPath第{}步未找到: {}", step, xpath_step),
             NotFoundReason::ElementGone => write!(f, "元素已消失"),
             NotFoundReason::Timeout { budget_ms, elapsed_ms } => write!(f, "搜索超时(预算{}ms, 耗时{}ms)", budget_ms, elapsed_ms),
             NotFoundReason::LeafNotUnique { candidates } => write!(f, "叶子节点不唯一(找到{}个候选)", candidates),

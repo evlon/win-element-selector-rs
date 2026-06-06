@@ -182,7 +182,7 @@ pub fn inspect_subtree(
                 };
                 // Child HWND filtering via prefix attributes; XPath used as-is
                 let child_xpath = element_xpath;
-                if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, &child_elem, &child_xpath, 5000) {
+                if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &FindAllFilter::default(), Some(5000)) {
                     if let Some(elem) = elements.into_iter().next() {
                         target_element = Some(elem);
                         break;
@@ -195,7 +195,7 @@ pub fn inspect_subtree(
         }
     } else {
         for window in &windows {
-            if let Ok((elements, _)) = find_by_xpath_with_fallback(&auto, window, element_xpath, 5000) {
+            if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, window, element_xpath, &FindAllFilter::default(), Some(5000)) {
                 if let Some(elem) = elements.into_iter().next() {
                     target_element = Some(elem);
                     break;

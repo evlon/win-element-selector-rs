@@ -10,7 +10,7 @@ pub fn invoke_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Re
     }
 
     for window_element in &windows {
-        match find_by_xpath_with_fallback(&auto, window_element, xpath, 5000) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;
@@ -70,7 +70,7 @@ pub fn focus_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Res
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        match find_by_xpath_with_fallback(&auto, window_element, xpath, 5000) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;
@@ -112,7 +112,7 @@ pub fn set_value_by_xpath(window_selector: &str, xpath: &str, value: &str) -> an
     }
 
     for window_element in &windows {
-        match find_by_xpath_with_fallback(&auto, window_element, xpath, 5000) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;

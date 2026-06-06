@@ -180,9 +180,9 @@ pub fn validate_selector_and_xpath_detailed(
                 let child_xpath = element_xpath;
                 
                 let t_find = Instant::now();
-                match find_by_xpath_with_fallback(&auto, &child_elem, &child_xpath, effective_timeout) {
+                match execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &FindAllFilter::default(), Some(effective_timeout)) {
                     Ok((results, segments)) => {
-                        log::info!("[PERF][CHILD] HWND[{}] find_by_xpath_with_fallback: {}ms, {} results", 
+                        log::info!("[PERF][CHILD] HWND[{}] execute_xpath_steps: {}ms, {} results", 
                             hwnd_idx, t_find.elapsed().as_millis(), results.len());
                         if !results.is_empty() {
                             // Use BuildCache to batch-prefetch BoundingRectangle + IsOffscreen
@@ -316,7 +316,7 @@ pub fn validate_selector_and_xpath_detailed(
             }
         }
 
-        match find_by_xpath_with_fallback(&auto, search_root, element_xpath, effective_timeout) {
+        match execute_xpath_steps_filtered(&auto, search_root, element_xpath, &FindAllFilter::default(), Some(effective_timeout)) {
             Ok((results, segments)) => {
                 let window_duration = stage2_window_start.elapsed().as_millis();
                 if !results.is_empty() {
@@ -360,7 +360,8 @@ pub fn validate_selector_and_xpath_detailed(
                 elapsed_ms: total_start.elapsed().as_millis() as u64,
             })
         } else {
-            Some(NotFoundReason::ElementGone)
+            // ── 从 segment_results 提取失败原因（需求 §7.2）──
+            extract_not_found_reason_from_segments(&segments)
         };
         ValidationResult::NotFound { reason }
     } else {
@@ -482,6 +483,44 @@ pub fn validate_selector_and_xpath_detailed(
         is_offscreen,
         not_found_reason,
     }
+}
+
+/// 从 segment_results 中提取 NotFoundReason（需求 §7.2）。
+///
+/// 遍历 segments，找到最后一个匹配失败的步骤，根据 predicate_failures 判断：
+/// - 如果 attr_name == "findOne" → `LeafNotUnique`
+/// - 如果 attr_name == "Timeout" → `Timeout`（已在调用方检查，此处作为 safety net）
+/// - 否则 → `StepNotFound { step, xpath_step }`
+fn extract_not_found_reason_from_segments(
+    segments: &[SegmentValidationResult],
+) -> Option<NotFoundReason> {
+    // 找到最后一个 matched == false 的 segment
+    let failed_segment = segments.iter().rev().find(|s| !s.matched)?;
+
+    // 检查 predicate_failures 判断具体失败类型
+    for pf in &failed_segment.predicate_failures {
+        if pf.attr_name == "findOne" {
+            // 从 actual_value 中解析 candidates 数量
+            let candidates = pf.actual_value.as_ref()
+                .and_then(|v| v.split_whitespace().next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(failed_segment.match_count.max(2));
+            return Some(NotFoundReason::LeafNotUnique { candidates });
+        }
+        if pf.attr_name == "Timeout" {
+            // Timeout 已在调用方通过 elapsed 检查，这里作为 safety net
+            return Some(NotFoundReason::Timeout {
+                budget_ms: 0,
+                elapsed_ms: failed_segment.duration_ms,
+            });
+        }
+    }
+
+    // 默认：步骤未找到
+    Some(NotFoundReason::StepNotFound {
+        step: failed_segment.segment_index + 1, // 1-based for display
+        xpath_step: failed_segment.segment_text.clone(),
+    })
 }
 
 /// Parse and strip the first element step from an XPath expression.
@@ -618,7 +657,7 @@ pub(super) fn parse_first_xpath_step(xpath: &str) -> (Option<ChildHwndHint>, Str
         predicate_text,
     );
 
-    // ★ Preserve the locate mode prefix so downstream (find_by_xpath_with_fallback)
+    // ★ Preserve the locate mode prefix so downstream (execute_xpath_steps_filtered)
     // can still detect [fast-child]/[full-child] and apply the correct strategy.
     // For new format, prefix_len already includes the attrs, but we emit clean "[fast-child]".
     let remaining = if !prefix_str.is_empty() {
