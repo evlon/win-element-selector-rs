@@ -103,7 +103,9 @@ pub(super) fn execute_xpath_steps_filtered(
     }
 
     // ── Parse XPath steps ──
-    let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+    // 不能用 naive split('/')：`/*9/Text[@Name='背影']` 会丢失前缀变成 `["*9", "Text"]`
+    // 需要用正则保留 `//`, `/*n/`, `/` 前缀。
+    let xpath_parts: Vec<&str> = split_xpath_steps(xpath);
     if xpath_parts.is_empty() {
         return Ok((vec![], vec![]));
     }
@@ -223,6 +225,7 @@ pub(super) fn execute_xpath_steps_filtered(
 
         if next_elements.is_empty() {
             log::info!("[ExecuteXPath] Step {} not found, stopping", step_idx + 1);
+            current_elements.clear();
             break;
         }
 
@@ -240,6 +243,42 @@ pub(super) fn execute_xpath_steps_filtered(
 }
 
 // ── execute_xpath_steps helpers ───────────────────────────────────────────
+
+/// 分割 XPath 为步骤，保留前缀（`//`, `/*n/`, `/`）。
+///
+/// 不能用 naive `split('/')`：`/*9/Text[@Name='背影']` 会变成 `["*9", "Text"]`，
+/// 丢失 `/*` 前缀导致 `*9` 被误识别为 Descendant 而不是 DepthLimited。
+///
+/// 返回的步骤保留完整前缀，例如：
+/// - `//Button/Text` → `["//Button", "Text"]`
+/// - `/*9/Text[@Name='x']` → `["/*9", "Text[@Name='x']"]`
+/// - `/Pane/Button` → `["Pane", "Button"]`（第一个 `/` 表示从根开始，不保留）
+fn split_xpath_steps(xpath: &str) -> Vec<&str> {
+    use regex::Regex;
+    use once_cell::sync::Lazy;
+    static STEP_SPLIT: Lazy<Regex> = Lazy::new(|| {
+        // 匹配：`/` 之后不是 `/` 也不是 `*` 的边界，或者是 `/*n` 或 `/*` 边界
+        // 策略：在 `/(?!/)` 处分割，但 `/*` 是前缀的一部分，不能在此分割
+        // 正确做法：匹配 `/(?![/*])` 处分割（单独 `/`），或者在下一个 `//` 或 `/*n/` 或 `/` 处分割
+        // 简化：手动解析
+        Regex::new(r"(//|/\*\d*/|/\*/|/)([^/]+)").unwrap()
+    });
+
+    STEP_SPLIT.captures_iter(xpath)
+        .map(|cap| {
+            let full = cap.get(0).unwrap().as_str();
+            // 去掉前导的单个 `/`（非 `//` 且非 `/*`）
+            let stripped = if full.starts_with("//") || full.starts_with("/*") {
+                full
+            } else if full.starts_with('/') {
+                &full[1..]
+            } else {
+                full
+            };
+            stripped
+        })
+        .collect()
+}
 
 /// Execute a cached strategy. Returns `None` if cached strategy failed (stale cache).
 fn execute_cached_strategy(
@@ -793,9 +832,10 @@ mod xpath_regex {
     pub(super) static MATCHES: Lazy<Regex> = Lazy::new(||
         Regex::new(r#"@(\w+)\s*=\s*matches\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)"#).unwrap()
     );
-    /// 步骤前缀解析: `//`, `/*/`, `/*n/`, `/`
+    /// 步骤前缀解析: `//`, `/*/`, `/*n/`, `/`, 以及不带尾部 `/` 的 `/*n`
+    /// 当 XPath 被 split 后，`/*9/Text` 变成 `/*9` + `Text`，所以 `/*9` 也需要能匹配
     pub(super) static STEP_PREFIX: Lazy<Regex> = Lazy::new(||
-        Regex::new(r"^(//|/\*(\d+)?/|/)").unwrap()
+        Regex::new(r"^(//|/\*(\d+)?/?|/)").unwrap()
     );
 }
 
