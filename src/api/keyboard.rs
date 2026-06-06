@@ -1045,6 +1045,7 @@ mod tests {
             type_mode: None,
             window: None,
             element: None,
+            runtime_id: None,
         };
         assert!(request.text.is_empty());
     }
@@ -1058,6 +1059,7 @@ mod tests {
             type_mode: None,
             window: None,
             element: None,
+            runtime_id: None,
         };
         assert_eq!(request.text.chars().count(), 5);
     }

@@ -1619,7 +1619,7 @@ mod tests {
                 process_id: 1234,
                 process_name: "notepad".to_string(),
             }),
-            capture_mode: CaptureMode::Fast,
+            capture_mode: CaptureMode::Normal,
             locate_mode: LocateMode::Fast,
             search_context: SearchContext::default_fast(),
         };
@@ -1642,7 +1642,7 @@ mod tests {
             cursor_y: 300,
             error: None,
             window_info: None,
-            capture_mode: CaptureMode::Fast,
+            capture_mode: CaptureMode::Normal,
             locate_mode: LocateMode::Fast,
             search_context: SearchContext::default_fast(),
         };
