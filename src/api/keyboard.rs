@@ -229,6 +229,9 @@ pub struct TypeRequest {
     /// Value/Clipboard 模式需要的元素 XPath
     #[serde(default)]
     pub element: Option<String>,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -600,8 +603,9 @@ pub async fn type_text(body: web::Json<TypeRequest>) -> impl Responder {
                 }
             };
             let text = request.text.clone();
+            let rid = request.runtime_id.clone();
             let result = tokio::task::spawn_blocking(move || {
-                super::super::core::uia::set_value_by_xpath(&window, &element, &text)
+                super::super::core::uia::set_value_by_xpath(&window, &element, &text, rid.as_deref())
             }).await;
 
             match result {

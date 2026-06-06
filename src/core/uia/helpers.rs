@@ -189,7 +189,7 @@ pub(super) fn compute_element_visible_rect(
     }
 }
 
-pub(super) fn element_info_from_uia<R: rand::Rng>(
+pub fn element_info_from_uia<R: rand::Rng>(
     elem: &UIElement,
     container_rect: Option<&crate::core::model::Rect>,
     random_range: f32,

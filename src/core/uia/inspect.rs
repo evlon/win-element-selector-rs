@@ -276,6 +276,85 @@ pub fn inspect_subtree(
     }
 }
 
+/// Inspect subtree from a pre-resolved UIElement (no XPath search).
+/// Used by the runtimeId cache path.
+pub fn inspect_subtree_from_elem(
+    root_element: &UIElement,
+    _window_selector: &str,
+    max_depth: usize,
+    max_nodes: usize,
+    format: &str,
+) -> InspectResult {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    let auto = match get_automation() {
+        Ok(a) => a,
+        Err(e) => {
+            return InspectResult {
+                success: false,
+                root_xpath: String::new(),
+                nodes: None,
+                flat_nodes: vec![],
+                text_output: None,
+                total_children: 0,
+                error: Some(format!("获取 UIAutomation 实例失败: {}", e)),
+            };
+        }
+    };
+
+    let raw_walker = match auto.get_raw_view_walker() {
+        Ok(w) => w,
+        Err(e) => {
+            return InspectResult {
+                success: false,
+                root_xpath: String::new(),
+                nodes: None,
+                flat_nodes: vec![],
+                text_output: None,
+                total_children: 0,
+                error: Some(format!("获取 RawViewWalker 失败: {}", e)),
+            };
+        }
+    };
+
+    let mut total_count = 0usize;
+
+    let root_node = build_inspect_node(
+        root_element,
+        &raw_walker,
+        0,
+        max_depth,
+        max_nodes,
+        &mut total_count,
+        "",
+    );
+
+    log::info!(
+        "[inspect_subtree_from_elem] Completed in {}ms, total_nodes={}",
+        start.elapsed().as_millis(),
+        total_count,
+    );
+
+    let flat_nodes = flatten_inspect_tree(&root_node);
+
+    let text_output = if format == "txt" || format == "text" {
+        Some(format_inspect_tree(&root_node, 0))
+    } else {
+        None
+    };
+
+    InspectResult {
+        success: true,
+        root_xpath: "(runtimeId)".to_string(),
+        nodes: Some(root_node),
+        flat_nodes,
+        text_output,
+        total_children: total_count.saturating_sub(1),
+        error: None,
+    }
+}
+
 fn build_inspect_node(
     element: &UIElement,
     walker: &UITreeWalker,

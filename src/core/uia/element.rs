@@ -1,7 +1,22 @@
 use super::*;
 use uiautomation::patterns::{UIInvokePattern, UIValuePattern};
 
-pub fn invoke_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Result<Result<String, String>> {
+/// 通过 XPath 或 runtimeId 执行 Invoke 操作。
+///
+/// 优先使用 runtimeId 从缓存获取元素（无 fallback）。
+/// 无 runtimeId 时走 XPath 搜索。
+pub fn invoke_element_by_xpath(
+    window_selector: &str,
+    xpath: &str,
+    runtime_id: Option<&str>,
+) -> anyhow::Result<Result<String, String>> {
+    // Path A: runtimeId 缓存优先
+    if let Some(rid) = runtime_id {
+        let elem = resolve_element_for_action(rid, window_selector, xpath)?;
+        return do_invoke(&elem);
+    }
+
+    // Path B: XPath 搜索
     let auto = get_automation()?;
 
     let windows = find_window_by_selector(&auto, window_selector);
@@ -15,35 +30,7 @@ pub fn invoke_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Re
                 if elements.is_empty() {
                     continue;
                 }
-
-                let elem = &elements[0];
-                let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
-                let elem_name = elem.get_name().unwrap_or_default();
-
-                // 尝试获取 InvokePattern
-                let invoke = match elem.get_pattern::<UIInvokePattern>() {
-                    Ok(inv) => inv,
-                    Err(e) => {
-                        return Ok(Err(format!(
-                            "元素 '{}' (type={}) 不支持 InvokePattern: {}",
-                            elem_name, elem_ct, e
-                        )));
-                    }
-                };
-
-                // 执行 Invoke
-                match invoke.invoke() {
-                    Ok(()) => {
-                        info!("UIA Invoke succeeded: element='{}' type={}", elem_name, elem_ct);
-                        return Ok(Ok(format!("Invoke {} ({})", elem_name, elem_ct)));
-                    }
-                    Err(e) => {
-                        return Ok(Err(format!(
-                            "Invoke 执行失败: element='{}' type={} error={:?}",
-                            elem_name, elem_ct, e
-                        )));
-                    }
-                }
+                return do_invoke(&elements[0]);
             }
             Err(e) => {
                 log::debug!("XPath search failed on window: {}", e);
@@ -55,7 +42,50 @@ pub fn invoke_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Re
     Ok(Err("所有窗口均未找到匹配元素".to_string()))
 }
 
-pub fn focus_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Result<Result<(), String>> {
+fn do_invoke(elem: &uiautomation::core::UIElement) -> anyhow::Result<Result<String, String>> {
+    let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
+    let elem_name = elem.get_name().unwrap_or_default();
+
+    let invoke = match elem.get_pattern::<UIInvokePattern>() {
+        Ok(inv) => inv,
+        Err(e) => {
+            return Ok(Err(format!(
+                "元素 '{}' (type={}) 不支持 InvokePattern: {}",
+                elem_name, elem_ct, e
+            )));
+        }
+    };
+
+    match invoke.invoke() {
+        Ok(()) => {
+            info!("UIA Invoke succeeded: element='{}' type={}", elem_name, elem_ct);
+            Ok(Ok(format!("Invoke {} ({})", elem_name, elem_ct)))
+        }
+        Err(e) => {
+            Ok(Err(format!(
+                "Invoke 执行失败: element='{}' type={} error={:?}",
+                elem_name, elem_ct, e
+            )))
+        }
+    }
+}
+
+/// 通过 XPath 或 runtimeId 执行 SetFocus 操作。
+///
+/// 优先使用 runtimeId 从缓存获取元素（无 fallback）。
+/// 无 runtimeId 时走 XPath 搜索。
+pub fn focus_element_by_xpath(
+    window_selector: &str,
+    xpath: &str,
+    runtime_id: Option<&str>,
+) -> anyhow::Result<Result<(), String>> {
+    // Path A: runtimeId 缓存优先
+    if let Some(rid) = runtime_id {
+        let elem = resolve_element_for_action(rid, window_selector, xpath)?;
+        return do_focus(&elem);
+    }
+
+    // Path B: XPath 搜索
     let auto = get_automation()?;
 
     let windows = find_window_by_selector(&auto, window_selector);
@@ -75,23 +105,7 @@ pub fn focus_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Res
                 if elements.is_empty() {
                     continue;
                 }
-
-                let elem = &elements[0];
-                let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
-                let elem_name = elem.get_name().unwrap_or_default();
-
-                match elem.set_focus() {
-                    Ok(()) => {
-                        info!("UIA SetFocus succeeded: element='{}' type={}", elem_name, elem_ct);
-                        return Ok(Ok(()));
-                    }
-                    Err(e) => {
-                        return Ok(Err(format!(
-                            "SetFocus 执行失败: element='{}' type={} error={:?}",
-                            elem_name, elem_ct, e
-                        )));
-                    }
-                }
+                return do_focus(&elements[0]);
             }
             Err(e) => {
                 log::debug!("XPath search failed on window: {}", e);
@@ -103,7 +117,41 @@ pub fn focus_element_by_xpath(window_selector: &str, xpath: &str) -> anyhow::Res
     Ok(Err("所有窗口均未找到匹配元素".to_string()))
 }
 
-pub fn set_value_by_xpath(window_selector: &str, xpath: &str, value: &str) -> anyhow::Result<Result<usize, String>> {
+fn do_focus(elem: &uiautomation::core::UIElement) -> anyhow::Result<Result<(), String>> {
+    let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
+    let elem_name = elem.get_name().unwrap_or_default();
+
+    match elem.set_focus() {
+        Ok(()) => {
+            info!("UIA SetFocus succeeded: element='{}' type={}", elem_name, elem_ct);
+            Ok(Ok(()))
+        }
+        Err(e) => {
+            Ok(Err(format!(
+                "SetFocus 执行失败: element='{}' type={} error={:?}",
+                elem_name, elem_ct, e
+            )))
+        }
+    }
+}
+
+/// 通过 XPath 或 runtimeId 执行 ValuePattern.SetValue 操作。
+///
+/// 优先使用 runtimeId 从缓存获取元素（无 fallback）。
+/// 无 runtimeId 时走 XPath 搜索。
+pub fn set_value_by_xpath(
+    window_selector: &str,
+    xpath: &str,
+    value: &str,
+    runtime_id: Option<&str>,
+) -> anyhow::Result<Result<usize, String>> {
+    // Path A: runtimeId 缓存优先
+    if let Some(rid) = runtime_id {
+        let elem = resolve_element_for_action(rid, window_selector, xpath)?;
+        return do_set_value(&elem, value);
+    }
+
+    // Path B: XPath 搜索
     let auto = get_automation()?;
 
     let windows = find_window_by_selector(&auto, window_selector);
@@ -117,39 +165,7 @@ pub fn set_value_by_xpath(window_selector: &str, xpath: &str, value: &str) -> an
                 if elements.is_empty() {
                     continue;
                 }
-
-                let elem = &elements[0];
-                let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
-                let elem_name = elem.get_name().unwrap_or_default();
-
-                // 获取 ValuePattern
-                let value_pattern = match elem.get_pattern::<UIValuePattern>() {
-                    Ok(vp) => vp,
-                    Err(e) => {
-                        return Ok(Err(format!(
-                            "元素 '{}' (type={}) 不支持 ValuePattern: {}",
-                            elem_name, elem_ct, e
-                        )));
-                    }
-                };
-
-                // 调用 SetValue
-                let char_count = value.chars().count();
-                match value_pattern.set_value(value) {
-                    Ok(()) => {
-                        info!(
-                            "UIA ValuePattern.SetValue succeeded: '{}' → element='{}' type={}",
-                            value, elem_name, elem_ct
-                        );
-                        return Ok(Ok(char_count));
-                    }
-                    Err(e) => {
-                        return Ok(Err(format!(
-                            "SetValue 执行失败: element='{}' type={} error={:?}",
-                            elem_name, elem_ct, e
-                        )));
-                    }
-                }
+                return do_set_value(&elements[0], value);
             }
             Err(e) => {
                 log::debug!("XPath search failed on window: {}", e);
@@ -159,4 +175,36 @@ pub fn set_value_by_xpath(window_selector: &str, xpath: &str, value: &str) -> an
     }
 
     Ok(Err("所有窗口均未找到匹配元素".to_string()))
+}
+
+fn do_set_value(elem: &uiautomation::core::UIElement, value: &str) -> anyhow::Result<Result<usize, String>> {
+    let elem_ct = elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
+    let elem_name = elem.get_name().unwrap_or_default();
+
+    let value_pattern = match elem.get_pattern::<UIValuePattern>() {
+        Ok(vp) => vp,
+        Err(e) => {
+            return Ok(Err(format!(
+                "元素 '{}' (type={}) 不支持 ValuePattern: {}",
+                elem_name, elem_ct, e
+            )));
+        }
+    };
+
+    let char_count = value.chars().count();
+    match value_pattern.set_value(value) {
+        Ok(()) => {
+            info!(
+                "UIA ValuePattern.SetValue succeeded: '{}' → element='{}' type={}",
+                value, elem_name, elem_ct
+            );
+            Ok(Ok(char_count))
+        }
+        Err(e) => {
+            Ok(Err(format!(
+                "SetValue 执行失败: element='{}' type={} error={:?}",
+                elem_name, elem_ct, e
+            )))
+        }
+    }
 }

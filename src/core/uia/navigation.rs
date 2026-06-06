@@ -5,8 +5,6 @@ pub fn navigate_from_element(
     base_xpath: &str,
     steps: &[crate::core::model::NavigateStep],
 ) -> Result<(Option<crate::core::model::ElementData>, String), String> {
-    use crate::core::model::NavigateStep;
-
     let auto = get_automation().map_err(|e| format!("UIAutomation init failed: {}", e))?;
     let windows = find_window_by_selector(&auto, window_selector);
     if windows.is_empty() {
@@ -30,12 +28,39 @@ pub fn navigate_from_element(
         }
     }
 
-    let mut current = base_elem.ok_or_else(|| format!("Base element not found: {}", base_xpath))?;
-    log::info!("[Compass] Base element found, applying {} steps", steps.len());
+    let current = base_elem.ok_or_else(|| format!("Base element not found: {}", base_xpath))?;
+    navigate_steps(&auto, current, window_rect, steps)
+}
 
-    // Phase 2: Walk tree step-by-step using TreeWalker
-    // Prefer RawViewWalker for Chrome/WebView compatibility,
-    // fall back to ControlViewWalker if RawViewWalker fails.
+/// Navigate from a pre-resolved UIElement (from cache).
+/// Used by the runtimeId cache path — no XPath search.
+pub fn navigate_from_element_cached(
+    base_elem: UIElement,
+    window_selector: &str,
+    steps: &[crate::core::model::NavigateStep],
+) -> Result<(Option<crate::core::model::ElementData>, String), String> {
+    let auto = get_automation().map_err(|e| format!("UIAutomation init failed: {}", e))?;
+
+    // Get window rect for coordinate calculations
+    let windows = find_window_by_selector(&auto, window_selector);
+    let window_rect = windows.first().and_then(|w| {
+        w.get_bounding_rectangle().ok().map(|r| {
+            crate::core::model::Rect { x: r.get_left(), y: r.get_top(), width: r.get_right() - r.get_left(), height: r.get_bottom() - r.get_top() }
+        })
+    });
+
+    navigate_steps(&auto, base_elem, window_rect, steps)
+}
+
+/// Shared navigation logic: walk tree step-by-step from a starting element.
+fn navigate_steps(
+    auto: &UIAutomation,
+    mut current: UIElement,
+    window_rect: Option<crate::core::model::Rect>,
+    steps: &[crate::core::model::NavigateStep],
+) -> Result<(Option<crate::core::model::ElementData>, String), String> {
+    use crate::core::model::NavigateStep;
+
     let raw_walker = auto.get_raw_view_walker().ok();
     let ctrl_walker = auto.get_control_view_walker().ok();
     let walker = raw_walker.as_ref().or(ctrl_walker.as_ref())
@@ -48,7 +73,6 @@ pub fn navigate_from_element(
                 for lv in 0..*levels {
                     match walker.get_parent(&current) {
                         Ok(parent) => {
-                            // Check if the parent is the desktop root (stop)
                             let desktop = auto.get_root_element().ok();
                             let is_desktop = desktop.as_ref().map_or(false, |d| {
                                 auto.compare_elements(&parent, d).unwrap_or(false)
@@ -68,7 +92,6 @@ pub fn navigate_from_element(
 
             NavigateStep::Child { index } => {
                 let parent = current.clone();
-                // Enumerate all direct children
                 let mut children: Vec<UIElement> = Vec::new();
                 let mut child = walker.get_first_child(&parent).ok();
                 while let Some(c) = child {
@@ -77,12 +100,7 @@ pub fn navigate_from_element(
                 }
 
                 let child_count = children.len() as i32;
-                let resolved = if *index >= 0 {
-                    *index
-                } else {
-                    // Negative index: -1 = last, -2 = second-to-last
-                    child_count + *index
-                };
+                let resolved = if *index >= 0 { *index } else { child_count + *index };
 
                 if resolved < 0 || resolved >= child_count {
                     return Err(format!(
@@ -95,7 +113,6 @@ pub fn navigate_from_element(
             }
 
             NavigateStep::SiblingAbs { index } => {
-                // sibling_abs(N) = parent().child(N)
                 let parent = match walker.get_parent(&current) {
                     Ok(p) => p,
                     Err(e) => return Err(format!("Step {} sibling_abs({}): GetParent failed: {:?}", i, index, e)),
@@ -119,7 +136,6 @@ pub fn navigate_from_element(
             }
 
             NavigateStep::SiblingLeft { offset } => {
-                // preceding-sibling: go left by offset
                 for off in 1..=*offset {
                     match walker.get_previous_sibling(&current) {
                         Ok(prev) => current = prev,
@@ -133,7 +149,6 @@ pub fn navigate_from_element(
             }
 
             NavigateStep::SiblingRight { offset } => {
-                // following-sibling: go right by offset
                 if *offset == 0 {
                     log::warn!("[Compass] Step {}: sibling_right(0) is a no-op", i);
                 }
@@ -154,9 +169,7 @@ pub fn navigate_from_element(
     // Phase 3: Convert result to ElementInfo
     let mut rng = rand::thread_rng();
     let info = element_info_from_uia(&current, window_rect.as_ref(), 5.0, &mut rng);
-
     let find_selector = String::new();
-
     Ok((info, find_selector))
 }
 

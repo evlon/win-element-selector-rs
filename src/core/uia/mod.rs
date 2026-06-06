@@ -46,6 +46,7 @@ pub mod find;
 pub mod navigation;
 pub mod inspect;
 pub mod visibility;
+pub mod actions;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ pub use find::*;
 pub use navigation::*;
 pub use inspect::*;
 pub use visibility::*;
+pub use actions::*;
 
 // ─── Rich mock data ──────────────────────────────────────────────────────────
 

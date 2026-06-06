@@ -108,6 +108,9 @@ pub struct ElementQuery {
     /// 支持搜索模式后缀：`:first`（第一个）、`:onlyone`（唯一）、`:all`（全部，默认）
     /// 例：`//Button[@AutomationId='btnSend']:first`
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     /// 搜索模式（可选，覆盖 XPath 后缀中的设置）
     /// - `all`: 返回全部匹配（默认）
     /// - `first`: 只找第一个
@@ -206,6 +209,9 @@ pub struct NavigateRequest {
     pub window: String,
     /// 基准元素 XPath（先找到此元素，再从它导航）
     pub element: String,
+    /// 基准元素的 RuntimeId（优先于 element XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     /// 导航步骤列表
     pub steps: Vec<NavigateStep>,
 }
@@ -560,6 +566,9 @@ pub struct MouseClickRequest {
     /// 窗口选择器，支持字符串形式 "Window[@Name='xxx']" 或对象形式
     pub window: WindowSelectorOrString,
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     pub options: Option<MouseClickOptions>,
 }
 
@@ -814,6 +823,9 @@ pub struct MouseHoverRequest {
     pub window: WindowSelectorOrString,
     /// 元素 XPath
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     pub options: Option<MouseHoverOptions>,
 }
 
@@ -844,9 +856,15 @@ pub struct MouseDragRequest {
     /// 源元素 XPath
     #[serde(rename = "sourceElement")]
     pub source_element: String,
+    /// 源元素 RuntimeId
+    #[serde(default, rename = "sourceRuntimeId", skip_serializing_if = "Option::is_none")]
+    pub source_runtime_id: Option<String>,
     /// 目标元素 XPath
     #[serde(rename = "targetElement")]
     pub target_element: String,
+    /// 目标元素 RuntimeId
+    #[serde(default, rename = "targetRuntimeId", skip_serializing_if = "Option::is_none")]
+    pub target_runtime_id: Option<String>,
     pub options: Option<MouseDragOptions>,
 }
 
@@ -871,6 +889,9 @@ pub struct ElementVisibilityRequest {
     pub window: String,
     /// 元素 XPath
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     /// 可选的滚动容器 XPath，用于计算元素在容器内的可见矩形
     /// 若提供，可见区域 = 元素矩形 ∩ 容器可见矩形 ∩ 窗口视口
     #[serde(default)]
@@ -918,6 +939,9 @@ pub struct ElementFlashRequest {
     pub window: String,
     /// 元素 XPath
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     /// 闪烁持续时间（毫秒），默认 1000
     #[serde(default = "default_flash_timeout")]
     pub timeout: u64,
@@ -945,6 +969,9 @@ pub struct InspectRequest {
     pub window: String,
     /// 目标元素 XPath（inspect 此元素下的所有子元素）
     pub element: String,
+    /// RuntimeId，用于缓存查找（优先于 XPath 搜索）
+    #[serde(default, rename = "runtimeId", skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     /// 最大遍历深度，默认 10
     #[serde(rename = "maxDepth", default = "default_inspect_max_depth")]
     pub max_depth: usize,

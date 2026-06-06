@@ -1820,6 +1820,23 @@ pub struct VisibilityResult {
     pub error: Option<String>,
 }
 
+impl Default for VisibilityResult {
+    fn default() -> Self {
+        Self {
+            found: false,
+            is_offscreen: None,
+            visibility: "not_found".to_string(),
+            position: "unknown".to_string(),
+            element_rect: None,
+            visible_rect: None,
+            viewport_rect: None,
+            overflow: None,
+            scroll_direction: None,
+            error: None,
+        }
+    }
+}
+
 /// 元素数据（core 层，无 serde）
 ///
 /// 由 `element_info_from_uia` 等函数返回，API 层负责转换为 `api::types::ElementInfo`。

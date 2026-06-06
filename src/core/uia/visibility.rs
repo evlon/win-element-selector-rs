@@ -5,6 +5,7 @@
 // All functions return core::model::VisibilityResult (no api layer dependency).
 
 use crate::core::model::{OverflowInfo, Rect, VisibilityResult};
+use uiautomation::core::UIElement;
 
 /// Compute visibility of an element within a viewport and optional container.
 ///
@@ -152,6 +153,57 @@ pub fn get_element_visibility(
     };
 
     compute_visibility(&elem_api_rect, &vp_api_rect, container_api_rect.as_ref(), is_offscreen)
+}
+
+/// Get element visibility from a pre-resolved UIElement (no XPath search).
+/// Used by the runtimeId cache path.
+pub fn get_element_visibility_by_elem(
+    elem: &UIElement,
+    window_selector: &str,
+    container_xpath: Option<&str>,
+) -> VisibilityResult {
+    // Read element rect from the cached UIElement
+    let uia_rect = match elem.get_bounding_rectangle() {
+        Ok(r) => r,
+        Err(e) => return visibility_error(&format!("获取元素矩形失败: {}", e)),
+    };
+    let elem_rect = Rect {
+        x: uia_rect.get_left(),
+        y: uia_rect.get_top(),
+        width: uia_rect.get_right() - uia_rect.get_left(),
+        height: uia_rect.get_bottom() - uia_rect.get_top(),
+    };
+
+    let is_offscreen = elem.is_offscreen().ok();
+
+    let window_rect = super::get_window_rect_by_selector(window_selector);
+    let viewport_rect = match &window_rect {
+        Some(r) => r,
+        None => {
+            return visibility_no_rect(is_offscreen, Some(elem_rect), "窗口矩形获取失败");
+        }
+    };
+    let vp_api_rect = Rect {
+        x: viewport_rect.x,
+        y: viewport_rect.y,
+        width: viewport_rect.width,
+        height: viewport_rect.height,
+    };
+
+    let container_api_rect = if let Some(cxpath) = container_xpath {
+        use crate::core::model::ValidationResult;
+        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None);
+        match &container_detailed.overall {
+            ValidationResult::Found { first_rect: Some(cr), .. } => {
+                Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    compute_visibility(&elem_rect, &vp_api_rect, container_api_rect.as_ref(), is_offscreen)
 }
 
 #[cfg(test)]

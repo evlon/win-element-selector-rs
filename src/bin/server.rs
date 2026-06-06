@@ -111,6 +111,12 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/element/navigate", web::post().to(element::navigate_element))
             // 从已知元素查找子元素 (BuildCache accelerated)
             .route("/api/element/find-from", web::post().to(element::find_from_element))
+            // 通过 runtimeId 刷新元素信息（缓存优先，无 XPath fallback）
+            .route("/api/element/refresh", web::post().to(element::refresh_by_runtime_id))
+            // 元素缓存控制
+            .route("/api/element/cache/config", web::put().to(element::set_cache_config))
+            .route("/api/element/cache/stats", web::get().to(element::get_cache_stats))
+            .route("/api/element/cache/clear", web::post().to(element::clear_element_cache))
             // 鼠标移动
             .route("/api/mouse/move", web::post().to(mouse::move_mouse))
             // 鼠标点击
