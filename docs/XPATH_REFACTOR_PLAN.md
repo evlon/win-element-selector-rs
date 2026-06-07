@@ -811,12 +811,13 @@ src/core/uia/
 - [x] 生产路径不含任何隐式 fallback ✅ (`execute_xpath_steps_filtered` 无隐式回退)
 - [x] 正则表达式预编译，无每次 `Regex::new()` 调用 ✅ (`Lazy<Regex>`)
 - [x] `apply_search_mode` 合并为泛型函数 ✅
-- [ ] `get_uia_property_for_xpath` 使用枚举替代字符串 key
+- [x] `get_uia_property_for_xpath` 使用枚举替代字符串 key ✅ (`XPathProperty` 枚举)
 
 ### 命名验收
-- [ ] 所有搜索函数遵循 `{action}_{target}_{strategy}` 命名模式
+- [x] 所有搜索函数遵循 `{action}_{target}_{strategy}` 命名模式 ✅
+  - `find_elements_by_xpath`, `validate_xpath`, `search_descendants_via_*`, `search_descendants_chain_*`
 - [x] 旧函数全部标记 `#[deprecated]` 或已删除 ✅ (deprecated 已全部清除)
-- [ ] 无 `_impl`、`_detailed` 等泄露实现细节的后缀
+- [x] 无 `_impl`、`_detailed` 等泄露实现细节的后缀 ✅
 
 ### 测试验收
 - [ ] 50 个新增测试全部通过（当前 27 L1 测试 + 集成测试 = 179 总测试通过）

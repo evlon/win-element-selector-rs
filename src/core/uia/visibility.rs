@@ -102,7 +102,7 @@ pub fn visibility_no_rect(is_offscreen: Option<bool>, element_rect: Option<Rect>
 
 /// Get element visibility information (migrated from com_worker).
 ///
-/// Uses `validate_selector_and_xpath_detailed` to find the element,
+/// Uses `validate_xpath` to find the element,
 /// then computes visibility within the viewport and optional container.
 /// Returns `VisibilityResult` (core layer type, no api dependency).
 pub fn get_element_visibility(
@@ -112,7 +112,7 @@ pub fn get_element_visibility(
 ) -> VisibilityResult {
     use crate::core::model::ValidationResult;
 
-    let detailed = super::validate_selector_and_xpath_detailed(
+    let detailed = super::validate_xpath(
         window_selector, element_xpath, &[], None, None, true,
     );
 
@@ -141,7 +141,7 @@ pub fn get_element_visibility(
     let vp_api_rect = Rect { x: viewport_rect.x, y: viewport_rect.y, width: viewport_rect.width, height: viewport_rect.height };
 
     let container_api_rect = if let Some(cxpath) = container_xpath {
-        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None, true);
+        let container_detailed = super::validate_xpath(window_selector, cxpath, &[], None, None, true);
         match &container_detailed.overall {
             ValidationResult::Found { first_rect: Some(cr), .. } => {
                 Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })
@@ -192,7 +192,7 @@ pub fn get_element_visibility_by_elem(
 
     let container_api_rect = if let Some(cxpath) = container_xpath {
         use crate::core::model::ValidationResult;
-        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None, true);
+        let container_detailed = super::validate_xpath(window_selector, cxpath, &[], None, None, true);
         match &container_detailed.overall {
             ValidationResult::Found { first_rect: Some(cr), .. } => {
                 Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })

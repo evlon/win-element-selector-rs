@@ -831,7 +831,7 @@ impl State {
         self.validation_start_time = Some(Instant::now());
         in_progress.store(true, Ordering::SeqCst);
         std::thread::spawn(move || {
-            let result = uia::validate_selector_and_xpath_detailed(
+            let result = uia::validate_xpath(
                 &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None, true,
             );
             let _ = tx.send(Some(result));

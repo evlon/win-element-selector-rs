@@ -438,7 +438,7 @@ impl XPathOptimizer {
                 let full_test_xpath = format!("{}{}", prefix, test_xpath);
                 
                 // 使用直接调用进行验证
-                let validation_result = crate::core::uia::validate_selector_and_xpath_detailed(
+                let validation_result = crate::core::uia::validate_xpath(
                     &window_sel,
                     &full_test_xpath,
                     &hierarchy_clone,

@@ -315,6 +315,50 @@ fn parse_child_prefix_attrs(suffix: &str) -> (Option<ChildHwndHint>, &str) {
     (hint, remaining)
 }
 
+// ─── XPathProperty ──────────────────────────────────────────────────────────
+
+/// XPath 谓词中可引用的 UIA 属性（替代字符串 key 匹配）。
+///
+/// 对应 `@Name='...'` / `@ClassName='...'` 等 XPath 属性名。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum XPathProperty {
+    Name,
+    AutomationId,
+    ClassName,
+    FrameworkId,
+    ControlType,
+    /// 未知属性（保留原始名称，用于错误提示和扩展）
+    Other(String),
+}
+
+impl XPathProperty {
+    /// 从 XPath 属性名（如 `"Name"`, `"ClassName"`）构造枚举。
+    ///
+    /// 不区分大小写。无法识别的属性名存入 `Other`。
+    pub fn from_attr_name(name: &str) -> Self {
+        match name {
+            "Name" => Self::Name,
+            "AutomationId" => Self::AutomationId,
+            "ClassName" => Self::ClassName,
+            "FrameworkId" => Self::FrameworkId,
+            "ControlType" => Self::ControlType,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    /// 返回原始属性名字符串（用于日志 / XPath 重建）。
+    pub fn as_attr_name(&self) -> &str {
+        match self {
+            Self::Name => "Name",
+            Self::AutomationId => "AutomationId",
+            Self::ClassName => "ClassName",
+            Self::FrameworkId => "FrameworkId",
+            Self::ControlType => "ControlType",
+            Self::Other(s) => s,
+        }
+    }
+}
+
 // ─── FindAllFilter ────────────────────────────────────────────────────────────
 
 /// `findAll` / `findAllFrom` 的属性过滤条件。
@@ -908,7 +952,7 @@ pub struct HierarchyNode {
     pub depth_from_window:     usize,
     /// 提示校验时应该使用哪种 UIA TreeWalker 来查找该节点的子节点。
     /// 捕获时自动记录，校验时优先使用此 hint 避免不必要的 fallback 尝试。
-    /// - ControlView: 用 find_by_xpath_detailed（uiauto-xpath）最快
+    /// - ControlView: 用 search_descendants_via_uiauto_xpath（uiauto-xpath）最快
     /// - RawView: 用 RawViewWalker BFS 遍历
     /// - ChildHwnd: 需要先 EnumChildWindows 找到子 HWND
     /// - Unknown: 使用完整 fallback 策略

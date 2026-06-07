@@ -14,11 +14,11 @@
 
 use super::*;
 use super::find_control::{
-    find_by_xpath_detailed,
+    search_descendants_via_uiauto_xpath,
 };
 use super::find_raw::{
-    find_by_xpath_raw_descendants,
-    find_by_xpath_raw_descendants_with_depth,
+    search_descendants_via_raw_view,
+    search_descendants_depth_limited,
 };
 use crate::core::model::SearchStrategy;
 
@@ -35,8 +35,8 @@ use crate::core::model::SearchStrategy;
 /// ## Strategy mapping
 /// | Prefix | Strategy | Implementation |
 /// |--------|----------|----------------|
-/// | `/A` (Child) | uiauto-xpath | `find_by_xpath_detailed` |
-/// | `//A` (Descendant) | RawView FindAll | `find_by_xpath_raw_descendants` |
+/// | `/A` (Child) | uiauto-xpath | `search_descendants_via_uiauto_xpath` |
+/// | `//A` (Descendant) | RawView FindAll | `search_descendants_via_raw_view` |
 /// | `/*n/A` (DepthLimited) | BFS depth-limited | `find_with_depth_limit` |
 
 
@@ -260,15 +260,15 @@ fn execute_cached_strategy(
     cached: &CompiledXPathEntry,
     filter: &FindAllFilter,
 ) -> Option<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    use super::find_control::find_by_xpath_detailed;
-    use super::find_raw::find_by_xpath_raw_descendants;
+    use super::find_control::search_descendants_via_uiauto_xpath;
+    use super::find_raw::search_descendants_via_raw_view;
 
     log::info!("[XPath Cache] Executing cached: {:?}", cached.strategy);
 
     let result = match &cached.strategy {
         CompiledStrategy::WindowFastPath => None,
         CompiledStrategy::ControlViewDirect => {
-            find_by_xpath_detailed(auto, window, xpath, None).ok()
+            search_descendants_via_uiauto_xpath(auto, window, xpath, None).ok()
                 .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
         }
         CompiledStrategy::RawViewBfs => {
@@ -277,13 +277,13 @@ fn execute_cached_strategy(
         }
         CompiledStrategy::ContentRoot => {
             if let Some(cr) = find_content_root(auto, window) {
-                find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                search_descendants_via_uiauto_xpath(auto, &cr, xpath, None).ok()
                     .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
             } else { None }
         }
         CompiledStrategy::FindAllDescendants => {
             let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
-            find_by_xpath_raw_descendants(auto, window, &desc_xpath, SearchMode::First, filter).ok()
+            search_descendants_via_raw_view(auto, window, &desc_xpath, SearchMode::First, filter).ok()
                 .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
         }
         CompiledStrategy::ChildHwndEnum(child_idx) => {
@@ -300,16 +300,16 @@ fn execute_cached_strategy(
         }
         CompiledStrategy::DescendantContentRoot => {
             if let Some(cr) = find_content_root(auto, window) {
-                find_by_xpath_detailed(auto, &cr, xpath, None).ok()
+                search_descendants_via_uiauto_xpath(auto, &cr, xpath, None).ok()
                     .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
             } else { None }
         }
         CompiledStrategy::DescendantWindowRoot => {
-            find_by_xpath_detailed(auto, window, xpath, None).ok()
+            search_descendants_via_uiauto_xpath(auto, window, xpath, None).ok()
                 .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
         }
         CompiledStrategy::DescendantRawWalk => {
-            find_by_xpath_raw_descendants(auto, window, xpath, SearchMode::First, filter).ok()
+            search_descendants_via_raw_view(auto, window, xpath, SearchMode::First, filter).ok()
                 .and_then(|(r, s)| if r.is_empty() { None } else { Some((r, s)) })
         }
         CompiledStrategy::DescendantChildHwnd(child_idx) => {
@@ -336,7 +336,7 @@ fn execute_direct_child(
     is_last: bool,
     filter: &FindAllFilter,
 ) -> anyhow::Result<Vec<UIElement>> {
-    use super::find_control::find_by_xpath_detailed;
+    use super::find_control::search_descendants_via_uiauto_xpath;
 
     // For direct child search, build the remaining xpath from current step
     // and use uiauto-xpath which handles child axis natively
@@ -344,7 +344,7 @@ fn execute_direct_child(
     for elem in current_elements {
         // Use uiauto-xpath for child axis search
         let step_xpath = format!("/{}", step_to_xpath_str(parsed));
-        if let Ok((matches, _)) = find_by_xpath_detailed(auto, elem, &step_xpath, None) {
+        if let Ok((matches, _)) = search_descendants_via_uiauto_xpath(auto, elem, &step_xpath, None) {
             if is_last {
                 results.extend(filter_findall_results(elem, matches, "DirectChild", filter));
             } else {
@@ -365,13 +365,13 @@ fn execute_descendant_fast(
     search_mode: SearchMode,
     filter: &FindAllFilter,
 ) -> anyhow::Result<Vec<UIElement>> {
-    use super::find_control::find_by_xpath_control_descendants;
+    use super::find_control::search_descendants_via_control_view;
 
     let mut results = Vec::new();
     for elem in current_elements {
         let remaining: String = xpath_parts[step_idx..].join("/");
         let desc_xpath = format!("//{}", remaining);
-        if let Ok((matches, _)) = find_by_xpath_control_descendants(auto, elem, &desc_xpath, search_mode, filter) {
+        if let Ok((matches, _)) = search_descendants_via_control_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {
                 // For non-last steps, take first match as anchor
@@ -393,13 +393,13 @@ fn execute_descendant_full(
     search_mode: SearchMode,
     filter: &FindAllFilter,
 ) -> anyhow::Result<Vec<UIElement>> {
-    use super::find_raw::find_by_xpath_raw_descendants;
+    use super::find_raw::search_descendants_via_raw_view;
 
     let mut results = Vec::new();
     for elem in current_elements {
         let remaining: String = xpath_parts[step_idx..].join("/");
         let desc_xpath = format!("//{}", remaining);
-        if let Ok((matches, _)) = find_by_xpath_raw_descendants(auto, elem, &desc_xpath, search_mode, filter) {
+        if let Ok((matches, _)) = search_descendants_via_raw_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {
                 results.truncate(1);
@@ -422,16 +422,16 @@ fn step_to_xpath_str(parsed: &ParsedXPathStep) -> String {
         s.push('[');
         let mut parts = Vec::new();
         for (k, v) in &parsed.required_props {
-            parts.push(format!("@{}='{}'", k, v));
+            parts.push(format!("@{}='{}'", k.as_attr_name(), v));
         }
         for (k, v) in &parsed.require_starts_with {
-            parts.push(format!("starts-with(@{}, '{}')", k, v));
+            parts.push(format!("starts-with(@{}, '{}')", k.as_attr_name(), v));
         }
         for (k, v) in &parsed.require_contains {
-            parts.push(format!("contains(@{}, '{}')", k, v));
+            parts.push(format!("contains(@{}, '{}')", k.as_attr_name(), v));
         }
         for (k, _) in &parsed.require_matches {
-            parts.push(format!("matches(@{}, '...')", k));
+            parts.push(format!("matches(@{}, '...')", k.as_attr_name()));
         }
         s.push_str(&parts.join(" and "));
         s.push(']');
@@ -474,7 +474,7 @@ fn cached_raw_view_bfs(
     xpath: &str,
     filter: &FindAllFilter,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_raw_descendants(auto, window, xpath, SearchMode::First, filter)
+    search_descendants_via_raw_view(auto, window, xpath, SearchMode::First, filter)
 }
 
 fn cached_child_hwnd_search(
@@ -493,11 +493,11 @@ fn cached_child_hwnd_search(
     let child_elem = auto.element_from_handle(child_hwnds[child_idx].into())?;
     let child_class = child_elem.get_classname().unwrap_or_default();
     if !is_webview_class(&child_class) {
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, &child_elem, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
     }
-    find_by_xpath_raw_descendants(auto, &child_elem, xpath, SearchMode::First, filter)
+    search_descendants_via_raw_view(auto, &child_elem, xpath, SearchMode::First, filter)
 }
 
 fn cached_sibling_search(
@@ -509,11 +509,11 @@ fn cached_sibling_search(
     for sibling in &siblings {
         let sibling_class = sibling.get_classname().unwrap_or_default();
         if is_webview_class(&sibling_class) { continue; }
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, sibling, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
         let desc_xpath = format!("//{}", xpath.trim_start_matches('/'));
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, sibling, &desc_xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, sibling, &desc_xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
     }
@@ -530,10 +530,10 @@ fn cached_child_process_search(
     for child_win in &child_windows {
         let child_class = child_win.get_classname().unwrap_or_default();
         if is_webview_class(&child_class) { continue; }
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, child_win, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, child_win, &desc_xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, child_win, &desc_xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
     }
@@ -556,11 +556,11 @@ fn cached_descendant_child_hwnd(
     let child_elem = auto.element_from_handle(child_hwnds[child_idx].into())?;
     let child_class = child_elem.get_classname().unwrap_or_default();
     if !is_webview_class(&child_class) {
-        if let Ok((r, s)) = find_by_xpath_detailed(auto, &child_elem, xpath, None) {
+        if let Ok((r, s)) = search_descendants_via_uiauto_xpath(auto, &child_elem, xpath, None) {
             if !r.is_empty() { return Ok((r, s)); }
         }
     }
-    find_by_xpath_raw_descendants(auto, &child_elem, xpath, SearchMode::First, filter)
+    search_descendants_via_raw_view(auto, &child_elem, xpath, SearchMode::First, filter)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -583,13 +583,12 @@ pub(super) fn build_uia_condition_from_step(
     }
 
     for (key, value) in &step.required_props {
-        let prop: UIProperty = match key.as_str() {
-            "Name" => UIProperty::Name,
-            "AutomationId" => UIProperty::AutomationId,
-            "FrameworkId" => UIProperty::FrameworkId,
-            "ClassName" => UIProperty::ClassName,
-            "ControlType" => continue,
-            _ => continue,
+        let prop: UIProperty = match key {
+            XPathProperty::Name => UIProperty::Name,
+            XPathProperty::AutomationId => UIProperty::AutomationId,
+            XPathProperty::FrameworkId => UIProperty::FrameworkId,
+            XPathProperty::ClassName => UIProperty::ClassName,
+            XPathProperty::ControlType | XPathProperty::Other(_) => continue,
         };
         if let Ok(cond) = auto.create_property_condition(prop, Variant::from(value.clone()), None) {
             conditions.push(cond);
@@ -787,31 +786,31 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         };
     }
 
-    let mut required_props: Vec<(String, String)> = Vec::new();
-    let mut require_starts_with: Vec<(String, String)> = Vec::new();
-    let mut require_contains: Vec<(String, String)> = Vec::new();
-    let mut require_matches: Vec<(String, Regex)> = Vec::new();
+    let mut required_props: Vec<(XPathProperty, String)> = Vec::new();
+    let mut require_starts_with: Vec<(XPathProperty, String)> = Vec::new();
+    let mut require_contains: Vec<(XPathProperty, String)> = Vec::new();
+    let mut require_matches: Vec<(XPathProperty, Regex)> = Vec::new();
 
     // 4. 解析谓词（使用预编译正则）
 
     // [@Attr='Value'] — 精确相等
     for cap in xpath_regex::ATTR_EQ.captures_iter(predicates_str) {
-        required_props.push((cap[1].to_string(), cap[2].to_string()));
+        required_props.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
     }
 
     // [@Attr=starts-with('Value')]
     for cap in xpath_regex::STARTS_WITH.captures_iter(predicates_str) {
-        require_starts_with.push((cap[1].to_string(), cap[2].to_string()));
+        require_starts_with.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
     }
 
     // [@Attr=contains('Value')]
     for cap in xpath_regex::CONTAINS.captures_iter(predicates_str) {
-        require_contains.push((cap[1].to_string(), cap[2].to_string()));
+        require_contains.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
     }
 
     // [@Attr=matches('Value')] or [@Attr=matches('Value','flags')]
     for cap in xpath_regex::MATCHES.captures_iter(predicates_str) {
-        let key = cap[1].to_string();
+        let key = XPathProperty::from_attr_name(&cap[1]);
         let pattern = cap[2].to_string();
         let flags = cap.get(3).map(|m| m.as_str()).unwrap_or("");
         let full_pattern = if flags.is_empty() {
@@ -835,14 +834,14 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
     }
 }
 
-fn get_uia_property_for_xpath(elem: &UIElement, key: &str) -> String {
-    match key {
-        "Name" => elem.get_name().unwrap_or_default(),
-        "AutomationId" => elem.get_automation_id().unwrap_or_default(),
-        "ClassName" => elem.get_classname().unwrap_or_default(),
-        "FrameworkId" => elem.get_framework_id().unwrap_or_default(),
-        "ControlType" => elem.get_control_type().map(|ct| format!("{:?}", ct)).unwrap_or_default(),
-        _ => String::new(),
+fn get_uia_property_for_xpath(elem: &UIElement, prop: &XPathProperty) -> String {
+    match prop {
+        XPathProperty::Name => elem.get_name().unwrap_or_default(),
+        XPathProperty::AutomationId => elem.get_automation_id().unwrap_or_default(),
+        XPathProperty::ClassName => elem.get_classname().unwrap_or_default(),
+        XPathProperty::FrameworkId => elem.get_framework_id().unwrap_or_default(),
+        XPathProperty::ControlType => elem.get_control_type().map(|ct| format!("{:?}", ct)).unwrap_or_default(),
+        XPathProperty::Other(_) => String::new(),
     }
 }
 
@@ -905,7 +904,7 @@ pub(super) fn element_matches_parsed_step(elem: &UIElement, step: &ParsedXPathSt
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn find_all_elements_detailed(
+pub fn find_elements_by_xpath(
     window_selector: &str,
     element_xpath: &str,
     random_range: f32,
@@ -1159,7 +1158,7 @@ pub fn find_all_elements_from_root(
     };
 
     log::info!("[find_from_root] Searching from Desktop root: xpath='{}'", element_xpath);
-    let (elements, _) = match find_by_xpath_detailed(&auto, &desktop, element_xpath, None) {
+    let (elements, _) = match search_descendants_via_uiauto_xpath(&auto, &desktop, element_xpath, None) {
         Ok(r) => r,
         Err(e) => {
             log::error!("[find_from_root] XPath failed: {}", e);
@@ -1209,7 +1208,7 @@ pub fn find_from_element_impl(
         }
     });
 
-    let (raw_elements, _) = match find_by_xpath_detailed(auto, base_elem, xpath, None) {
+    let (raw_elements, _) = match search_descendants_via_uiauto_xpath(auto, base_elem, xpath, None) {
         Ok(r) => r,
         Err(e) => {
             log::error!("[find_from_element] XPath search failed: {}", e);
@@ -1329,7 +1328,7 @@ fn locate_from_impl(
     let raw_elements: Vec<UIElement> = match strategy {
         SearchStrategy::Fast { max_depth } => {
             log::info!("[locate_from] Fast strategy, max_depth={}", max_depth);
-            match find_by_xpath_detailed(&auto, &base_elem, relative_xpath, None) {
+            match search_descendants_via_uiauto_xpath(&auto, &base_elem, relative_xpath, None) {
                 Ok((elems, _)) => elems,
                 Err(e) => {
                     log::warn!("[locate_from] Fast strategy failed: {}", e);
@@ -1339,7 +1338,7 @@ fn locate_from_impl(
         }
         SearchStrategy::Full { max_depth } => {
             log::info!("[locate_from] Full strategy, max_depth={}", max_depth);
-            match find_by_xpath_raw_descendants_with_depth(&auto, &base_elem, relative_xpath, max_depth, search_mode, filter) {
+            match search_descendants_depth_limited(&auto, &base_elem, relative_xpath, max_depth, search_mode, filter) {
                 Ok((elems, _)) => elems,
                 Err(e) => {
                     log::warn!("[locate_from] Full strategy failed: {}", e);
@@ -1350,7 +1349,7 @@ fn locate_from_impl(
         SearchStrategy::Adaptive => {
             // Adaptive 在此处等同于 Fast（不做 fallback，保持一致性）
             log::info!("[locate_from] Adaptive strategy (treating as Fast, no fallback)");
-            match find_by_xpath_detailed(&auto, &base_elem, relative_xpath, None) {
+            match search_descendants_via_uiauto_xpath(&auto, &base_elem, relative_xpath, None) {
                 Ok((elems, _)) => elems,
                 Err(e) => {
                     log::warn!("[locate_from] Adaptive/Fast strategy failed: {}", e);
@@ -1488,7 +1487,7 @@ fn apply_attribute_filters(
         .into_iter()
         .filter(|elem| {
             for (i, filter) in filters.iter().enumerate() {
-                let actual = get_uia_property_for_xpath(elem, &filter.property);
+                let actual = get_uia_property_for_xpath(elem, &XPathProperty::from_attr_name(&filter.property));
 
                 let matches = match filter.operator {
                     FilterOp::Eq => actual.eq_ignore_ascii_case(&filter.value),
@@ -1527,7 +1526,7 @@ mod tests {
         assert_eq!(step.prefix, XPathStepPrefix::Child);
         assert_eq!(step.type_name.as_deref(), Some("Button"));
         assert_eq!(step.required_props.len(), 1);
-        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
+        assert_eq!(step.required_props[0], (XPathProperty::Name, "OK".to_string()));
         assert!(!step.is_complex);
     }
 
@@ -1563,36 +1562,36 @@ mod tests {
     fn test_parse_eq_predicate() {
         let step = parse_xpath_step("//Button[@Name='OK']");
         assert_eq!(step.required_props.len(), 1);
-        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
+        assert_eq!(step.required_props[0], (XPathProperty::Name, "OK".to_string()));
     }
 
     #[test]
     fn test_parse_starts_with() {
         let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
         assert_eq!(step.require_starts_with.len(), 1);
-        assert_eq!(step.require_starts_with[0], ("ClassName".to_string(), "Chrome".to_string()));
+        assert_eq!(step.require_starts_with[0], (XPathProperty::ClassName, "Chrome".to_string()));
     }
 
     #[test]
     fn test_parse_contains() {
         let step = parse_xpath_step("//Text[@Name=contains('Widget')]");
         assert_eq!(step.require_contains.len(), 1);
-        assert_eq!(step.require_contains[0], ("Name".to_string(), "Widget".to_string()));
+        assert_eq!(step.require_contains[0], (XPathProperty::Name, "Widget".to_string()));
     }
 
     #[test]
     fn test_parse_matches() {
         let step = parse_xpath_step("//Button[@Name=matches('^Chrome.*')]");
         assert_eq!(step.require_matches.len(), 1);
-        assert_eq!(step.require_matches[0].0, "Name");
+        assert_eq!(step.require_matches[0].0, XPathProperty::Name);
     }
 
     #[test]
     fn test_parse_multiple_predicates() {
         let step = parse_xpath_step("//Button[@Name='OK' and @AutomationId='btn1']");
         assert_eq!(step.required_props.len(), 2);
-        assert_eq!(step.required_props[0], ("Name".to_string(), "OK".to_string()));
-        assert_eq!(step.required_props[1], ("AutomationId".to_string(), "btn1".to_string()));
+        assert_eq!(step.required_props[0], (XPathProperty::Name, "OK".to_string()));
+        assert_eq!(step.required_props[1], (XPathProperty::AutomationId, "btn1".to_string()));
     }
 
     #[test]

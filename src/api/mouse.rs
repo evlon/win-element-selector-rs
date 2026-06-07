@@ -44,7 +44,7 @@ fn check_wait_xpaths(
     xpaths: &[String],
 ) -> Option<super::super::model::DetailedValidationResult> {
     for xpath in xpaths {
-        let result = crate::core::uia::validate_selector_and_xpath_detailed(
+        let result = crate::core::uia::validate_xpath(
             window_selector,
             xpath,
             &[],
@@ -243,7 +243,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     // Path B: XPath 搜索
     let element = request.element.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_xpath(
             &window_selector,
             &element,
             &[], None, None, true,
@@ -1005,7 +1005,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let element_for_query = request.element.clone();
     let window_selector_for_element = window_selector.clone();
     let element_result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_xpath(
             &window_selector_for_element,
             &element_for_query,
             &[],
@@ -1480,7 +1480,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
     let container_for_query = container_xpath.clone();
     let window_for_container = window_selector.clone();
     let container_result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::validate_selector_and_xpath_detailed(
+        crate::core::uia::validate_xpath(
             &window_for_container,
             &container_for_query,
             &[],
@@ -1581,7 +1581,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 let ws = window_selector.clone();
                 let xp = ex_xpath.clone();
                 let ex_elements = tokio::task::spawn_blocking(move || {
-                    crate::core::uia::find_all_elements_detailed(&ws, &xp, 0.0, None, None, None, true)
+                    crate::core::uia::find_elements_by_xpath(&ws, &xp, 0.0, None, None, None, true)
                 }).await.unwrap_or_default();
                 for elem_data in &ex_elements {
                     let elem_info: super::types::ElementInfo = elem_data.clone().into();
@@ -1840,7 +1840,7 @@ pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
         // Path B: XPath 搜索（原有逻辑）
         let element = request.element.clone();
         let element_result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::validate_selector_and_xpath_detailed(
+            crate::core::uia::validate_xpath(
                 &window_selector,
                 &element,
                 &[],
@@ -1961,7 +1961,7 @@ pub async fn drag_mouse(body: web::Json<MouseDragRequest>) -> impl Responder {
 
     // Helper: 从 XPath 搜索获取 rect
     fn get_rect_from_xpath(ws: &str, xp: &str) -> Option<super::types::Rect> {
-        let result = crate::core::uia::validate_selector_and_xpath_detailed(
+        let result = crate::core::uia::validate_xpath(
             ws, xp, &[], None, None, true,
         );
         match result.overall {

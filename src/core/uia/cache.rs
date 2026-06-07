@@ -218,13 +218,13 @@ pub(super) struct ParsedXPathStep {
     /// ControlType 名称（如 "Button", "Text", None 表示通配 *）
     pub(super) type_name: Option<String>,
     /// 精确匹配属性: @Name='value'
-    pub(super) required_props: Vec<(String, String)>,
+    pub(super) required_props: Vec<(XPathProperty, String)>,
     /// starts-with 谓词: starts-with(@Name, 'value')
-    pub(super) require_starts_with: Vec<(String, String)>,
+    pub(super) require_starts_with: Vec<(XPathProperty, String)>,
     /// contains 谓词: contains(@Name, 'value')
-    pub(super) require_contains: Vec<(String, String)>,
+    pub(super) require_contains: Vec<(XPathProperty, String)>,
     /// 正则匹配谓词: matches(@Name, 'pattern')
-    pub(super) require_matches: Vec<(String, regex::Regex)>,
+    pub(super) require_matches: Vec<(XPathProperty, regex::Regex)>,
     /// 是否为 or/not 复杂谓词（无法用简单属性表达，需客户端二次过滤）
     pub(super) is_complex: bool,
 }

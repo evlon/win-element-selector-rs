@@ -144,7 +144,7 @@ pub async fn get_element(
 
         // Direct call to core::uia layer
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
+            crate::core::uia::find_elements_by_xpath(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
         })
         .await;
 
@@ -322,7 +322,7 @@ pub async fn get_all_elements(
 
         // Direct call to core::uia layer
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
+            crate::core::uia::find_elements_by_xpath(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
         })
         .await;
 
@@ -605,7 +605,7 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 
         // 查找元素获取其矩形区域
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, None, None, None, true)
+            crate::core::uia::find_elements_by_xpath(&window, &element, random_range, None, None, None, true)
         })
         .await;
 

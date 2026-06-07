@@ -1,11 +1,11 @@
-// src/core/uia/find_raw.rs
+﻿// src/core/uia/find_raw.rs
 //
 // RawViewWalker based XPath search functions.
 // Used by [full] / [full-child] mode — RawView only, never ControlView.
 //
 // Key functions:
-// - find_by_xpath_raw_descendants: //XPath via RawView (FindAll + Chain)
-// - find_by_xpath_raw_descendants_with_depth: with configurable max_depth
+// - search_descendants_via_raw_view: //XPath via RawView (FindAll + Chain)
+// - search_descendants_depth_limited: with configurable max_depth
 // - walk_raw_tree_steps: manual RawViewWalker tree walk
 //
 // CORE PRINCIPLE: [full] uses RawView ONLY, never ControlView!
@@ -19,9 +19,9 @@ use super::find::{
     step_has_complex_predicates,
 };
 use super::find_control::{
-    find_by_xpath_detailed,
-    findall_chain_first,
-    findall_chain_all,
+    search_descendants_via_uiauto_xpath,
+    search_descendants_chain_find_first,
+    search_descendants_chain_find_all,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -34,17 +34,17 @@ use super::find_control::{
 /// matching the first XPath step. Complex predicates (starts-with/contains/matches)
 /// are handled via secondary Rust-side filtering. Falls back to manual BFS only
 /// when FindAll fails or cannot build conditions.
-pub(super) fn find_by_xpath_raw_descendants(
+pub(super) fn search_descendants_via_raw_view(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
     search_mode: SearchMode,
     filter: &FindAllFilter,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_raw_descendants_with_depth(auto, window, xpath, 8, search_mode, filter)
+    search_descendants_depth_limited(auto, window, xpath, 8, search_mode, filter)
 }
 
-pub(super) fn find_by_xpath_raw_descendants_with_depth(
+pub(super) fn search_descendants_depth_limited(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
@@ -78,9 +78,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
     // ═══════════════════════════════════════════════════════════════════════════
     if xpath_parts.len() > 1 {
         let chain_result = if search_mode != SearchMode::All {
-            findall_chain_first(auto, window, &xpath_parts, filter)
+            search_descendants_chain_find_first(auto, window, &xpath_parts, filter)
         } else {
-            findall_chain_all(auto, window, &xpath_parts, filter)
+            search_descendants_chain_find_all(auto, window, &xpath_parts, filter)
         };
         if let Some(results) = chain_result {
             if !results.is_empty() {
@@ -161,13 +161,13 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
                 }
                 Err(e) => {
                     log::warn!("[Raw Desc] FindAll(Subtree) failed: {:?}, falling back to manual walk", e);
-                    return find_by_xpath_raw_descendants_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
+                    return search_descendants_via_raw_view_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
                 }
             }
         }
     } else {
         log::info!("[Raw Desc] No UIA condition to build — using full manual walk");
-        return find_by_xpath_raw_descendants_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
+        return search_descendants_via_raw_view_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
     };
 
     if first_step_matches.is_empty() {
@@ -206,7 +206,7 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
         let t_strat_a = Instant::now();
         for (cand_idx, candidate) in first_step_matches.iter().enumerate() {
             let t_cand = Instant::now();
-            if let Ok((matches, segments)) = find_by_xpath_detailed(auto, candidate, &remaining_xpath, None) {
+            if let Ok((matches, segments)) = search_descendants_via_uiauto_xpath(auto, candidate, &remaining_xpath, None) {
                 log::info!("[Raw Desc] Strategy A candidate[{}]: uiauto-xpath took {}ms, {} matches",
                     cand_idx, t_cand.elapsed().as_millis(), matches.len());
                 if !matches.is_empty() {
@@ -262,7 +262,7 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
 }
 
 /// Manual BFS fallback for raw descendants when FindAll fails or can't build conditions.
-fn find_by_xpath_raw_descendants_manual(
+fn search_descendants_via_raw_view_manual(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
@@ -326,7 +326,7 @@ fn find_by_xpath_raw_descendants_manual(
     let remaining_has_descendant = remaining_xpath.contains("//");
     if !remaining_has_descendant {
         for candidate in &first_step_matches {
-            if let Ok((matches, segments)) = find_by_xpath_detailed(auto, candidate, &remaining_xpath, None) {
+            if let Ok((matches, segments)) = search_descendants_via_uiauto_xpath(auto, candidate, &remaining_xpath, None) {
                 if !matches.is_empty() {
                     let mut all_segments = vec![SegmentValidationResult::matched(
                         0, first_step.to_string(), 1, 0,

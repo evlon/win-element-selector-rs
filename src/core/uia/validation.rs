@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn validate_selector_and_xpath_detailed(
+pub fn validate_xpath(
     window_selector: &str,
     element_xpath: &str,
     hierarchy: &[HierarchyNode],

@@ -4,11 +4,11 @@
 // Used by [fast] / [fast-child] mode — strict ControlView only, no RawView fallback.
 //
 // Key functions:
-// - find_by_xpath_control_descendants: //XPath via ControlView (FindAll + Chain)
-// - find_by_xpath_detailed: uiauto-xpath engine (ControlViewWalker based)
-// - find_by_xpath_detailed_strict: uiauto-xpath strict mode (no RawView fallback)
+// - search_descendants_via_control_view: //XPath via ControlView (FindAll + Chain)
+// - search_descendants_via_uiauto_xpath: uiauto-xpath engine (ControlViewWalker based)
+// - search_descendants_via_control_walker: uiauto-xpath strict mode (no RawView fallback)
 // - walk_control_tree_steps: manual ControlViewWalker tree walk
-// - findall_chain_first / findall_chain_all: Chain FindFirst/FindAll fast path
+// - search_descendants_chain_find_first / search_descendants_chain_find_all: Chain FindFirst/FindAll fast path
 
 use super::*;
 use super::find::{
@@ -29,17 +29,17 @@ use super::find::{
 /// matching the first XPath step. Complex predicates (starts-with/contains/matches)
 /// are handled via secondary Rust-side filtering. Falls back to manual BFS only
 /// when FindAll fails or cannot build conditions.
-pub(super) fn find_by_xpath_control_descendants(
+pub(super) fn search_descendants_via_control_view(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
     search_mode: SearchMode,
     filter: &FindAllFilter,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_control_descendants_with_depth(auto, window, xpath, 6, search_mode, filter)
+    search_descendants_via_control_view_impl(auto, window, xpath, 6, search_mode, filter)
 }
 
-fn find_by_xpath_control_descendants_with_depth(
+fn search_descendants_via_control_view_impl(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
@@ -74,9 +74,9 @@ fn find_by_xpath_control_descendants_with_depth(
     // ═══════════════════════════════════════════════════════════════════════════
     if xpath_parts.len() > 1 {
         let chain_result = if search_mode != SearchMode::All {
-            findall_chain_first(auto, window, &xpath_parts, filter)
+            search_descendants_chain_find_first(auto, window, &xpath_parts, filter)
         } else {
-            findall_chain_all(auto, window, &xpath_parts, filter)
+            search_descendants_chain_find_all(auto, window, &xpath_parts, filter)
         };
         if let Some(results) = chain_result {
             if !results.is_empty() {
@@ -158,13 +158,13 @@ fn find_by_xpath_control_descendants_with_depth(
                 }
                 Err(e) => {
                     log::warn!("[Ctrl Desc] FindAll(Subtree) failed: {:?}, falling back to manual walk", e);
-                    return find_by_xpath_control_descendants_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
+                    return search_descendants_via_control_view_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
                 }
             }
         }
     } else {
         log::info!("[Ctrl Desc] No UIA condition to build — using full manual walk");
-        return find_by_xpath_control_descendants_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
+        return search_descendants_via_control_view_manual(auto, window, xpath, &xpath_parts, &first_step_parsed, first_step, &start);
     };
 
     if first_step_matches.is_empty() {
@@ -197,7 +197,7 @@ fn find_by_xpath_control_descendants_with_depth(
     let t_strat = Instant::now();
     for (cand_idx, candidate) in first_step_matches.iter().enumerate() {
         let t_cand = Instant::now();
-        if let Ok((matches, segments)) = find_by_xpath_detailed_strict(auto, candidate, &remaining_xpath) {
+        if let Ok((matches, segments)) = search_descendants_via_control_walker(auto, candidate, &remaining_xpath) {
             log::info!("[Ctrl Desc] candidate[{}]: strict uiauto-xpath took {}ms, {} matches",
                 cand_idx, t_cand.elapsed().as_millis(), matches.len());
             if !matches.is_empty() {
@@ -253,7 +253,7 @@ fn find_by_xpath_control_descendants_with_depth(
 
 /// Manual BFS fallback for when FindAll fails or can't build conditions.
 /// Preserves the original ControlViewWalker BFS logic as a safety net.
-fn find_by_xpath_control_descendants_manual(
+fn search_descendants_via_control_view_manual(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
@@ -316,7 +316,7 @@ fn find_by_xpath_control_descendants_manual(
 
     // Try uiauto-xpath from each first-step match for remaining steps
     for candidate in &first_step_matches {
-        if let Ok((matches, segments)) = find_by_xpath_detailed_strict(auto, candidate, &remaining_xpath) {
+        if let Ok((matches, segments)) = search_descendants_via_control_walker(auto, candidate, &remaining_xpath) {
             if !matches.is_empty() {
                 let mut all_segments = vec![SegmentValidationResult::matched(
                     0, first_step.to_string(), 1, 0,
@@ -398,26 +398,26 @@ fn walk_control_tree_steps(
 
 /// Execute XPath using uiauto-xpath library (ControlViewWalker based).
 /// Used by [fast] mode absolute XPaths and as a fallback in other strategies.
-pub(super) fn find_by_xpath_detailed(
+pub(super) fn search_descendants_via_uiauto_xpath(
     auto: &UIAutomation,
     root: &UIElement,
     xpath: &str,
     visibility_filter: Option<uiauto_xpath::xpath::VisibilityFilter>,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_detailed_impl(auto, root, xpath, visibility_filter, false)
+    search_uiauto_xpath_core(auto, root, xpath, visibility_filter, false)
 }
 
 /// Execute XPath using uiauto-xpath strict mode (no RawViewWalker fallback).
 /// Used by [fast] mode — ControlView only, fails fast if element not in control tree.
-pub(super) fn find_by_xpath_detailed_strict(
+pub(super) fn search_descendants_via_control_walker(
     auto: &UIAutomation,
     root: &UIElement,
     xpath: &str,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    find_by_xpath_detailed_impl(auto, root, xpath, None, true)
+    search_uiauto_xpath_core(auto, root, xpath, None, true)
 }
 
-fn find_by_xpath_detailed_impl(
+fn search_uiauto_xpath_core(
     auto: &UIAutomation,
     root: &UIElement,
     xpath: &str,
@@ -535,7 +535,7 @@ fn find_by_xpath_detailed_impl(
 ///
 /// For SearchMode::First: uses FindFirst at each step (fastest).
 /// For SearchMode::All: uses FindAll at the last step.
-pub(super) fn findall_chain_first(
+pub(super) fn search_descendants_chain_find_first(
     auto: &UIAutomation,
     root: &UIElement,
     xpath_parts: &[&str],
@@ -618,7 +618,7 @@ pub(super) fn findall_chain_first(
 /// Chain FindAll: resolve multi-layer descendant XPath, collecting ALL matches at the last step.
 /// Returns `Some(results)` if all steps resolved successfully, `None` if any step
 /// cannot build a UIA condition or an intermediate FindFirst fails.
-pub(super) fn findall_chain_all(
+pub(super) fn search_descendants_chain_find_all(
     auto: &UIAutomation,
     root: &UIElement,
     xpath_parts: &[&str],
