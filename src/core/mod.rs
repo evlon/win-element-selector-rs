@@ -28,6 +28,5 @@ pub use commonality::extract_common_path;
 pub use enum_windows::enumerate_windows_fast;
 
 // Re-export uia_context public API
-#[allow(deprecated)]
-pub use uia_context::{init_uia_context, get_automation, with_automation, ensure_mta};
+pub use uia_context::{init_uia_context, ensure_mta};
 pub use element_cache::{cache_element, get_cached_element, cache_size as element_cache_size, clear_cache as clear_element_cache};

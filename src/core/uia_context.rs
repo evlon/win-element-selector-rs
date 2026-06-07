@@ -84,37 +84,6 @@ pub fn init_uia_context() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Get a reference to the global UIAutomation instance.
-/// Panics if `init_uia_context()` has not been called.
-///
-/// # Deprecation
-/// Prefer `crate::core::uia::helpers::AutomationProvider::get_healthy()` for thread-local
-/// IUIAutomation with health checks, which is more robust than the global OnceLock singleton.
-#[deprecated(since = "1.2.0", note = "Use crate::core::uia::helpers::AutomationProvider::get_healthy() for thread-local IUIAutomation with health checks. Scheduled removal in v2.0.0")]
-pub fn get_automation() -> &'static UIAutomation {
-    UIA_AUTOMATION.get().expect("UiaContext not initialized — call init_uia_context() first")
-}
-
-/// Try to get a reference to the global UIAutomation instance.
-/// Returns `Err` if `init_uia_context()` has not been called, instead of panicking.
-pub fn try_get_automation() -> anyhow::Result<&'static UIAutomation> {
-    UIA_AUTOMATION
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("UiaContext not initialized — call init_uia_context() first"))
-}
-
-/// Execute a closure with a reference to the global UIAutomation.
-/// This is the primary way to access UIA functionality.
-#[deprecated(since = "1.2.0", note = "Use crate::core::uia::helpers::AutomationProvider::get_healthy() instead. Scheduled removal in v2.0.0")]
-pub fn with_automation<F, R>(f: F) -> R
-where
-    F: FnOnce(&UIAutomation) -> R,
-{
-    #[allow(deprecated)]
-    let auto = get_automation();
-    f(auto)
-}
-
 /// Ensure COM is initialized on the current thread in MTA mode.
 /// Call this before using UIA from a new thread (e.g., tokio worker threads).
 /// This is idempotent — safe to call multiple times.

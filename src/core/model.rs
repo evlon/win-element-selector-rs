@@ -3,7 +3,7 @@
 // Core data models shared between GUI and HTTP API.
 
 use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ─── CaptureMode ─────────────────────────────────────────────────────────────
 
@@ -14,90 +14,36 @@ use serde::{Deserialize, Serialize};
 ///
 /// - `Normal`：普通捕获，ControlViewWalker + 轻量 BFS，适用于原生应用
 /// - `Enhanced`：增强捕获，RawViewWalker + 深度 BFS + Cross-HWND，适用于嵌入式框架
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **向后兼容**：反序列化时旧值 "Fast"→Normal, "Full"→Enhanced, "FastChild"→Normal, "FullChild"→Enhanced
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CaptureMode {
     /// 普通捕获：ControlViewWalker，轻量 BFS，适用于原生应用
     Normal,
     /// 增强捕获：RawViewWalker + 深度 BFS + Cross-HWND，适用于嵌入式框架
     Enhanced,
-    // ── 旧值（兼容期，将在 v2.0.0 移除）──
-    #[serde(rename = "Fast")]
-    #[deprecated(note = "Use CaptureMode::Normal instead. Will be removed in v2.0.0")]
-    Fast,
-    #[serde(rename = "Full")]
-    #[deprecated(note = "Use CaptureMode::Enhanced instead. Will be removed in v2.0.0")]
-    Full,
-    #[serde(rename = "FastChild")]
-    #[deprecated(note = "Use LocateMode::FastChild instead. Will be removed in v2.0.0")]
-    FastChild,
-    #[serde(rename = "FullChild")]
-    #[deprecated(note = "Use LocateMode::FullChild instead. Will be removed in v2.0.0")]
-    FullChild,
+}
+
+impl<'de> Deserialize<'de> for CaptureMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "Normal" | "Fast" | "FastChild" => Ok(CaptureMode::Normal),
+            "Enhanced" | "Full" | "FullChild" => Ok(CaptureMode::Enhanced),
+            _ => Err(serde::de::Error::unknown_variant(&s, &["Normal", "Enhanced"])),
+        }
+    }
 }
 
 impl CaptureMode {
     /// 是否为普通捕获模式
     pub fn is_normal(&self) -> bool {
-        matches!(self.normalize(), CaptureMode::Normal)
+        matches!(self, CaptureMode::Normal)
     }
 
     /// 是否为增强捕获模式
     pub fn is_enhanced(&self) -> bool {
-        matches!(self.normalize(), CaptureMode::Enhanced)
-    }
-
-    /// 标准化为 Normal/Enhanced（消除旧值）
-    #[allow(deprecated)]
-    pub fn normalize(&self) -> CaptureMode {
-        match self {
-            CaptureMode::Fast | CaptureMode::FastChild | CaptureMode::Normal => CaptureMode::Normal,
-            CaptureMode::Full | CaptureMode::FullChild | CaptureMode::Enhanced => CaptureMode::Enhanced,
-        }
-    }
-
-    /// XPath 前缀字符串（委托给 LocateMode）
-    #[deprecated(note = "Use LocateMode::xpath_prefix() instead. Will be removed in v2.0.0")]
-    #[allow(deprecated)]
-    pub fn xpath_prefix(&self) -> &'static str {
-        match self {
-            CaptureMode::Normal | CaptureMode::Fast => "[fast]",
-            CaptureMode::Enhanced | CaptureMode::Full => "[full]",
-            CaptureMode::FastChild => "[fast-child]",
-            CaptureMode::FullChild => "[full-child]",
-        }
-    }
-
-    /// 是否是子窗口模式（委托给 LocateMode）
-    #[deprecated(note = "Use LocateMode::is_child_mode() instead. Will be removed in v2.0.0")]
-    #[allow(deprecated)]
-    pub fn is_child_mode(&self) -> bool {
-        matches!(self, CaptureMode::FastChild | CaptureMode::FullChild)
-    }
-
-    /// 从 XPath 前缀解析（委托给 LocateMode）
-    #[deprecated(note = "Use LocateMode::from_xpath_prefix() instead. Will be removed in v2.0.0")]
-    #[allow(deprecated)]
-    pub fn from_xpath_prefix(xpath: &str) -> Option<CaptureMode> {
-        if xpath.starts_with("[fast-child]") {
-            Some(CaptureMode::FastChild)
-        } else if xpath.starts_with("[full-child]") {
-            Some(CaptureMode::FullChild)
-        } else if xpath.starts_with("[fast]") {
-            Some(CaptureMode::Fast)
-        } else if xpath.starts_with("[full]") {
-            Some(CaptureMode::Full)
-        } else {
-            None
-        }
-    }
-
-    /// 剥离 XPath 前缀（委托给 LocateMode）
-    #[deprecated(note = "Use LocateMode::strip_xpath_prefix() instead. Will be removed in v2.0.0")]
-    #[allow(deprecated)]
-    pub fn strip_xpath_prefix(xpath: &str) -> (Option<CaptureMode>, Option<ChildHwndHint>, &str) {
-        let (lm, hint, rest) = LocateMode::strip_xpath_prefix(xpath);
-        let cm = lm.map(|m| m.capture_mode());
-        (cm, hint, rest)
+        matches!(self, CaptureMode::Enhanced)
     }
 }
 
@@ -108,15 +54,10 @@ impl Default for CaptureMode {
 }
 
 impl std::fmt::Display for CaptureMode {
-    #[allow(deprecated)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CaptureMode::Normal => write!(f, "普通捕获"),
             CaptureMode::Enhanced => write!(f, "增强捕获"),
-            CaptureMode::Fast => write!(f, "快速捕获"),
-            CaptureMode::Full => write!(f, "增强捕获"),
-            CaptureMode::FastChild => write!(f, "快速捕获(子窗口)"),
-            CaptureMode::FullChild => write!(f, "增强捕获(子窗口)"),
         }
     }
 }
@@ -148,12 +89,11 @@ pub enum LocateMode {
 impl LocateMode {
     /// 从捕获模式和是否跨进程构造 LocateMode
     pub fn from_capture_mode(capture_mode: CaptureMode, is_cross_process: bool) -> Self {
-        match (capture_mode.normalize(), is_cross_process) {
+        match (capture_mode, is_cross_process) {
             (CaptureMode::Normal, false)  => LocateMode::Fast,
             (CaptureMode::Normal, true)   => LocateMode::FastChild,
             (CaptureMode::Enhanced, false) => LocateMode::Full,
             (CaptureMode::Enhanced, true)  => LocateMode::FullChild,
-            _ => LocateMode::Fast, // fallback for deprecated variants
         }
     }
 
