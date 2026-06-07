@@ -960,6 +960,9 @@ pub struct ElementFlashRequest {
     /// 闪烁持续时间（毫秒），默认 1000
     #[serde(default = "default_flash_timeout")]
     pub timeout: u64,
+    /// 坐标随机偏移范围（像素），默认 0（不偏移）
+    #[serde(default, rename = "randomRange")]
+    pub random_range: f32,
 }
 
 fn default_flash_timeout() -> u64 { 1000 }

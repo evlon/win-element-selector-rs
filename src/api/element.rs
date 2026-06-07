@@ -601,10 +601,11 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
         let window = request.window.clone();
         let element = request.element.clone();
         let timeout = request.timeout;
+        let random_range = request.random_range;
 
         // 查找元素获取其矩形区域
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, 5.0, None, None, None, true)
+            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, None, None, None, true)
         })
         .await;
 
