@@ -166,7 +166,13 @@ fn navigate_steps(
         }
     }
 
-    // Phase 3: Convert result to ElementInfo
+    // Phase 3: Cache the navigated element for subsequent operations (e.g. click)
+    if let Some(rid_vec) = runtime_id_key(&current) {
+        let rid = rid_vec.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        crate::core::element_cache::cache_element(rid, current.clone());
+    }
+
+    // Phase 4: Convert result to ElementInfo
     let mut rng = rand::thread_rng();
     let info = element_info_from_uia(&current, window_rect.as_ref(), 5.0, &mut rng);
     let find_selector = String::new();
