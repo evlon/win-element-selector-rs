@@ -1081,6 +1081,12 @@ pub fn find_all_elements_detailed(
                 });
                 if let Some(info) = element_info_from_uia(window, window_rect.as_ref(), random_range, &mut rng) {
                     let _ = cache_store(element_xpath_no_suffix, window, CompiledStrategy::WindowFastPath, 0);
+                    // 缓存原始元素，供后续 click/refresh 等操作使用
+                    if let Some(rid_str) = super::helpers::runtime_id_key(window)
+                        .map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
+                    {
+                        crate::core::element_cache::cache_element(rid_str, window.clone());
+                    }
                     return apply_search_mode(vec![info], search_mode);
                 }
             }
@@ -1144,6 +1150,14 @@ pub fn find_all_elements_detailed(
                     Err(_) => continue,
                 };
                 if !elements.is_empty() {
+                    // 缓存原始元素，供后续 click/refresh 等操作使用
+                    for raw_elem in &elements {
+                        if let Some(rid_str) = super::helpers::runtime_id_key(raw_elem)
+                            .map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
+                        {
+                            crate::core::element_cache::cache_element(rid_str, raw_elem.clone());
+                        }
+                    }
                     let mut rng = rand::thread_rng();
                     let results: Vec<_> = elements.iter().filter_map(|elem| {
                         element_info_from_uia(elem, window_rect.as_ref(), random_range, &mut rng)
@@ -1188,6 +1202,14 @@ pub fn find_all_elements_detailed(
         };
         
         if !elements.is_empty() {
+            // 缓存原始元素，供后续 click/refresh 等操作使用
+            for raw_elem in &elements {
+                if let Some(rid_str) = super::helpers::runtime_id_key(raw_elem)
+                    .map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
+                {
+                    crate::core::element_cache::cache_element(rid_str, raw_elem.clone());
+                }
+            }
             let mut rng = rand::thread_rng();
             let results: Vec<_> = elements.iter().filter_map(|elem| {
                 element_info_from_uia(elem, window_rect.as_ref(), random_range, &mut rng)

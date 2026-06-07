@@ -41,18 +41,23 @@ impl ElementCache {
         }
     }
 
-    fn insert(&mut self, key: String, element: UIElement) {
+    fn insert(&mut self, key: String, element: UIElement) -> bool {
         if self.elements.contains_key(&key) {
-            return; // Already cached
+            return true; // Already cached
         }
 
-        // Evict oldest entries if at capacity
-        while self.elements.len() >= MAX_CACHE_SIZE {
-            if let Some(oldest) = self.insertion_order.pop_front() {
-                self.elements.remove(&oldest);
-            } else {
-                break;
-            }
+        // TTL优先驱逐策略：
+        // 1. 先清理所有已过期的条目
+        // 2. 如果仍满，拒绝插入（返回 false）
+        // 注意：不会因为容量满而踢出未过期的条目——TTL 优先于 LRU
+        if self.elements.len() >= MAX_CACHE_SIZE {
+            // Step 1: 清理所有过期条目
+            self.evict_expired();
+        }
+
+        if self.elements.len() >= MAX_CACHE_SIZE {
+            // Step 2: 仍满，拒绝插入
+            return false;
         }
 
         self.elements.insert(key.clone(), CachedElement {
@@ -60,6 +65,29 @@ impl ElementCache {
             cached_at: Instant::now(),
         });
         self.insertion_order.push_back(key);
+        true
+    }
+
+    /// 清理所有已过期的缓存条目
+    fn evict_expired(&mut self) {
+        let effective_ttl = self.default_ttl;
+        if effective_ttl.is_none() {
+            return; // No TTL set, nothing to expire
+        }
+        let ttl_dur = effective_ttl.unwrap();
+
+        let now = Instant::now();
+        let expired_keys: Vec<String> = self
+            .elements
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.cached_at) > ttl_dur)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for k in &expired_keys {
+            self.elements.remove(k);
+            self.insertion_order.retain(|ik| ik != k);
+        }
     }
 
     /// Get cached element, checking TTL expiry. None = expired or not found.
@@ -126,9 +154,11 @@ fn recover_lock<T>(lock_result: Result<T, std::sync::PoisonError<T>>) -> T {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Cache an element by its RuntimeId string.
-pub fn cache_element(runtime_id: String, element: UIElement) {
+/// Returns true if the element was successfully cached (or already cached).
+/// Returns false if the cache is full with unexpired entries.
+pub fn cache_element(runtime_id: String, element: UIElement) -> bool {
     let mut cache = recover_lock(get_cache().write());
-    cache.insert(runtime_id, element);
+    cache.insert(runtime_id, element)
 }
 
 /// Look up a cached element by its RuntimeId string.
@@ -252,10 +282,10 @@ mod tests {
         assert!(result.is_none(), "non-existent key should return None");
     }
 
-    // ── TC-CORE-03: LRU eviction ─────────────────────────────────────────
+    // ── TC-CORE-03: TTL优先驱逐（满时拒绝插入，不踢未过期条目）────────────────
 
     #[test]
-    fn test_lru_eviction() {
+    fn test_ttl_priority_eviction() {
         setup();
         let elem = match get_desktop_element() {
             Some(e) => e,
@@ -265,29 +295,45 @@ mod tests {
             }
         };
 
-        // Fill cache to max capacity + 1
-        let total = MAX_CACHE_SIZE + 1;
-        for i in 0..total {
-            cache_element(format!("key:{i}"), elem.clone());
+        // 设置 TTL = 100ms
+        set_default_ttl(Some(Duration::from_millis(100)));
+
+        // 填满缓存到 MAX_CACHE_SIZE
+        for i in 0..MAX_CACHE_SIZE {
+            let ok = cache_element(format!("key:{i}"), elem.clone());
+            assert!(ok, "key:{i} should be inserted successfully");
         }
+        assert_eq!(cache_size(), MAX_CACHE_SIZE, "cache should be full");
 
-        assert_eq!(cache_size(), MAX_CACHE_SIZE, "cache should not exceed MAX_CACHE_SIZE");
+        // 尝试插入第 MAX+1 条 → 应该被拒绝（没有过期条目可清理）
+        let rejected = cache_element(format!("key:{}", MAX_CACHE_SIZE), elem.clone());
+        assert!(!rejected, "insert should be rejected when cache full with unexpired entries");
+        assert_eq!(cache_size(), MAX_CACHE_SIZE, "cache size should not change after rejection");
 
-        // The first inserted key should be evicted (oldest)
+        // 所有已插入的条目都应该还在
         let first = get_cached_element("key:0");
-        assert!(first.is_none(), "oldest key should be evicted");
+        assert!(first.is_some(), "key:0 should still exist (not evicted)");
+        let mid = get_cached_element("key:256");
+        assert!(mid.is_some(), "key:256 should still exist");
 
-        // The second key should still exist
-        let second = get_cached_element("key:1");
-        assert!(second.is_some(), "second key should still be in cache");
+        // 等待 TTL 过期
+        thread::sleep(Duration::from_millis(150));
 
-        // The last inserted key should exist
-        let last_key = format!("key:{}", MAX_CACHE_SIZE);
-        let last = get_cached_element(&last_key);
-        assert!(last.is_some(), "last inserted key should exist");
+        // 现在再插入 → 过期条目被清理，可以插入
+        let accepted = cache_element("new_after_expiry".to_string(), elem.clone());
+        assert!(accepted, "insert should succeed after expired entries are cleaned");
+        assert!(cache_size() > 0, "cache should have entries");
+        assert!(cache_size() <= MAX_CACHE_SIZE, "cache should not exceed max");
+
+        // 过期的条目应该查不到了
+        let expired = get_cached_element("key:0");
+        assert!(expired.is_none(), "expired key should be removed");
+
+        // Reset TTL for other tests
+        set_default_ttl(None);
     }
 
-    // ── TC-CORE-04: LRU promotion ────────────────────────────────────────
+    // ── TC-CORE-04: LRU promotion (get() promotes to MRU) ─────────────────
 
     #[test]
     fn test_lru_promotion() {
@@ -300,11 +346,8 @@ mod tests {
             }
         };
 
-        // Use a simple and reliable approach:
-        // 1. Fill cache completely (MAX entries)
-        // 2. Access a middle entry to promote it to MRU
-        // 3. Insert one more → oldest non-promoted entry should be evicted
-        // 4. The promoted entry should survive
+        // TTL优先策略下，LRU promotion 用于 get() 时的访问顺序维护
+        // 主要验证：get() 后条目仍然存在且可正常访问
 
         // Fill cache to MAX
         for i in 0..MAX_CACHE_SIZE {
@@ -312,24 +355,19 @@ mod tests {
         }
         assert_eq!(cache_size(), MAX_CACHE_SIZE);
 
-        // Access fill:256 (middle entry) to promote it
-        let promoted = get_cached_element("fill:256");
-        assert!(promoted.is_some(), "fill:256 should be found before eviction");
+        // Access fill:0 (oldest) to promote it
+        let promoted = get_cached_element("fill:0");
+        assert!(promoted.is_some(), "fill:0 should be found");
 
-        // Insert one more entry → should evict fill:0 (the oldest, never accessed)
-        cache_element("new_entry".to_string(), elem.clone());
+        // fill:0 should still exist (promoted in insertion_order)
+        let still_there = get_cached_element("fill:0");
+        assert!(still_there.is_some(), "fill:0 should survive (LRU promoted)");
 
-        // fill:0 should be evicted (oldest)
-        let fill0 = get_cached_element("fill:0");
-        assert!(fill0.is_none(), "fill:0 should be evicted (oldest, never promoted)");
-
-        // fill:256 should still exist (was promoted to MRU)
-        let still_there = get_cached_element("fill:256");
-        assert!(still_there.is_some(), "fill:256 should survive (LRU promoted)");
-
-        // new_entry should exist
-        let new_entry = get_cached_element("new_entry");
-        assert!(new_entry.is_some(), "new_entry should exist");
+        // All entries should exist (no eviction when no TTL set)
+        for i in 0..MAX_CACHE_SIZE {
+            let entry = get_cached_element(&format!("fill:{i}"));
+            assert!(entry.is_some(), "fill:{i} should exist");
+        }
 
         assert_eq!(cache_size(), MAX_CACHE_SIZE, "cache size should remain at MAX");
     }
