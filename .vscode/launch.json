@@ -5,11 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'element-selector'",
+            "name": "Debug  'element-selector'",
             "type": "cppvsdbg",
             "request": "launch",
             "cwd": "${workspaceRoot}",
             "program": "${workspaceFolder}/target/debug/element-selector.exe",
+            "stopAtEntry": false,
+            "environment": [],
+            "console": "externalTerminal",
+            "preLaunchTask": "cargo build",
+        },
+        {
+            "name": "Debug  'element-selector-server'",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "cwd": "${workspaceRoot}",
+            "program": "${workspaceFolder}/target/debug/element-selector-server.exe",
             "stopAtEntry": false,
             "environment": [],
             "console": "externalTerminal",
