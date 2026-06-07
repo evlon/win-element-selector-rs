@@ -1169,7 +1169,7 @@ pub async fn refresh_by_runtime_id(
 #[derive(Debug, Deserialize)]
 pub struct CacheConfigRequest {
     /// 全局缓存 TTL（毫秒），null = 永不过期
-    #[serde(default, rename = "cacheTTL")]
+    #[serde(default, rename = "cacheTime")]
     pub cache_ttl_ms: Option<u64>,
 }
 
@@ -1179,7 +1179,7 @@ pub struct CacheStatsResponse {
     pub size: usize,
     #[serde(rename = "maxSize")]
     pub max_size: usize,
-    #[serde(rename = "defaultTtlMs")]
+    #[serde(rename = "defaultCacheTime")]
     pub default_ttl_ms: Option<u64>,
 }
 
@@ -1189,7 +1189,7 @@ pub async fn set_cache_config(
     body: web::Json<CacheConfigRequest>,
 ) -> impl Responder {
     info!(
-        "API: /api/element/cache/config cacheTTL={:?}ms",
+        "API: /api/element/cache/config cacheTime={:?}ms",
         body.cache_ttl_ms
     );
 

@@ -596,13 +596,13 @@ async fn test_xpath_not_found() {
 // 缓存管理 API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// TC-API-CACHE-01: PUT /api/element/cache/config (设置 TTL)
+/// TC-API-CACHE-01: PUT /api/element/cache/config (设置缓存时间)
 #[tokio::test]
 async fn test_cache_config_set_ttl() {
     let _lock = acquire_test_lock();
     let (client, _handle) = init_test_env().await;
 
-    let body = json!({ "cacheTTL": 30000 });
+    let body = json!({ "cacheTime": 30000 });
     let resp = client.client
         .put(&client.url("/api/element/cache/config"))
         .json(&body)
@@ -640,18 +640,18 @@ async fn test_cache_config_set_ttl() {
     }
 
     if let Some(stats) = stats {
-        assert_eq!(stats["defaultTtlMs"], 30000);
+        assert_eq!(stats["defaultCacheTime"], 30000);
     }
 }
 
-/// TC-API-CACHE-02: PUT /api/element/cache/config (设置 TTL=null → 永不过期)
+/// TC-API-CACHE-02: PUT /api/element/cache/config (设置 null → 永不过期)
 #[tokio::test]
 async fn test_cache_config_set_ttl_null() {
     let _lock = acquire_test_lock();
     let (client, _handle) = init_test_env().await;
 
     // 先设置一个 TTL
-    let body1 = json!({ "cacheTTL": 5000 });
+    let body1 = json!({ "cacheTime": 5000 });
     if let Err(e) = client.client
         .put(&client.url("/api/element/cache/config"))
         .json(&body1)
@@ -663,7 +663,7 @@ async fn test_cache_config_set_ttl_null() {
     }
 
     // 再设为 null（永不过期）
-    let body2 = json!({ "cacheTTL": serde_json::Value::Null });
+    let body2 = json!({ "cacheTime": serde_json::Value::Null });
     let resp = match client.client
         .put(&client.url("/api/element/cache/config"))
         .json(&body2)
@@ -688,8 +688,8 @@ async fn test_cache_config_set_ttl_null() {
         {
             Ok(resp) => {
                 if let Ok(stats) = resp.json::<Value>().await {
-                    assert!(stats["defaultTtlMs"].is_null(),
-                            "TTL should be null after setting to null");
+                    assert!(stats["defaultCacheTime"].is_null(),
+                            "Cache time should be null after setting to null");
                     return;
                 }
             }

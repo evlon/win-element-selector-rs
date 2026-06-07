@@ -32,7 +32,7 @@ pub enum PauseReason {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct HumanInterventionConfig {
+pub struct HumanDetectConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_true")]
@@ -56,8 +56,8 @@ pub struct IdleMotionStartRequest {
     pub move_interval: u64,
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout: u64,
-    #[serde(default)]
-    pub human_intervention: Option<HumanInterventionConfig>,
+    #[serde(default, rename = "humanDetect")]
+    pub human_detect: Option<HumanDetectConfig>,
 }
 
 fn default_speed() -> String { "normal".to_string() }
@@ -98,7 +98,7 @@ pub struct IdleMotionParams {
     pub speed: String,
     pub move_interval: u64,
     pub idle_timeout: u64,
-    pub human_intervention: HumanInterventionConfig,
+    pub human_detect: HumanDetectConfig,
 }
 
 pub struct IdleMotionState {
@@ -266,11 +266,11 @@ async fn human_mouse_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token: 
                     continue;
                 }
                 
-                let human_intervention_enabled = state_guard.params.as_ref()
-                    .map(|p| p.human_intervention.enabled)
+                let human_detect_enabled = state_guard.params.as_ref()
+                    .map(|p| p.human_detect.enabled)
                     .unwrap_or(false);
                 
-                if !human_intervention_enabled {
+                if !human_detect_enabled {
                     continue;
                 }
                 
@@ -280,7 +280,7 @@ async fn human_mouse_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token: 
                 }
                 
                 let pause_on_mouse = state_guard.params.as_ref()
-                    .map(|p| p.human_intervention.pause_on_mouse)
+                    .map(|p| p.human_detect.pause_on_mouse)
                     .unwrap_or(true);
                 
                 if !pause_on_mouse {
@@ -335,7 +335,7 @@ async fn auto_resume_monitor(state: Arc<RwLock<IdleMotionState>>, cancel_token: 
                 }
                 
                 let resume_delay = state_guard.params.as_ref()
-                    .map(|p| p.human_intervention.resume_delay)
+                    .map(|p| p.human_detect.resume_delay)
                     .unwrap_or(3000);
                 
                 let last_human = state_guard.last_human_activity;
@@ -567,7 +567,7 @@ pub async fn start_idle_motion(body: web::Json<IdleMotionStartRequest>) -> impl 
                             speed: request.speed,
                             move_interval: request.move_interval,
                             idle_timeout: request.idle_timeout,
-                            human_intervention: request.human_intervention.unwrap_or(HumanInterventionConfig {
+                            human_detect: request.human_detect.unwrap_or(HumanDetectConfig {
                                 enabled: true,
                                 pause_on_mouse: true,
                                 pause_on_keyboard: true,
@@ -710,10 +710,10 @@ mod tests {
         assert!(state.pause_reason.is_none());
     }
     
-    /// 测试 HumanInterventionConfig 默认值
+    /// 测试 HumanDetectConfig 默认值
     #[test]
-    fn test_human_intervention_config_defaults() {
-        let config = HumanInterventionConfig {
+    fn test_human_detect_config_defaults() {
+        let config = HumanDetectConfig {
             enabled: true,
             pause_on_mouse: true,
             pause_on_keyboard: true,
@@ -786,7 +786,7 @@ mod tests {
             speed: "normal".to_string(),
             move_interval: 800,
             idle_timeout: 60000,
-            human_intervention: HumanInterventionConfig {
+            human_detect: HumanDetectConfig {
                 enabled: true,
                 pause_on_mouse: true,
                 pause_on_keyboard: true,
