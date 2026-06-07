@@ -1258,6 +1258,81 @@ pub struct SegmentValidationResult {
     pub predicate_failures: Vec<PredicateFailure>,
 }
 
+impl SegmentValidationResult {
+    /// Matched segment (no predicate failures).
+    #[inline]
+    pub fn matched(idx: usize, text: impl Into<String>, count: usize, duration_ms: u64) -> Self {
+        Self {
+            segment_index: idx,
+            segment_text: text.into(),
+            matched: true,
+            match_count: count,
+            duration_ms,
+            predicate_failures: vec![],
+        }
+    }
+
+    /// Unmatched segment with a single predicate failure describing why.
+    #[inline]
+    pub fn not_found(
+        idx: usize,
+        text: impl Into<String>,
+        attr_name: &str,
+        reason: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            segment_index: idx,
+            segment_text: text.into(),
+            matched: false,
+            match_count: 0,
+            duration_ms,
+            predicate_failures: vec![PredicateFailure {
+                attr_name: attr_name.to_string(),
+                expected_value: String::new(),
+                actual_value: None,
+                reason: reason.into(),
+            }],
+        }
+    }
+
+    /// Timeout segment — search exceeded budget.
+    #[inline]
+    pub fn timeout(idx: usize, text: impl Into<String>, budget_ms: u64, elapsed_ms: u64) -> Self {
+        Self {
+            segment_index: idx,
+            segment_text: text.into(),
+            matched: false,
+            match_count: 0,
+            duration_ms: elapsed_ms,
+            predicate_failures: vec![PredicateFailure {
+                attr_name: "Timeout".to_string(),
+                expected_value: format!("{}ms budget", budget_ms),
+                actual_value: Some(format!("{}ms elapsed", elapsed_ms)),
+                reason: format!("Search timeout after {}ms (budget: {}ms)", elapsed_ms, budget_ms),
+            }],
+        }
+    }
+
+    /// findOne leaf uniqueness failure — more than one candidate found.
+    #[inline]
+    pub fn leaf_not_unique(idx: usize, text: impl Into<String>, count: usize, duration_ms: u64) -> Self {
+        Self {
+            segment_index: idx,
+            segment_text: text.into(),
+            matched: false,
+            match_count: count,
+            duration_ms,
+            predicate_failures: vec![PredicateFailure {
+                attr_name: "findOne".to_string(),
+                expected_value: "unique element".to_string(),
+                actual_value: Some(format!("{} candidates", count)),
+                reason: format!("LeafNotUnique: found {} matching elements under parent, expected exactly 1", count),
+            }],
+        }
+    }
+}
+
 /// Detailed validation result with per-segment information.
 #[derive(Debug, Clone)]
 pub struct DetailedValidationResult {

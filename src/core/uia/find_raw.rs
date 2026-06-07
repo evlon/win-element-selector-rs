@@ -88,14 +88,11 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
                 log::info!("[Raw Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
                     results.len(), duration_ms);
                 let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult {
-                        segment_index: i,
-                        segment_text: step.to_string(),
-                        matched: i < xpath_parts.len() - 1 || !results.is_empty(),
-                        match_count: if i == xpath_parts.len() - 1 { results.len() } else { 0 },
-                        duration_ms: 0,
-                        predicate_failures: Vec::new(),
-                    }
+                    SegmentValidationResult::matched(
+                        i, step.to_string(),
+                        if i == xpath_parts.len() - 1 { results.len() } else { 0 },
+                        0,
+                    )
                 }).collect();
                 return Ok((results, segments));
             }
@@ -104,19 +101,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
                 // Default: skip expensive FindAll, return empty fast
                 log::info!("[Raw Desc] Chain found 0 results, enable_findall=false → skipping FindAll (fast fail)");
                 let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: xpath.to_string(),
-                    matched: false,
-                    match_count: 0,
-                    duration_ms,
-                    predicate_failures: vec![super::PredicateFailure {
-                        attr_name: "RawTree".to_string(),
-                        expected_value: xpath.to_string(),
-                        actual_value: None,
-                        reason: "Chain FindFirst found no matches (FindAll fallback disabled)".to_string(),
-                    }],
-                }]));
+                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                    0, xpath.to_string(), "RawTree", "Chain FindFirst found no matches (FindAll fallback disabled)", duration_ms,
+                )]));
             }
             // enable_findall=true: Chain found 0 but was valid, fall through to FindAll
             log::info!("[Raw Desc] Chain found 0 results, enable_findall=true → trying FindAll fallback");
@@ -125,19 +112,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
             if !filter.enable_findall {
                 log::info!("[Raw Desc] Chain not applicable, enable_findall=false → returning empty (fast fail)");
                 let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: xpath.to_string(),
-                    matched: false,
-                    match_count: 0,
-                    duration_ms,
-                    predicate_failures: vec![super::PredicateFailure {
-                        attr_name: "RawTree".to_string(),
-                        expected_value: xpath.to_string(),
-                        actual_value: None,
-                        reason: "Chain not applicable (complex predicates), FindAll fallback disabled".to_string(),
-                    }],
-                }]));
+                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                    0, xpath.to_string(), "RawTree", "Chain not applicable (complex predicates), FindAll fallback disabled", duration_ms,
+                )]));
             }
             log::info!("[Raw Desc] Chain not applicable (complex predicates?), enable_findall=true → falling back to FindAll");
         }
@@ -196,19 +173,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
     if first_step_matches.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
         log::info!("[Raw Desc] FindAll returned 0 ({}ms)", duration_ms);
-        return Ok((vec![], vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: first_step.to_string(),
-            matched: false,
-            match_count: 0,
-            duration_ms,
-            predicate_failures: vec![super::PredicateFailure {
-                attr_name: "RawTree".to_string(),
-                expected_value: first_step.to_string(),
-                actual_value: None,
-                reason: "No raw tree element matches this step".to_string(),
-            }],
-        }]));
+        return Ok((vec![], vec![SegmentValidationResult::not_found(
+            0, first_step.to_string(), "RawTree", "No raw tree element matches this step", duration_ms,
+        )]));
     }
 
     // Build remaining XPath (steps after the first)
@@ -225,14 +192,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
         let match_count = first_step_matches.len();
         log::info!("[Raw Desc] First step is the last step, returning {} matches ({}ms)",
             match_count, duration_ms);
-        return Ok((first_step_matches, vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: xpath.to_string(),
-            matched: true,
-            match_count,
-            duration_ms,
-            predicate_failures: Vec::new(),
-        }]));
+        return Ok((first_step_matches, vec![SegmentValidationResult::matched(
+            0, xpath.to_string(), match_count, duration_ms,
+        )]));
     }
 
     // Strategy A: Try uiauto-xpath from each first-step match for the remaining XPath
@@ -250,14 +212,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
                 if !matches.is_empty() {
                     log::info!("[Raw Desc] ✓ Strategy A found {} from raw candidate[{}] ({}ms total)",
                         matches.len(), cand_idx, start.elapsed().as_millis());
-                    let mut all_segments = vec![SegmentValidationResult {
-                        segment_index: 0,
-                        segment_text: first_step.to_string(),
-                        matched: true,
-                        match_count: 1,
-                        duration_ms: 0,
-                        predicate_failures: Vec::new(),
-                    }];
+                    let mut all_segments = vec![SegmentValidationResult::matched(
+                        0, first_step.to_string(), 1, 0,
+                    )];
                     for mut s in segments {
                         s.segment_index += 1;
                         all_segments.push(s);
@@ -276,19 +233,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
         Err(e) => {
             log::warn!("[Raw Desc] Failed to get RawViewWalker for fallback: {}", e);
             let duration_ms = start.elapsed().as_millis() as u64;
-            return Ok((vec![], vec![SegmentValidationResult {
-                segment_index: 0,
-                segment_text: first_step.to_string(),
-                matched: false,
-                match_count: 0,
-                duration_ms,
-                predicate_failures: vec![super::PredicateFailure {
-                    attr_name: "RawTree".to_string(),
-                    expected_value: first_step.to_string(),
-                    actual_value: None,
-                    reason: "RawViewWalker unavailable".to_string(),
-                }],
-            }]));
+            return Ok((vec![], vec![SegmentValidationResult::not_found(
+                0, first_step.to_string(), "RawTree", "RawViewWalker unavailable", duration_ms,
+            )]));
         }
     };
     let t_strat_b = Instant::now();
@@ -306,14 +253,9 @@ pub(super) fn find_by_xpath_raw_descendants_with_depth(
     log::info!("[Raw Desc] Full raw walk found {} matches ({}ms total)", all_matches.len(), duration_ms);
 
     let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-        SegmentValidationResult {
-            segment_index: i,
-            segment_text: step.to_string(),
-            matched: i < xpath_parts.len() - 1 || !all_matches.is_empty(),
-            match_count: if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 },
-            duration_ms: 0,
-            predicate_failures: Vec::new(),
-        }
+        SegmentValidationResult::matched(
+            i, step.to_string(), if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 }, 0,
+        )
     }).collect();
 
     Ok((all_matches, segments))
@@ -361,19 +303,9 @@ fn find_by_xpath_raw_descendants_manual(
 
     if first_step_matches.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
-        return Ok((vec![], vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: first_step.to_string(),
-            matched: false,
-            match_count: 0,
-            duration_ms,
-            predicate_failures: vec![super::PredicateFailure {
-                attr_name: "RawTree".to_string(),
-                expected_value: first_step.to_string(),
-                actual_value: None,
-                reason: "No raw tree element matches this step (manual fallback)".to_string(),
-            }],
-        }]));
+        return Ok((vec![], vec![SegmentValidationResult::not_found(
+            0, first_step.to_string(), "RawTree", "No raw tree element matches this step (manual fallback)", duration_ms,
+        )]));
     }
 
     let remaining_parts = &xpath_parts[1..];
@@ -386,14 +318,9 @@ fn find_by_xpath_raw_descendants_manual(
     if remaining_parts.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
         let match_count = first_step_matches.len();
-        return Ok((first_step_matches, vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: xpath.to_string(),
-            matched: true,
-            match_count,
-            duration_ms,
-            predicate_failures: Vec::new(),
-        }]));
+        return Ok((first_step_matches, vec![SegmentValidationResult::matched(
+            0, xpath.to_string(), match_count, duration_ms,
+        )]));
     }
 
     let remaining_has_descendant = remaining_xpath.contains("//");
@@ -401,14 +328,9 @@ fn find_by_xpath_raw_descendants_manual(
         for candidate in &first_step_matches {
             if let Ok((matches, segments)) = find_by_xpath_detailed(auto, candidate, &remaining_xpath, None) {
                 if !matches.is_empty() {
-                    let mut all_segments = vec![SegmentValidationResult {
-                        segment_index: 0,
-                        segment_text: first_step.to_string(),
-                        matched: true,
-                        match_count: 1,
-                        duration_ms: 0,
-                        predicate_failures: Vec::new(),
-                    }];
+                    let mut all_segments = vec![SegmentValidationResult::matched(
+                        0, first_step.to_string(), 1, 0,
+                    )];
                     for mut s in segments {
                         s.segment_index += 1;
                         all_segments.push(s);
@@ -432,14 +354,9 @@ fn find_by_xpath_raw_descendants_manual(
     log::info!("[Raw Desc Manual] Full walk found {} matches ({}ms total)", all_matches.len(), duration_ms);
 
     let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-        SegmentValidationResult {
-            segment_index: i,
-            segment_text: step.to_string(),
-            matched: i < xpath_parts.len() - 1 || !all_matches.is_empty(),
-            match_count: if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 },
-            duration_ms: 0,
-            predicate_failures: Vec::new(),
-        }
+        SegmentValidationResult::matched(
+            i, step.to_string(), if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 }, 0,
+        )
     }).collect();
 
     Ok((all_matches, segments))

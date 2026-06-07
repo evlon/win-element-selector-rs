@@ -84,14 +84,12 @@ fn find_by_xpath_control_descendants_with_depth(
                 log::info!("[Ctrl Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
                     results.len(), duration_ms);
                 let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult {
-                        segment_index: i,
-                        segment_text: step.to_string(),
-                        matched: i < xpath_parts.len() - 1 || !results.is_empty(),
-                        match_count: if i == xpath_parts.len() - 1 { results.len() } else { 0 },
-                        duration_ms: 0,
-                        predicate_failures: Vec::new(),
-                    }
+                    SegmentValidationResult::matched(
+                        i,
+                        step.to_string(),
+                        if i == xpath_parts.len() - 1 { results.len() } else { 0 },
+                        0,
+                    )
                 }).collect();
                 return Ok((results, segments));
             }
@@ -100,19 +98,9 @@ fn find_by_xpath_control_descendants_with_depth(
                 // Default: skip expensive FindAll, return empty fast
                 log::info!("[Ctrl Desc] Chain found 0 results, enable_findall=false → skipping FindAll (fast fail)");
                 let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: xpath.to_string(),
-                    matched: false,
-                    match_count: 0,
-                    duration_ms,
-                    predicate_failures: vec![super::PredicateFailure {
-                        attr_name: "ControlTree".to_string(),
-                        expected_value: xpath.to_string(),
-                        actual_value: None,
-                        reason: "Chain FindFirst found no matches (FindAll fallback disabled)".to_string(),
-                    }],
-                }]));
+                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                    0, xpath.to_string(), "ControlTree", "Chain FindFirst found no matches (FindAll fallback disabled)", duration_ms,
+                )]));
             }
             // enable_findall=true: Chain found 0 but was valid, fall through to FindAll
             log::info!("[Ctrl Desc] Chain found 0 results, enable_findall=true → trying FindAll fallback");
@@ -121,19 +109,9 @@ fn find_by_xpath_control_descendants_with_depth(
             if !filter.enable_findall {
                 log::info!("[Ctrl Desc] Chain not applicable, enable_findall=false → returning empty (fast fail)");
                 let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: xpath.to_string(),
-                    matched: false,
-                    match_count: 0,
-                    duration_ms,
-                    predicate_failures: vec![super::PredicateFailure {
-                        attr_name: "ControlTree".to_string(),
-                        expected_value: xpath.to_string(),
-                        actual_value: None,
-                        reason: "Chain not applicable (complex predicates), FindAll fallback disabled".to_string(),
-                    }],
-                }]));
+                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                    0, xpath.to_string(), "ControlTree", "Chain not applicable (complex predicates), FindAll fallback disabled", duration_ms,
+                )]));
             }
             log::info!("[Ctrl Desc] Chain not applicable (complex predicates?), enable_findall=true → falling back to FindAll");
         }
@@ -191,19 +169,9 @@ fn find_by_xpath_control_descendants_with_depth(
 
     if first_step_matches.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
-        return Ok((vec![], vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: first_step.to_string(),
-            matched: false,
-            match_count: 0,
-            duration_ms,
-            predicate_failures: vec![super::PredicateFailure {
-                attr_name: "ControlTree".to_string(),
-                expected_value: first_step.to_string(),
-                actual_value: None,
-                reason: "No control tree element matches this step".to_string(),
-            }],
-        }]));
+        return Ok((vec![], vec![SegmentValidationResult::not_found(
+            0, first_step.to_string(), "ControlTree", "No control tree element matches this step", duration_ms,
+        )]));
     }
 
     // Build remaining XPath (steps after the first)
@@ -220,14 +188,9 @@ fn find_by_xpath_control_descendants_with_depth(
         let match_count = first_step_matches.len();
         log::info!("[Ctrl Desc] First step is the last step, returning {} matches ({}ms)",
             match_count, duration_ms);
-        return Ok((first_step_matches, vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: xpath.to_string(),
-            matched: true,
-            match_count,
-            duration_ms,
-            predicate_failures: Vec::new(),
-        }]));
+        return Ok((first_step_matches, vec![SegmentValidationResult::matched(
+            0, xpath.to_string(), match_count, duration_ms,
+        )]));
     }
 
     // Strategy: Use uiauto-xpath (ControlView) from each first-step match
@@ -240,14 +203,9 @@ fn find_by_xpath_control_descendants_with_depth(
             if !matches.is_empty() {
                 log::info!("[Ctrl Desc] ✓ Found {} from control candidate[{}] ({}ms total)",
                     matches.len(), cand_idx, start.elapsed().as_millis());
-                let mut all_segments = vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: first_step.to_string(),
-                    matched: true,
-                    match_count: 1,
-                    duration_ms: 0,
-                    predicate_failures: Vec::new(),
-                }];
+                let mut all_segments = vec![SegmentValidationResult::matched(
+                    0, first_step.to_string(), 1, 0,
+                )];
                 for mut s in segments {
                     s.segment_index += 1;
                     all_segments.push(s);
@@ -265,19 +223,9 @@ fn find_by_xpath_control_descendants_with_depth(
         Err(e) => {
             log::warn!("[Ctrl Desc] Failed to get ControlViewWalker for fallback: {}", e);
             let duration_ms = start.elapsed().as_millis() as u64;
-            return Ok((vec![], vec![SegmentValidationResult {
-                segment_index: 0,
-                segment_text: first_step.to_string(),
-                matched: false,
-                match_count: 0,
-                duration_ms,
-                predicate_failures: vec![super::PredicateFailure {
-                    attr_name: "ControlTree".to_string(),
-                    expected_value: first_step.to_string(),
-                    actual_value: None,
-                    reason: "ControlViewWalker unavailable".to_string(),
-                }],
-            }]));
+            return Ok((vec![], vec![SegmentValidationResult::not_found(
+                0, first_step.to_string(), "ControlTree", "ControlViewWalker unavailable", duration_ms,
+            )]));
         }
     };
     let t_walk = Instant::now();
@@ -295,14 +243,9 @@ fn find_by_xpath_control_descendants_with_depth(
     log::info!("[Ctrl Desc] Full control walk found {} matches ({}ms total)", all_matches.len(), duration_ms);
 
     let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-        SegmentValidationResult {
-            segment_index: i,
-            segment_text: step.to_string(),
-            matched: i < xpath_parts.len() - 1 || !all_matches.is_empty(),
-            match_count: if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 },
-            duration_ms: 0,
-            predicate_failures: Vec::new(),
-        }
+        SegmentValidationResult::matched(
+            i, step.to_string(), if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 }, 0,
+        )
     }).collect();
 
     Ok((all_matches, segments))
@@ -351,19 +294,9 @@ fn find_by_xpath_control_descendants_manual(
 
     if first_step_matches.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
-        return Ok((vec![], vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: first_step.to_string(),
-            matched: false,
-            match_count: 0,
-            duration_ms,
-            predicate_failures: vec![super::PredicateFailure {
-                attr_name: "ControlTree".to_string(),
-                expected_value: first_step.to_string(),
-                actual_value: None,
-                reason: "No control tree element matches this step (manual fallback)".to_string(),
-            }],
-        }]));
+        return Ok((vec![], vec![SegmentValidationResult::not_found(
+            0, first_step.to_string(), "ControlTree", "No control tree element matches this step (manual fallback)", duration_ms,
+        )]));
     }
 
     let remaining_parts = &xpath_parts[1..];
@@ -376,28 +309,18 @@ fn find_by_xpath_control_descendants_manual(
     if remaining_parts.is_empty() {
         let duration_ms = start.elapsed().as_millis() as u64;
         let match_count = first_step_matches.len();
-        return Ok((first_step_matches, vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: xpath.to_string(),
-            matched: true,
-            match_count,
-            duration_ms,
-            predicate_failures: Vec::new(),
-        }]));
+        return Ok((first_step_matches, vec![SegmentValidationResult::matched(
+            0, xpath.to_string(), match_count, duration_ms,
+        )]));
     }
 
     // Try uiauto-xpath from each first-step match for remaining steps
     for candidate in &first_step_matches {
         if let Ok((matches, segments)) = find_by_xpath_detailed_strict(auto, candidate, &remaining_xpath) {
             if !matches.is_empty() {
-                let mut all_segments = vec![SegmentValidationResult {
-                    segment_index: 0,
-                    segment_text: first_step.to_string(),
-                    matched: true,
-                    match_count: 1,
-                    duration_ms: 0,
-                    predicate_failures: Vec::new(),
-                }];
+                let mut all_segments = vec![SegmentValidationResult::matched(
+                    0, first_step.to_string(), 1, 0,
+                )];
                 for mut s in segments {
                     s.segment_index += 1;
                     all_segments.push(s);
@@ -421,14 +344,9 @@ fn find_by_xpath_control_descendants_manual(
     log::info!("[Ctrl Desc Manual] Full walk found {} matches ({}ms total)", all_matches.len(), duration_ms);
 
     let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-        SegmentValidationResult {
-            segment_index: i,
-            segment_text: step.to_string(),
-            matched: i < xpath_parts.len() - 1 || !all_matches.is_empty(),
-            match_count: if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 },
-            duration_ms: 0,
-            predicate_failures: Vec::new(),
-        }
+        SegmentValidationResult::matched(
+            i, step.to_string(), if i == xpath_parts.len() - 1 { all_matches.len() } else { 0 }, 0,
+        )
     }).collect();
 
     Ok((all_matches, segments))
@@ -584,24 +502,14 @@ fn find_by_xpath_detailed_impl(
     // Generate per-segment validation results for UI display.
     let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
     let segment_results: Vec<SegmentValidationResult> = if parts.is_empty() {
-        vec![SegmentValidationResult {
-            segment_index: 0,
-            segment_text: xpath.to_string(),
-            matched: !matches.is_empty(),
-            match_count: matches.len(),
-            duration_ms: total_duration_ms,
-            predicate_failures: Vec::new(),
-        }]
+        vec![SegmentValidationResult::matched(0, xpath.to_string(), matches.len(), total_duration_ms)]
     } else {
         parts.iter().enumerate().map(|(i, step)| {
-            SegmentValidationResult {
-                segment_index: i,
-                segment_text: step.to_string(),
-                matched: i < parts.len() - 1 || !matches.is_empty(),
-                match_count: if i == parts.len() - 1 { matches.len() } else { 0 },
-                duration_ms: if i == parts.len() - 1 { total_duration_ms } else { 0 },
-                predicate_failures: Vec::new(),
-            }
+            SegmentValidationResult::matched(
+                i, step.to_string(),
+                if i == parts.len() - 1 { matches.len() } else { 0 },
+                if i == parts.len() - 1 { total_duration_ms } else { 0 },
+            )
         }).collect()
     };
 

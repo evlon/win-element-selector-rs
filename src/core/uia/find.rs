@@ -122,19 +122,8 @@ pub(super) fn execute_xpath_steps_filtered(
                     start.elapsed().as_millis(), step_idx + 1, xpath_parts.len(), step_str, timeout
                 );
                 // 返回空结果 + Timeout 信息
-                segment_results.push(SegmentValidationResult {
-                    segment_index: step_idx,
-                    segment_text: step_str.to_string(),
-                    matched: false,
-                    match_count: 0,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    predicate_failures: vec![PredicateFailure {
-                        attr_name: "Timeout".to_string(),
-                        expected_value: format!("{}ms budget", timeout),
-                        actual_value: Some(format!("{}ms elapsed", start.elapsed().as_millis())),
-                        reason: format!("Search timeout after {}ms (budget {}ms)", start.elapsed().as_millis(), timeout),
-                    }],
-                });
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                segment_results.push(SegmentValidationResult::timeout(step_idx, *step_str, timeout, elapsed_ms));
                 return Ok((vec![], segment_results));
             }
         }
@@ -194,39 +183,17 @@ pub(super) fn execute_xpath_steps_filtered(
                 step_idx + 1, step_str, match_count
             );
             // 返回空结果 + LeafNotUnique 的 segment result
-            segment_results.push(SegmentValidationResult {
-                segment_index: step_idx,
-                segment_text: step_str.to_string(),
-                matched: false,
-                match_count,
-                duration_ms: step_ms,
-                predicate_failures: vec![PredicateFailure {
-                    attr_name: "findOne".to_string(),
-                    expected_value: "unique element".to_string(),
-                    actual_value: Some(format!("{} candidates", match_count)),
-                    reason: format!("LeafNotUnique: found {} matching elements under parent, expected exactly 1", match_count),
-                }],
-            });
+            segment_results.push(SegmentValidationResult::leaf_not_unique(step_idx, *step_str, match_count, step_ms));
             return Ok((vec![], segment_results));
         }
 
-        segment_results.push(SegmentValidationResult {
-            segment_index: step_idx,
-            segment_text: step_str.to_string(),
-            matched,
-            match_count,
-            duration_ms: step_ms,
-            predicate_failures: if !matched {
-                vec![PredicateFailure {
-                    attr_name: "XPath".to_string(),
-                    expected_value: step_str.to_string(),
-                    actual_value: None,
-                    reason: format!("Step not found via {:?}", strategy),
-                }]
-            } else {
-                Vec::new()
-            },
-        });
+        if matched {
+            segment_results.push(SegmentValidationResult::matched(step_idx, *step_str, match_count, step_ms));
+        } else {
+            segment_results.push(SegmentValidationResult::not_found(
+                step_idx, *step_str, "XPath", format!("Step not found via {:?}", strategy), step_ms,
+            ));
+        }
 
         if next_elements.is_empty() {
             log::info!("[ExecuteXPath] Step {} not found, stopping", step_idx + 1);
@@ -489,7 +456,7 @@ fn apply_positional_and_search_mode(
     } else {
         results
     };
-    apply_search_mode_ui(results, search_mode)
+    apply_search_mode(results, search_mode)
 }
 
 
@@ -1147,48 +1114,12 @@ pub fn find_all_elements_detailed(
     apply_search_mode(vec![], search_mode)
 }
 
-/// Apply SearchMode (:first / :onlyone / :all) post-processing to UIElement results.
+/// Apply SearchMode (:first / :onlyone / :all) post-processing.
 ///
-/// Note: findOne uniqueness check (`LeafNotUnique`) is now performed in
-/// `execute_xpath_steps_filtered` at the parent level (需求 §5.3.1), not here.
-/// `OnlyOne` here only serves as a safety net for edge cases that bypass the step executor.
+/// Note: findOne uniqueness check (`LeafNotUnique`) is performed in the XPath executor
+/// at the parent level (需求 §5.3.1), not here. `OnlyOne` here is a defense-in-depth safety net.
 #[inline]
-fn apply_search_mode_ui(
-    results: Vec<UIElement>,
-    mode: SearchMode,
-) -> Vec<UIElement> {
-    match mode {
-        SearchMode::All => results,
-        SearchMode::First => {
-            if results.len() > 1 {
-                log::info!("[SearchMode:first] Truncating {} UIElements to 1", results.len());
-                results.into_iter().take(1).collect()
-            } else {
-                results
-            }
-        }
-        SearchMode::OnlyOne => {
-            // Safety net: uniqueness should have been verified in execute_xpath_steps_filtered.
-            // If we still get > 1 here, log and return empty as defense-in-depth.
-            if results.len() > 1 {
-                log::warn!("[SearchMode:onlyone] Defense: Expected unique, found {} UIElements — returning empty", results.len());
-                vec![]
-            } else {
-                results
-            }
-        }
-    }
-}
-
-/// Apply SearchMode (:first / :onlyone / :all) post-processing to ElementData results.
-///
-/// Note: findOne uniqueness check (`LeafNotUnique`) is performed in the XPath executor,
-/// not here. `OnlyOne` here is a defense-in-depth safety net.
-#[inline]
-fn apply_search_mode(
-    results: Vec<crate::core::model::ElementData>,
-    mode: SearchMode,
-) -> Vec<crate::core::model::ElementData> {
+fn apply_search_mode<T>(results: Vec<T>, mode: SearchMode) -> Vec<T> {
     match mode {
         SearchMode::All => results,
         SearchMode::First => {
@@ -1200,7 +1131,6 @@ fn apply_search_mode(
             }
         }
         SearchMode::OnlyOne => {
-            // Safety net: uniqueness should have been verified in execute_xpath_steps_filtered.
             if results.len() > 1 {
                 log::warn!("[SearchMode:onlyone] Defense: Expected unique, found {} results — returning empty", results.len());
                 vec![]

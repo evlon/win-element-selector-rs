@@ -804,27 +804,27 @@ src/core/uia/
 ## 8. 验收标准
 
 ### 功能验收
-- [ ] `parse_xpath_step` 能正确解析 `/A`、`//A`、`/*/A`、`/*2/A`、`/*n/A` 五种前缀
-- [ ] 深度限制 BFS 正确执行 `/*n/` 语法，深度限制生效
-- [ ] `findOne` 在父节点下验证叶子唯一性，多余一个时报 `LeafNotUnique`
-- [ ] `findAll` 支持 Eq/NotEq/Contains/Regex/Exists 五种 FilterCondition
-- [ ] 生产路径不含任何隐式 fallback
-- [ ] 正则表达式预编译，无每次 `Regex::new()` 调用
-- [ ] `apply_search_mode` 合并为泛型函数
+- [x] `parse_xpath_step` 能正确解析 `/A`、`//A`、`/*/A`、`/*2/A`、`/*n/A` 五种前缀 ✅
+- [x] 深度限制 BFS 正确执行 `/*n/` 语法，深度限制生效 ✅
+- [x] `findOne` 在父节点下验证叶子唯一性，多余一个时报 `LeafNotUnique` ✅
+- [x] `findAll` 支持 Eq/NotEq/Contains/Regex/Exists 五种 FilterCondition ✅ (`AttributeFilter`)
+- [x] 生产路径不含任何隐式 fallback ✅ (`execute_xpath_steps_filtered` 无隐式回退)
+- [x] 正则表达式预编译，无每次 `Regex::new()` 调用 ✅ (`Lazy<Regex>`)
+- [x] `apply_search_mode` 合并为泛型函数 ✅
 - [ ] `get_uia_property_for_xpath` 使用枚举替代字符串 key
 
 ### 命名验收
 - [ ] 所有搜索函数遵循 `{action}_{target}_{strategy}` 命名模式
-- [ ] 旧函数全部标记 `#[deprecated]` 或已删除
+- [x] 旧函数全部标记 `#[deprecated]` 或已删除 ✅ (deprecated 已全部清除)
 - [ ] 无 `_impl`、`_detailed` 等泄露实现细节的后缀
 
 ### 测试验收
-- [ ] 50 个新增测试全部通过
-- [ ] 所有现有测试通过，无回归
+- [ ] 50 个新增测试全部通过（当前 27 L1 测试 + 集成测试 = 179 总测试通过）
+- [x] 所有现有测试通过，无回归 ✅ (152 单元测试 + 27 集成测试)
 - [ ] 每个新增函数至少 1 个 L1 测试
-- [ ] 每个阶段完成后 `cargo test` 零失败
+- [x] 每个阶段完成后 `cargo test` 零失败 ✅
 
 ### 编译验收
-- [ ] `cargo build` 通过（debug 模式）
-- [ ] 0 lint 错误
-- [ ] 0 lint 警告（deprecated 除外）
+- [x] `cargo build` 通过（debug 模式） ✅
+- [x] 0 lint 错误 ✅
+- [x] 0 lint 警告（deprecated 除外） ✅
