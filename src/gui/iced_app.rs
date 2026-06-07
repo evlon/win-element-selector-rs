@@ -832,7 +832,7 @@ impl State {
         in_progress.store(true, Ordering::SeqCst);
         std::thread::spawn(move || {
             let result = uia::validate_selector_and_xpath_detailed(
-                &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None,
+                &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None, true,
             );
             let _ = tx.send(Some(result));
             in_progress.store(false, Ordering::SeqCst);

@@ -48,7 +48,7 @@ fn check_wait_xpaths(
             window_selector,
             xpath,
             &[],
-            None, None,
+            None, None, true,
         );
         if matches!(result.overall, super::super::model::ValidationResult::Found { .. }) {
             return Some(result);
@@ -246,7 +246,7 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
         crate::core::uia::validate_selector_and_xpath_detailed(
             &window_selector,
             &element,
-            &[], None, None,
+            &[], None, None, true,
         )
     })
     .await;
@@ -1009,7 +1009,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
             &window_selector_for_element,
             &element_for_query,
             &[],
-            None, None,
+            None, None, true,
         )
     })
     .await;
@@ -1484,7 +1484,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
             &window_for_container,
             &container_for_query,
             &[],
-            None, None,
+            None, None, true,
         )
     })
     .await;
@@ -1581,7 +1581,7 @@ pub async fn scroll_detect(body: web::Json<MouseScrollDetectRequest>) -> impl Re
                 let ws = window_selector.clone();
                 let xp = ex_xpath.clone();
                 let ex_elements = tokio::task::spawn_blocking(move || {
-                    crate::core::uia::find_all_elements_detailed(&ws, &xp, 0.0, None, None, None)
+                    crate::core::uia::find_all_elements_detailed(&ws, &xp, 0.0, None, None, None, true)
                 }).await.unwrap_or_default();
                 for elem_data in &ex_elements {
                     let elem_info: super::types::ElementInfo = elem_data.clone().into();
@@ -1844,7 +1844,7 @@ pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
                 &window_selector,
                 &element,
                 &[],
-                None, None,
+                None, None, true,
             )
         })
         .await;
@@ -1962,7 +1962,7 @@ pub async fn drag_mouse(body: web::Json<MouseDragRequest>) -> impl Responder {
     // Helper: 从 XPath 搜索获取 rect
     fn get_rect_from_xpath(ws: &str, xp: &str) -> Option<super::types::Rect> {
         let result = crate::core::uia::validate_selector_and_xpath_detailed(
-            ws, xp, &[], None, None,
+            ws, xp, &[], None, None, true,
         );
         match result.overall {
             super::super::model::ValidationResult::Found { first_rect, .. } => {

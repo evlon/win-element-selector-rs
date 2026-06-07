@@ -25,7 +25,7 @@ pub fn invoke_element_by_xpath(
     }
 
     for window_element in &windows {
-        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000), true) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;
@@ -100,7 +100,7 @@ pub fn focus_element_by_xpath(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000), true) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;
@@ -160,7 +160,7 @@ pub fn set_value_by_xpath(
     }
 
     for window_element in &windows {
-        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000)) {
+        match execute_xpath_steps_filtered(&auto, window_element, xpath, &FindAllFilter::default(), Some(5000), true) {
             Ok((elements, _)) => {
                 if elements.is_empty() {
                     continue;

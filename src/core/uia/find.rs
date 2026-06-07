@@ -44,7 +44,7 @@ pub(super) fn execute_xpath_steps(
     window: &UIElement,
     xpath: &str,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    execute_xpath_steps_filtered(auto, window, xpath, &FindAllFilter::default(), None)
+    execute_xpath_steps_filtered(auto, window, xpath, &FindAllFilter::default(), None, true)
 }
 
 /// New: Execute XPath steps with filter support. See `execute_xpath_steps` for strategy docs.
@@ -52,12 +52,17 @@ pub(super) fn execute_xpath_steps(
 /// `timeout_ms`: 超时预算（ms）。超时后返回空结果 + `Timeout` 错误。
 ///   - `None`: 不限制
 ///   - `Some(n)`: 从函数入口开始计时，超过 n ms 后停止并返回空
+///
+/// `chrome_treewalker_fallback`: 当 Fast 模式 (ControlView) 的 descendant 步骤
+/// 返回 0 结果时，是否自动回退到 Full 模式 (RawView) 重新搜索。
+/// 适用于 Chrome/WebView 场景，ControlView 树可能不完整。
 pub(super) fn execute_xpath_steps_filtered(
     auto: &UIAutomation,
     window: &UIElement,
     xpath: &str,
     filter: &FindAllFilter,
     timeout_ms: Option<u64>,
+    chrome_treewalker_fallback: bool,
 ) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
     use std::time::Instant;
     let start = Instant::now();
@@ -159,7 +164,14 @@ pub(super) fn execute_xpath_steps_filtered(
             StepExecutionStrategy::Descendant => {
                 // `//A` — search all descendants
                 if is_fast_mode {
-                    execute_descendant_fast(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
+                    let fast_results = execute_descendant_fast(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?;
+                    if !fast_results.is_empty() || !chrome_treewalker_fallback {
+                        fast_results
+                    } else {
+                        // Chrome TreeWalker fallback: ControlView found nothing, try RawView
+                        log::info!("[ExecuteXPath] Chrome TreeWalker fallback: ControlView descendant step '{}' found 0, retrying with RawView", step_str);
+                        execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
+                    }
                 } else {
                     execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
                 }
@@ -1020,6 +1032,7 @@ pub fn find_all_elements_detailed(
     search_context: Option<&crate::core::model::SearchContext>,
     timeout_ms: Option<u64>,
     filter: Option<&FindAllFilter>,
+    chrome_treewalker_fallback: bool,
 ) -> Vec<crate::core::model::ElementData> {
     let filter = filter.cloned().unwrap_or_default();
     let auto = match get_automation() {
@@ -1145,7 +1158,7 @@ pub fn find_all_elements_detailed(
                     Err(_) => continue,
                 };
                 let child_xpath = element_xpath;
-                let (elements, _) = match execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &filter, timeout_ms) {
+                let (elements, _) = match execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &filter, timeout_ms, chrome_treewalker_fallback) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -1196,7 +1209,7 @@ pub fn find_all_elements_detailed(
             }
         });
 
-        let (elements, _) = match execute_xpath_steps_filtered(&auto, window, element_xpath_no_suffix, &filter, timeout_ms) {
+        let (elements, _) = match execute_xpath_steps_filtered(&auto, window, element_xpath_no_suffix, &filter, timeout_ms, chrome_treewalker_fallback) {
             Ok(result) => result,
             Err(_) => continue,
         };

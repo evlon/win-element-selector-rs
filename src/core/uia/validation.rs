@@ -6,6 +6,7 @@ pub fn validate_selector_and_xpath_detailed(
     hierarchy: &[HierarchyNode],
     search_context: Option<&SearchContext>,
     timeout_ms: Option<u64>,
+    chrome_treewalker_fallback: bool,
 ) -> DetailedValidationResult {
     use std::time::Instant;
     let total_start = Instant::now();
@@ -180,7 +181,7 @@ pub fn validate_selector_and_xpath_detailed(
                 let child_xpath = element_xpath;
                 
                 let t_find = Instant::now();
-                match execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &FindAllFilter::default(), Some(effective_timeout)) {
+                match execute_xpath_steps_filtered(&auto, &child_elem, &child_xpath, &FindAllFilter::default(), Some(effective_timeout), chrome_treewalker_fallback) {
                     Ok((results, segments)) => {
                         log::info!("[PERF][CHILD] HWND[{}] execute_xpath_steps: {}ms, {} results", 
                             hwnd_idx, t_find.elapsed().as_millis(), results.len());
@@ -316,7 +317,7 @@ pub fn validate_selector_and_xpath_detailed(
             }
         }
 
-        match execute_xpath_steps_filtered(&auto, search_root, element_xpath, &FindAllFilter::default(), Some(effective_timeout)) {
+        match execute_xpath_steps_filtered(&auto, search_root, element_xpath, &FindAllFilter::default(), Some(effective_timeout), chrome_treewalker_fallback) {
             Ok((results, segments)) => {
                 let window_duration = stage2_window_start.elapsed().as_millis();
                 if !results.is_empty() {

@@ -442,7 +442,7 @@ impl XPathOptimizer {
                     &window_sel,
                     &full_test_xpath,
                     &hierarchy_clone,
-                    None, None,
+                    None, None, true,
                 );
                 // 【关键修复】极简优化要求 XPath 必须找到**恰好1个**元素
                 let is_unique = matches!(validation_result.overall, ValidationResult::Found { count: 1, .. });

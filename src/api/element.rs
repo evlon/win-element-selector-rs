@@ -140,10 +140,11 @@ pub async fn get_element(
         let search_context = element_query.search_context.clone();
         let timeout_ms = element_query.timeout_ms;
         let find_all_filter = element_query.find_all_filter.clone();
+        let chrome_treewalker_fallback = element_query.chrome_treewalker_fallback;
 
         // Direct call to core::uia layer
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref())
+            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
         })
         .await;
 
@@ -317,10 +318,11 @@ pub async fn get_all_elements(
         let search_context = element_query.search_context.clone();
         let timeout_ms = element_query.timeout_ms;
         let find_all_filter = element_query.find_all_filter.clone();
+        let chrome_treewalker_fallback = element_query.chrome_treewalker_fallback;
 
         // Direct call to core::uia layer
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref())
+            crate::core::uia::find_all_elements_detailed(&window, &element, random_range, search_context.as_ref(), timeout_ms, find_all_filter.as_ref(), chrome_treewalker_fallback)
         })
         .await;
 
@@ -602,7 +604,7 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
 
         // 查找元素获取其矩形区域
         let result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::find_all_elements_detailed(&window, &element, 5.0, None, None, None)
+            crate::core::uia::find_all_elements_detailed(&window, &element, 5.0, None, None, None, true)
         })
         .await;
 

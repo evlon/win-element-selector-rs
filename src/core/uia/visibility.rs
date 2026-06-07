@@ -113,7 +113,7 @@ pub fn get_element_visibility(
     use crate::core::model::ValidationResult;
 
     let detailed = super::validate_selector_and_xpath_detailed(
-        window_selector, element_xpath, &[], None, None,
+        window_selector, element_xpath, &[], None, None, true,
     );
 
     let (element_rect, is_offscreen) = match &detailed.overall {
@@ -141,7 +141,7 @@ pub fn get_element_visibility(
     let vp_api_rect = Rect { x: viewport_rect.x, y: viewport_rect.y, width: viewport_rect.width, height: viewport_rect.height };
 
     let container_api_rect = if let Some(cxpath) = container_xpath {
-        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None);
+        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None, true);
         match &container_detailed.overall {
             ValidationResult::Found { first_rect: Some(cr), .. } => {
                 Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })
@@ -192,7 +192,7 @@ pub fn get_element_visibility_by_elem(
 
     let container_api_rect = if let Some(cxpath) = container_xpath {
         use crate::core::model::ValidationResult;
-        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None);
+        let container_detailed = super::validate_selector_and_xpath_detailed(window_selector, cxpath, &[], None, None, true);
         match &container_detailed.overall {
             ValidationResult::Found { first_rect: Some(cr), .. } => {
                 Some(Rect { x: cr.x, y: cr.y, width: cr.width, height: cr.height })

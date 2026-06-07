@@ -19,7 +19,7 @@ pub fn navigate_from_element(
         let wr = window.get_bounding_rectangle().ok().map(|r| {
             crate::core::model::Rect { x: r.get_left(), y: r.get_top(), width: r.get_right() - r.get_left(), height: r.get_bottom() - r.get_top() }
         });
-        if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, window, base_xpath, &FindAllFilter::default(), Some(5000)) {
+        if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, window, base_xpath, &FindAllFilter::default(), Some(5000), true) {
             if let Some(elem) = elements.into_iter().next() {
                 base_elem = Some(elem);
                 window_rect = wr;
@@ -200,7 +200,7 @@ pub fn find_visible_elements(
 
     let mut container_elem: Option<UIElement> = None;
     for win in &windows {
-        if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, win, container_xpath, &FindAllFilter::default(), Some(5000)) {
+        if let Ok((elements, _)) = execute_xpath_steps_filtered(&auto, win, container_xpath, &FindAllFilter::default(), Some(5000), true) {
             if let Some(first) = elements.first() {
                 container_elem = Some(first.clone());
                 break;

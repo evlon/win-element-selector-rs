@@ -133,10 +133,21 @@ pub struct ElementQuery {
     /// 控制是否排除 offscreen / 零尺寸 / 越界元素
     #[serde(default, rename = "findAllFilter")]
     pub find_all_filter: Option<crate::core::model::FindAllFilter>,
+    /// Chrome TreeWalker 回退开关（默认 true）
+    /// 当 Fast 模式 (ControlView) 的 descendant 步骤返回 0 结果时，
+    /// 自动回退到 Full 模式 (RawView) 重新搜索。
+    /// 适用于 Chrome/WebView 的 UIA Provider 无法被 FindAll(Subtree) 穿透的场景。
+    /// 设为 false 可禁用此回退行为。
+    #[serde(default = "default_chrome_treewalker_fallback", rename = "chromeTreewalkerFallback")]
+    pub chrome_treewalker_fallback: bool,
 }
 
 fn default_random_range() -> f32 {
     0.55
+}
+
+fn default_chrome_treewalker_fallback() -> bool {
+    true
 }
 
 /// 元素信息（API 响应）
