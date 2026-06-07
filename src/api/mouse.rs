@@ -164,7 +164,7 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
 /// POST /api/mouse/click
 /// 拟人化点击元素。支持三种点击模式（通过 options.clickMode 控制）：
 ///
-/// - `coordinate` (默认): 传统坐标点击，移动鼠标到元素位置通过 SendInput 点击
+/// - `mouse` (默认): 模拟鼠标点击，移动鼠标到元素位置通过 SendInput 点击
 /// - `invoke`: 使用 UIA InvokePattern.Invoke() 触发点击，不受覆盖层影响
 /// - `setFocus`: 通过 UIA SetFocus() 聚焦元素（适用于输入框等）
 /// - `auto`: 自动选择最优策略，优先级: Invoke → SetFocus → 坐标点击
@@ -351,8 +351,8 @@ async fn execute_click_by_mode(
         ClickMode::SetFocus => {
             click_via_set_focus(window_selector, element_xpath, element_name, options, runtime_id).await
         }
-        ClickMode::Coordinate => {
-            click_via_coordinate(window_selector, rect, element_name, options).await
+        ClickMode::Mouse => {
+            click_via_mouse(window_selector, rect, element_name, options).await
         }
         ClickMode::Auto => {
             // 自动策略：Invoke → SetFocus → 坐标点击
@@ -394,10 +394,10 @@ async fn execute_click_by_mode(
                     error: None,
                 });
             }
-            info!("Auto mode: SetFocus failed, falling back to coordinate click");
+            info!("Auto mode: SetFocus failed, falling back to mouse click");
 
             // 回退到坐标点击
-            click_via_coordinate(window_selector, rect, element_name, options).await
+            click_via_mouse(window_selector, rect, element_name, options).await
         }
     }
 }
@@ -581,7 +581,7 @@ async fn click_via_set_focus(
 
 /// 传统坐标点击，移动鼠标到元素位置通过 SendInput 点击。
 /// 如果启用了 occlusionCheck，点击前会检查目标位置是否被遮挡。
-async fn click_via_coordinate(
+async fn click_via_mouse(
     window_selector: &str,
     rect: &super::types::Rect,
     element_name: &str,
@@ -625,7 +625,7 @@ async fn click_via_coordinate(
                 success: false,
                 click_point: Point::new(0, 0),
                 element: None,
-                click_method: Some("coordinate".to_string()),
+                click_method: Some("mouse".to_string()),
                 occlusion_detected: None,
                 occlusion_info: None,
                 error: Some(format!("计算点击坐标失败: {}", e)),
@@ -652,9 +652,9 @@ async fn click_via_coordinate(
                     success: false,
                     click_point: cp,
                     element: None,
-                    click_method: Some("coordinate".to_string()),
+                    click_method: Some("mouse".to_string()),
                     occlusion_detected: Some(true),
-                    occlusion_info: Some("目标元素被其他层遮挡，无法通过坐标点击。建议使用 clickMode='invoke' 或 'setFocus' 或 'auto'".to_string()),
+                    occlusion_info: Some("目标元素被其他层遮挡，无法通过鼠标点击。建议使用 clickMode='invoke' 或 'setFocus' 或 'auto'".to_string()),
                     error: Some("遮挡检测失败: 目标位置被覆盖层遮挡".to_string()),
                 });
             }
@@ -698,7 +698,7 @@ async fn click_via_coordinate(
                 success: false,
                 click_point: click_point_copy,
                 element: None,
-                click_method: Some("coordinate".to_string()),
+                click_method: Some("mouse".to_string()),
                 occlusion_detected: None,
                 occlusion_info: None,
                 error: Some(format!("移动失败: {}", e)),
@@ -734,7 +734,7 @@ async fn click_via_coordinate(
                         control_type: "Element".to_string(),
                         name,
                     }),
-                    click_method: Some("coordinate".to_string()),
+                    click_method: Some("mouse".to_string()),
                     occlusion_detected: None,
                     occlusion_info: None,
                     error: None,
@@ -746,7 +746,7 @@ async fn click_via_coordinate(
                     success: false,
                     click_point: click_point_copy,
                     element: None,
-                    click_method: Some("coordinate".to_string()),
+                    click_method: Some("mouse".to_string()),
                     occlusion_detected: None,
                     occlusion_info: None,
                     error: Some(format!("点击失败: {}", e)),

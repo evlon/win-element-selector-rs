@@ -317,16 +317,16 @@ pub struct MouseMoveResponse {
 
 /// 点击模式：控制如何对目标元素执行点击操作
 ///
-/// - `coordinate` (默认): 传统的坐标点击，移动鼠标到元素位置通过 SendInput 点击
+/// - `mouse` (默认): 模拟鼠标点击，移动到元素位置通过 SendInput 点击
 /// - `invoke`: 优先使用 UIA InvokePattern.Invoke() 触发点击（不受覆盖层影响）
 /// - `setFocus`: 通过 UIA SetFocus() 聚焦元素（适用于输入框等）
-/// - `auto`: 自动选择最优策略：先尝试 Invoke，失败则尝试 SetFocus，最后回退到坐标点击
+/// - `auto`: 自动选择最优策略：先尝试 Invoke，失败则尝试 SetFocus，最后回退到鼠标点击
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum ClickMode {
-    /// 坐标点击（默认）
-    #[serde(alias = "mouse")]
-    Coordinate,
+    /// 鼠标点击（默认）
+    #[serde(alias = "coordinate")]
+    Mouse,
     /// UIA InvokePattern
     Invoke,
     /// UIA SetFocus
@@ -337,7 +337,7 @@ pub enum ClickMode {
 
 impl Default for ClickMode {
     fn default() -> Self {
-        ClickMode::Coordinate
+        ClickMode::Mouse
     }
 }
 
@@ -371,7 +371,7 @@ pub struct MouseClickOptions {
     /// 留痕超时时间（毫秒），默认 3000
     #[serde(rename = "dotDuration", default = "default_dot_duration")]
     pub dot_duration: u64,
-    /// 点击模式（默认 coordinate 保持向后兼容）
+    /// 点击模式（默认 mouse，兼容旧值 coordinate）
     #[serde(rename = "clickMode", default)]
     pub click_mode: ClickMode,
     /// 是否启用遮挡检测（仅坐标点击时生效），默认 false 保持向后兼容
@@ -392,7 +392,7 @@ impl Default for MouseClickOptions {
             offset: None,
             show_dot: false,
             dot_duration: default_dot_duration(),
-            click_mode: ClickMode::Coordinate,
+            click_mode: ClickMode::Mouse,
             check_blocked: false,
         }
     }
@@ -588,7 +588,7 @@ pub struct MouseClickResponse {
     #[serde(rename = "clickPoint")]
     pub click_point: Point,
     pub element: Option<ClickedElement>,
-    /// 实际使用的点击方式: "invoke" | "setFocus" | "coordinate" | "auto->invoke" 等
+    /// 实际使用的点击方式: "invoke" | "setFocus" | "mouse" | "auto->invoke" 等
     #[serde(rename = "clickMethod", skip_serializing_if = "Option::is_none")]
     pub click_method: Option<String>,
     /// 遮挡检测结果（仅 occlusionCheck=true 时有值）
