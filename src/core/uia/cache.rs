@@ -1,8 +1,5 @@
 use super::*;
 
-#[allow(dead_code)]
-pub(super) const XPATH_FALLBACK_BUDGET_MS: u128 = 3000;
-
 /// The strategy that successfully resolved an XPath against a window.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

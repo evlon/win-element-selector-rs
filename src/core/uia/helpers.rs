@@ -2,7 +2,6 @@ use super::*;
 use crate::core::model::{CaptureMode, CaptureResult, ElementRect, HierarchyNode, WalkerHint, WindowInfo};
 use uiauto_xpath::control_type_id_to_name;
 use uiautomation::types::Point as UiaPoint;
-use uiautomation::types::ControlType;
 
 pub(super) const WEBVIEW_CLASS_PREFIXES: &[&str] = &[
     "WRY_WEBVIEW",           // Tauri/WRY apps
@@ -769,12 +768,6 @@ pub(super) fn count_siblings(
 
 pub(super) fn control_type_name(id: i32) -> String {
     control_type_id_to_name(id).to_string()
-}
-
-/// Convert a uiautomation-rs ControlType to its string name
-#[allow(dead_code)]
-pub(super) fn control_type_name_from_enum(ct: &ControlType) -> String {
-    control_type_id_to_name(*ct as i32).to_string()
 }
 
 pub fn enumerate_windows() -> Vec<WindowInfo> {

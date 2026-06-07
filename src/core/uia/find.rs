@@ -38,14 +38,7 @@ use crate::core::model::SearchStrategy;
 /// | `/A` (Child) | uiauto-xpath | `find_by_xpath_detailed` |
 /// | `//A` (Descendant) | RawView FindAll | `find_by_xpath_raw_descendants` |
 /// | `/*n/A` (DepthLimited) | BFS depth-limited | `find_with_depth_limit` |
-#[allow(dead_code)]
-pub(super) fn execute_xpath_steps(
-    auto: &UIAutomation,
-    window: &UIElement,
-    xpath: &str,
-) -> anyhow::Result<(Vec<UIElement>, Vec<SegmentValidationResult>)> {
-    execute_xpath_steps_filtered(auto, window, xpath, &FindAllFilter::default(), None, true)
-}
+
 
 /// New: Execute XPath steps with filter support. See `execute_xpath_steps` for strategy docs.
 ///
@@ -735,86 +728,6 @@ pub(super) fn find_with_depth_limit(
     results
 }
 
-/// 超时保护的深度限制 BFS。
-/// 当 `max_depth > 5` 或搜索时间超过 `timeout_ms` 时提前返回。
-#[allow(dead_code)]
-pub(super) fn find_with_depth_limit_timeout(
-    auto: &UIAutomation,
-    root: &UIElement,
-    target_step: &ParsedXPathStep,
-    max_depth: u32,
-    walker_hint: WalkerHint,
-    timeout_ms: u64,
-) -> Vec<UIElement> {
-    use std::collections::VecDeque;
-    use std::time::Instant;
-
-    let start = Instant::now();
-    let mut results = vec![];
-    let mut queue: VecDeque<(UIElement, u32)> = VecDeque::new();
-    let timeout = std::time::Duration::from_millis(timeout_ms);
-
-    let get_children = |elem: &UIElement| -> Vec<UIElement> {
-        match walker_hint {
-            WalkerHint::ControlView => {
-                if let Ok(walker) = auto.get_control_view_walker() {
-                    walker.get_children(elem).unwrap_or_default()
-                } else {
-                    vec![]
-                }
-            }
-            _ => {
-                if let Ok(walker) = auto.get_raw_view_walker() {
-                    walker.get_children(elem).unwrap_or_default()
-                } else {
-                    vec![]
-                }
-            }
-        }
-    };
-
-    for child in get_children(root) {
-        queue.push_back((child, 1));
-    }
-
-    while let Some((node, depth)) = queue.pop_front() {
-        // 超时检查
-        if start.elapsed() > timeout {
-            log::warn!(
-                "[DepthLimitedBFS] Timeout after {}ms, max_depth={} found_so_far={}",
-                start.elapsed().as_millis(), max_depth, results.len()
-            );
-            break;
-        }
-
-        if depth >= max_depth {
-            continue;
-        }
-
-        let children = get_children(&node);
-        for child in &children {
-            if depth + 1 == max_depth {
-                if element_matches_parsed_step(child, target_step) {
-                    results.push(child.clone());
-                }
-            } else {
-                queue.push_back((child.clone(), depth + 1));
-            }
-        }
-
-        if depth == max_depth {
-            if element_matches_parsed_step(&node, target_step) {
-                results.push(node.clone());
-            }
-        }
-    }
-
-    log::info!(
-        "[DepthLimitedBFS] max_depth={} walker={:?} found={} elapsed={}ms",
-        max_depth, walker_hint, results.len(), start.elapsed().as_millis()
-    );
-    results
-}
 
 pub(super) fn step_has_complex_predicates(step: &ParsedXPathStep) -> bool {
     step.is_complex
