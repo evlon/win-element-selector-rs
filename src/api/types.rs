@@ -270,6 +270,9 @@ pub struct FindFromElementResponse {
     pub elements: Vec<ElementInfo>,
     pub total: usize,
     pub error: Option<String>,
+    /// 未找到原因（如 InvalidParent / LeafNotUnique / StepNotFound 等）
+    #[serde(rename = "notFoundReason", skip_serializing_if = "Option::is_none")]
+    pub not_found_reason: Option<crate::core::model::NotFoundReason>,
 }
 
 /// 元素查找响应

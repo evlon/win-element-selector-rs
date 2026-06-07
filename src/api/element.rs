@@ -1026,35 +1026,42 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
     let request_start = Instant::now();
 
     info!(
-        "[PERF][HTTP][{}] /api/element/find-from runtime_id={} xpath_len={} random_range={}",
+        "[PERF][HTTP][{}] /api/element/find-from runtime_id={} xpath_len={}",
         request_id,
         body.runtime_id.len().min(32),  // Don't log full runtime_id (may be long)
         body.xpath.len(),
-        body.random_range
     );
 
     let runtime_id = body.runtime_id.clone();
-    let mut xpath = body.xpath.clone();
-    // If search_mode is explicitly set, append suffix (overrides any existing suffix)
-    if let Some(ref mode) = body.search_mode {
-        let (_, stripped) = crate::core::model::SearchMode::strip_suffix(&xpath);
-        let suffix = match mode {
-            crate::core::model::SearchMode::All => "",
-            crate::core::model::SearchMode::First => ":first",
-            crate::core::model::SearchMode::OnlyOne => ":onlyone",
-        };
-        xpath = format!("{}{}", stripped, suffix);
-    }
-    let random_range = body.random_range;
-    let search_strategy = body.search_strategy.clone();
+    let xpath = body.xpath.clone();
+    let search_strategy = body.search_strategy.clone().unwrap_or(crate::core::model::SearchStrategy::Adaptive);
+
+    // 确定搜索模式：显式 search_mode > XPath 后缀 > 默认 First
+    let effective_mode = body.search_mode.unwrap_or_else(|| {
+        let (mode, _) = crate::core::model::SearchMode::strip_suffix(&xpath);
+        mode
+    });
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::uia::find_from_element_cached(&runtime_id, &xpath, random_range, search_strategy)
+        match effective_mode {
+            crate::core::model::SearchMode::First => {
+                let (elem, reason) = crate::core::uia::locate_first_from(&runtime_id, &xpath, search_strategy);
+                (elem.into_iter().collect::<Vec<_>>(), reason)
+            }
+            crate::core::model::SearchMode::OnlyOne => {
+                let (elem, reason) = crate::core::uia::locate_one_from(&runtime_id, &xpath, search_strategy);
+                (elem.into_iter().collect::<Vec<_>>(), reason)
+            }
+            crate::core::model::SearchMode::All => {
+                let elems = crate::core::uia::locate_all_from(&runtime_id, &xpath, search_strategy, None);
+                (elems, None)
+            }
+        }
     })
     .await;
 
     match result {
-        Ok(element_data_list) => {
+        Ok((element_data_list, not_found_reason)) => {
             let total = element_data_list.len();
             info!(
                 "[PERF][HTTP][{}] /api/element/find-from done found={} total={} duration_ms={}",
@@ -1069,6 +1076,7 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
                 elements,
                 total,
                 error: None,
+                not_found_reason,
             })
         }
         Err(e) => {
@@ -1078,6 +1086,7 @@ pub async fn find_from_element(body: web::Json<FindFromElementRequest>) -> impl 
                 elements: vec![],
                 total: 0,
                 error: Some(format!("Internal error: {}", e)),
+                not_found_reason: None,
             })
         }
     }
