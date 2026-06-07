@@ -80,8 +80,8 @@ pub fn humanized_move(
     }
     
     match trajectory_type {
-        "bezier" => bezier_move(start, end, duration_ms),
-        "linear" => linear_move_with_easing(start, end, duration_ms),
+        "bezier" | "curve" => bezier_move(start, end, duration_ms),
+        "linear" | "line" => linear_move_with_easing(start, end, duration_ms),
         _ => bezier_move(start, end, duration_ms), // 默认贝塞尔
     }
 }

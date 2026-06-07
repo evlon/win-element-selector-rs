@@ -114,7 +114,7 @@ pub async fn move_mouse(body: web::Json<MouseMoveRequest>) -> impl Responder {
     let options = request.options.unwrap_or(MouseMoveOptions::default());
 
     info!(
-        "API: /api/mouse/move target=({}, {}) humanize={} trajectory={} duration={}ms",
+        "API: /api/mouse/move target=({}, {}) humanize={} movePath={} duration={}ms",
         request.target.x, request.target.y,
         options.humanize, options.trajectory, options.duration
     );
@@ -181,8 +181,8 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
     };
 
     info!(
-        "API: /api/mouse/click window='{}' element='{}' mode={:?} humanize={} occlusion_check={} runtime_id={:?}",
-        window_display, request.element, options.click_mode, options.humanize, options.occlusion_check, request.runtime_id
+        "API: /api/mouse/click window='{}' element='{}' mode={:?} humanize={} checkBlocked={} runtime_id={:?}",
+        window_display, request.element, options.click_mode, options.humanize, options.check_blocked, request.runtime_id
     );
 
     // Step 1: 构建窗口选择器
@@ -191,140 +191,144 @@ pub async fn click_mouse(body: web::Json<MouseClickRequest>) -> impl Responder {
 
     let runtime_id = request.runtime_id.clone();
 
-    // Step 2: 获取元素坐标（runtimeId 优先）
+    // Step 2: 获取元素坐标
+    // 有 runtimeId → 走缓存（未命中直接报错）
+    // 无 runtimeId → 直接走 XPath 搜索
     if let Some(ref rid) = runtime_id {
-        // Path A: runtimeId 缓存 → 获取 rect 用于坐标点击模式
-        let rid_c = rid.clone();
-        let rect_result = tokio::task::spawn_blocking(move || {
-            match crate::core::element_cache::get_cached_element(&rid_c) {
-                Some(elem) => {
-                    let rect = elem.get_bounding_rectangle().ok();
-                    rect.map(|r| super::types::Rect {
-                        x: r.get_left(),
-                        y: r.get_top(),
-                        width: r.get_width(),
-                        height: r.get_height(),
-                    })
+            // Path A: runtimeId 缓存 → 获取 rect 用于坐标点击模式
+            let rid_c = rid.clone();
+            let rect_result = tokio::task::spawn_blocking(move || {
+                match crate::core::element_cache::get_cached_element(&rid_c) {
+                    Some(elem) => {
+                        let rect = elem.get_bounding_rectangle().ok();
+                        rect.map(|r| super::types::Rect {
+                            x: r.get_left(),
+                            y: r.get_top(),
+                            width: r.get_width(),
+                            height: r.get_height(),
+                        })
+                    }
+                    None => None,
                 }
-                None => None,
-            }
-        }).await;
+            }).await;
 
-        match rect_result {
-            Ok(Some(rect_api)) => {
-                let element_name = request.element.clone();
-                execute_click_by_mode(
-                    &window_selector_for_click,
-                    &request.element,
-                    &rect_api,
-                    &element_name,
-                    &options,
-                    Some(rid),
-                ).await
-            }
-            _ => {
-                HttpResponse::Ok().json(MouseClickResponse {
-                    success: false,
-                    click_point: Point::new(0, 0),
-                    element: None,
-                    click_method: None,
-                    occlusion_detected: None,
-                    occlusion_info: None,
-                    error: Some(format!("元素不在缓存中: runtimeId={}", rid)),
-                })
+            match rect_result {
+                Ok(Some(rect_api)) => {
+                    let element_name = request.element.clone();
+                    return execute_click_by_mode(
+                        &window_selector_for_click,
+                        &request.element,
+                        &rect_api,
+                        &element_name,
+                        &options,
+                        Some(rid),
+                    ).await;
+                }
+                _ => {
+                    // 缓存未命中 → 直接报错，不 fallback
+                    warn!("Cache miss for runtimeId={}, no fallback to XPath", rid);
+                    return HttpResponse::Ok().json(MouseClickResponse {
+                        success: false,
+                        click_point: Point::new(0, 0),
+                        element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
+                        error: Some(format!("元素不在缓存中: runtimeId={}", rid)),
+                    });
+                }
             }
         }
-    } else {
-        // Path B: XPath 搜索（原有逻辑）
-        let element = request.element.clone();
-        let element_result = tokio::task::spawn_blocking(move || {
-            crate::core::uia::validate_selector_and_xpath_detailed(
-                &window_selector,
-                &element,
-                &[], None, None,
-            )
-        })
-        .await;
+    // 无 runtimeId → 走 XPath 搜索
+    // Path B: XPath 搜索
+    let element = request.element.clone();
+    let element_result = tokio::task::spawn_blocking(move || {
+        crate::core::uia::validate_selector_and_xpath_detailed(
+            &window_selector,
+            &element,
+            &[], None, None,
+        )
+    })
+    .await;
 
-        match element_result {
-            Ok(detailed_result) => {
-                use super::super::model::ValidationResult;
+    match element_result {
+        Ok(detailed_result) => {
+            use super::super::model::ValidationResult;
 
-                match &detailed_result.overall {
-                    ValidationResult::Found { first_rect, .. } => {
-                        if let Some(rect) = first_rect {
-                            let rect_api: super::types::Rect = rect.clone().into();
-                            let element_name = request.element.clone();
+            match &detailed_result.overall {
+                ValidationResult::Found { first_rect, .. } => {
+                    if let Some(rect) = first_rect {
+                        let rect_api: super::types::Rect = rect.clone().into();
+                        let element_name = request.element.clone();
 
-                            execute_click_by_mode(
-                                &window_selector_for_click,
-                                &request.element,
-                                &rect_api,
-                                &element_name,
-                                &options,
-                                None,
-                            ).await
-                        } else {
-                            HttpResponse::Ok().json(MouseClickResponse {
-                                success: false,
-                                click_point: Point::new(0, 0),
-                                element: None,
-                                click_method: None,
-                                occlusion_detected: None,
-                                occlusion_info: None,
-                                error: Some("元素坐标获取失败".to_string()),
-                            })
-                        }
-                    }
-                    ValidationResult::NotFound { .. } => {
-                        HttpResponse::Ok().json(MouseClickResponse {
+                        return execute_click_by_mode(
+                            &window_selector_for_click,
+                            &request.element,
+                            &rect_api,
+                            &element_name,
+                            &options,
+                            None,
+                        ).await;
+                    } else {
+                        return HttpResponse::Ok().json(MouseClickResponse {
                             success: false,
                             click_point: Point::new(0, 0),
                             element: None,
                             click_method: None,
                             occlusion_detected: None,
                             occlusion_info: None,
-                            error: Some(format!(
-                                "未找到匹配元素 (耗时 {}ms)",
-                                detailed_result.total_duration_ms
-                            )),
-                        })
-                    }
-                    ValidationResult::Error(e) => {
-                        HttpResponse::Ok().json(MouseClickResponse {
-                            success: false,
-                            click_point: Point::new(0, 0),
-                            element: None,
-                            click_method: None,
-                            occlusion_detected: None,
-                            occlusion_info: None,
-                            error: Some(e.clone()),
-                        })
-                    }
-                    _ => {
-                        HttpResponse::Ok().json(MouseClickResponse {
-                            success: false,
-                            click_point: Point::new(0, 0),
-                            element: None,
-                            click_method: None,
-                            occlusion_detected: None,
-                            occlusion_info: None,
-                            error: Some("校验状态未知".to_string()),
-                        })
+                            error: Some("元素坐标获取失败".to_string()),
+                        });
                     }
                 }
+                ValidationResult::NotFound { .. } => {
+                    return HttpResponse::Ok().json(MouseClickResponse {
+                        success: false,
+                        click_point: Point::new(0, 0),
+                        element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
+                        error: Some(format!(
+                            "未找到匹配元素 (耗时 {}ms)",
+                            detailed_result.total_duration_ms
+                        )),
+                    });
+                }
+                ValidationResult::Error(e) => {
+                    return HttpResponse::Ok().json(MouseClickResponse {
+                        success: false,
+                        click_point: Point::new(0, 0),
+                        element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
+                        error: Some(e.clone()),
+                    });
+                }
+                _ => {
+                    return HttpResponse::Ok().json(MouseClickResponse {
+                        success: false,
+                        click_point: Point::new(0, 0),
+                        element: None,
+                        click_method: None,
+                        occlusion_detected: None,
+                        occlusion_info: None,
+                        error: Some("校验状态未知".to_string()),
+                    });
+                }
             }
-            Err(e) => {
-                HttpResponse::InternalServerError().json(MouseClickResponse {
-                    success: false,
-                    click_point: Point::new(0, 0),
-                    element: None,
-                    click_method: None,
-                    occlusion_detected: None,
-                    occlusion_info: None,
-                    error: Some(format!("内部错误: {}", e)),
-                })
-            }
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(MouseClickResponse {
+                success: false,
+                click_point: Point::new(0, 0),
+                element: None,
+                click_method: None,
+                occlusion_detected: None,
+                occlusion_info: None,
+                error: Some(format!("内部错误: {}", e)),
+            })
         }
     }
 }
@@ -338,6 +342,8 @@ async fn execute_click_by_mode(
     options: &MouseClickOptions,
     runtime_id: Option<&str>,
 ) -> HttpResponse {
+    info!("execute_click_by_mode: click_mode={:?}, rect=({},{},{}x{}), runtime_id={:?}",
+        options.click_mode, rect.x, rect.y, rect.width, rect.height, runtime_id);
     match options.click_mode {
         ClickMode::Invoke => {
             click_via_invoke(window_selector, element_xpath, element_name, options, runtime_id).await
@@ -628,7 +634,7 @@ async fn click_via_coordinate(
     };
 
     // 遮挡检测（仅坐标点击模式下启用）
-    if options_copy.occlusion_check {
+    if options_copy.check_blocked {
         let cp = click_point;
         let ws_check = window_selector.to_string();
         let occlusion_result = tokio::task::spawn_blocking(move || {
@@ -717,8 +723,8 @@ async fn click_via_coordinate(
             Ok(_) => {
                 info!("Click executed successfully at ({}, {})", click_point_copy.x, click_point_copy.y);
 
-                if options_copy2.mark_click {
-                    crate::highlight::flash_point(click_point_copy.x, click_point_copy.y, options_copy2.mark_timeout);
+                if options_copy2.show_dot {
+                    crate::highlight::flash_point(click_point_copy.x, click_point_copy.y, options_copy2.dot_duration);
                 }
 
                 HttpResponse::Ok().json(MouseClickResponse {

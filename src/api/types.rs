@@ -283,8 +283,8 @@ pub struct MouseMoveOptions {
     /// 是否启用拟人化移动
     #[serde(default = "default_humanize")]
     pub humanize: bool,
-    /// 轨迹类型: "linear" | "bezier"
-    #[serde(default = "default_trajectory")]
+    /// 轨迹类型: "line" | "curve"
+    #[serde(rename = "movePath", default = "default_trajectory")]
     pub trajectory: String,
     /// 移动持续时间（毫秒）
     #[serde(default = "default_duration")]
@@ -325,6 +325,7 @@ pub struct MouseMoveResponse {
 #[serde(rename_all = "camelCase")]
 pub enum ClickMode {
     /// 坐标点击（默认）
+    #[serde(alias = "mouse")]
     Coordinate,
     /// UIA InvokePattern
     Invoke,
@@ -365,18 +366,18 @@ pub struct MouseClickOptions {
     #[serde(default)]
     pub offset: Option<ClickOffset>,
     /// 是否在点击位置留痕（红色圆点标记）
-    #[serde(rename = "markClick", default)]
-    pub mark_click: bool,
+    #[serde(rename = "showDot", default)]
+    pub show_dot: bool,
     /// 留痕超时时间（毫秒），默认 3000
-    #[serde(rename = "markTimeout", default = "default_mark_timeout")]
-    pub mark_timeout: u64,
+    #[serde(rename = "dotDuration", default = "default_dot_duration")]
+    pub dot_duration: u64,
     /// 点击模式（默认 coordinate 保持向后兼容）
     #[serde(rename = "clickMode", default)]
     pub click_mode: ClickMode,
     /// 是否启用遮挡检测（仅坐标点击时生效），默认 false 保持向后兼容
     /// 启用后，点击前会通过 ElementFromPoint 检查目标位置是否被其他元素遮挡
-    #[serde(rename = "occlusionCheck", default)]
-    pub occlusion_check: bool,
+    #[serde(rename = "checkBlocked", default)]
+    pub check_blocked: bool,
 }
 
 impl Default for MouseClickOptions {
@@ -389,10 +390,10 @@ impl Default for MouseClickOptions {
             button: default_button(),
             click_area: None,
             offset: None,
-            mark_click: false,
-            mark_timeout: default_mark_timeout(),
+            show_dot: false,
+            dot_duration: default_dot_duration(),
             click_mode: ClickMode::Coordinate,
-            occlusion_check: false,
+            check_blocked: false,
         }
     }
 }
@@ -558,7 +559,7 @@ pub struct ViewportInset {
 }
 
 fn default_button() -> String { "left".to_string() }
-fn default_mark_timeout() -> u64 { 3000 }
+fn default_dot_duration() -> u64 { 3000 }
 
 /// 鼠标点击请求
 #[derive(Debug, Clone, Deserialize)]
