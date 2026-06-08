@@ -147,7 +147,7 @@ fn default_random_range() -> f32 {
 }
 
 fn default_chrome_treewalker_fallback() -> bool {
-    true
+    false
 }
 
 /// 元素信息（API 响应）

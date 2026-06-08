@@ -19,6 +19,18 @@ use super::find::{
     step_has_complex_predicates,
 };
 
+/// Generate a brief element summary for logging: "Type[ClassName='xx', Name='yy']"
+fn elem_summary(elem: &UIElement) -> String {
+    let ct = elem.get_control_type().map(|ct| format!("{:?}", ct)).unwrap_or_else(|_| "?".into());
+    let cn = elem.get_classname().unwrap_or_default();
+    let nm = elem.get_name().unwrap_or_default();
+    if nm.is_empty() {
+        format!("{}[@ClassName='{}']", ct, cn)
+    } else {
+        format!("{}[@ClassName='{}', @Name='{}']", ct, cn, nm)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ControlView Descendant XPath Search
 // ═══════════════════════════════════════════════════════════════════════════
@@ -567,7 +579,7 @@ pub(super) fn search_descendants_chain_find_first(
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found in {}ms", step_idx, ms);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
 
                     // Apply post-filter (offscreen/zero-size/out-of-bounds)
                     let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
@@ -597,7 +609,7 @@ pub(super) fn search_descendants_chain_find_first(
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found in {}ms", step_idx, ms);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
                     current_root = elem;
                 }
                 Err(e) => {
@@ -675,7 +687,7 @@ pub(super) fn search_descendants_chain_find_all(
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindAll] Step {}: FindFirst(Subtree) found in {}ms", step_idx, ms);
+                    log::info!("[Chain FindAll] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
                     current_root = elem;
                 }
                 Err(e) => {

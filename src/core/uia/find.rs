@@ -35,7 +35,7 @@ use crate::core::model::SearchStrategy;
 /// ## Strategy mapping
 /// | Prefix | Strategy | Implementation |
 /// |--------|----------|----------------|
-/// | `/A` (Child) | uiauto-xpath | `search_descendants_via_uiauto_xpath` |
+/// | `/A` (Child) | FindAll(Children) | `execute_direct_child` (fallback: uiauto-xpath) |
 /// | `//A` (Descendant) | RawView FindAll | `search_descendants_via_raw_view` |
 /// | `/*n/A` (DepthLimited) | BFS depth-limited | `find_with_depth_limit` |
 
@@ -138,21 +138,22 @@ pub(super) fn execute_xpath_steps_filtered(
             step_idx + 1, xpath_parts.len(), step_str, parsed.prefix, strategy, is_last, is_fast_mode, is_onlyone
         );
 
-        let next_elements: Vec<UIElement> = match strategy {
+        let (next_elements, all_steps_consumed): (Vec<UIElement>, bool) = match strategy {
             StepExecutionStrategy::DirectChild => {
                 // `/A` — search only in direct children of each current element
-                execute_direct_child(auto, &current_elements, &parsed, is_last, filter)?
+                (execute_direct_child(auto, &current_elements, &parsed, is_last, filter)?, false)
             }
             StepExecutionStrategy::Descendant => {
                 // `//A` — search all descendants
                 if is_fast_mode {
-                    let fast_results = execute_descendant_fast(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?;
+                    let (fast_results, consumed) = execute_descendant_fast(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?;
                     if !fast_results.is_empty() || !chrome_treewalker_fallback {
-                        fast_results
+                        (fast_results, consumed)
                     } else {
                         // Chrome TreeWalker fallback: ControlView found nothing, try RawView
                         log::info!("[ExecuteXPath] Chrome TreeWalker fallback: ControlView descendant step '{}' found 0, retrying with RawView", step_str);
-                        execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
+                        let (full_results, consumed2) = execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?;
+                        (full_results, consumed2)
                     }
                 } else {
                     execute_descendant_full(auto, &current_elements, &xpath_parts, step_idx, is_last, search_mode, filter)?
@@ -166,7 +167,7 @@ pub(super) fn execute_xpath_steps_filtered(
                     let matches = find_with_depth_limit(auto, elem, &parsed, max_depth, walker_hint.clone());
                     results.extend(matches);
                 }
-                results
+                (results, false)
             }
         };
 
@@ -201,6 +202,15 @@ pub(super) fn execute_xpath_steps_filtered(
             break;
         }
 
+        // 当 Descendant 步骤通过 Chain 一次性消费了所有剩余步骤时，
+        // 返回的结果已经是最终叶子节点，后续步骤无需再执行
+        if all_steps_consumed {
+            log::info!("[ExecuteXPath] Step {}: Chain consumed all remaining steps, skipping {} subsequent steps",
+                step_idx + 1, xpath_parts.len() - step_idx - 1);
+            current_elements = next_elements;
+            break;
+        }
+
         current_elements = next_elements;
     }
 
@@ -222,9 +232,9 @@ pub(super) fn execute_xpath_steps_filtered(
 /// 丢失 `/*` 前缀导致 `*9` 被误识别为 Descendant 而不是 DepthLimited。
 ///
 /// 返回的步骤保留完整前缀，例如：
-/// - `//Button/Text` → `["//Button", "Text"]`
-/// - `/*9/Text[@Name='x']` → `["/*9", "Text[@Name='x']"]`
-/// - `/Pane/Button` → `["Pane", "Button"]`（第一个 `/` 表示从根开始，不保留）
+/// - `//Button/Text` → `["//Button", "/Text"]`
+/// - `/*9/Text[@Name='x']` → `["/*9", "/Text[@Name='x']"]`
+/// - `/Pane/Button` → `["Pane", "/Button"]`（第一个 `/` 表示从根开始=Descendant，去掉；后续 `/` 保留=Child）
 fn split_xpath_steps(xpath: &str) -> Vec<&str> {
     use regex::Regex;
     use once_cell::sync::Lazy;
@@ -237,12 +247,16 @@ fn split_xpath_steps(xpath: &str) -> Vec<&str> {
     });
 
     STEP_SPLIT.captures_iter(xpath)
-        .map(|cap| {
+        .enumerate()
+        .map(|(i, cap)| {
             let full = cap.get(0).unwrap().as_str();
-            // 去掉前导的单个 `/`（非 `//` 且非 `/*`）
-            let stripped = if full.starts_with("//") || full.starts_with("/*") {
-                full
-            } else if full.starts_with('/') {
+            // 第一个步骤的单个 `/` 表示"从根开始"，语义上等同于 Descendant，去掉前缀
+            // 后续步骤的 `/` 表示 Child 轴，必须保留前缀让 parse_xpath_step 正确识别
+            let stripped = if i == 0
+                && !full.starts_with("//")
+                && !full.starts_with("/*")
+                && full.starts_with('/')
+            {
                 &full[1..]
             } else {
                 full
@@ -329,6 +343,17 @@ fn execute_cached_strategy(
 }
 
 /// Execute `/A` step: search direct children only.
+///
+/// Uses `FindAll(TreeScope::Children)` instead of uiauto-xpath (TreeWalker).
+/// This is critical for Chrome/WebView scenarios where TreeWalker cannot navigate
+/// into Blink fragment nodes (e.g., Document → Group), but FindAll(Children) works
+/// correctly because it follows the same internal path as FindAll(Subtree).
+///
+/// Strategy:
+/// 1. Build a UIA condition from the parsed step (type + exact-match predicates)
+/// 2. Call `FindAll(TreeScope::Children, condition)` for each current element
+/// 3. If complex predicates exist (starts-with/contains/matches), apply Rust-side filtering
+/// 4. Fallback to uiauto-xpath (TreeWalker) if UIA condition cannot be built
 fn execute_direct_child(
     auto: &UIAutomation,
     current_elements: &[UIElement],
@@ -338,24 +363,60 @@ fn execute_direct_child(
 ) -> anyhow::Result<Vec<UIElement>> {
     use super::find_control::search_descendants_via_uiauto_xpath;
 
-    // For direct child search, build the remaining xpath from current step
-    // and use uiauto-xpath which handles child axis natively
+    let has_complex = step_has_complex_predicates(parsed);
+    let condition = build_uia_condition_from_step(auto, parsed);
+
     let mut results = Vec::new();
+
     for elem in current_elements {
-        // Use uiauto-xpath for child axis search
-        let step_xpath = format!("/{}", step_to_xpath_str(parsed));
-        if let Ok((matches, _)) = search_descendants_via_uiauto_xpath(auto, elem, &step_xpath, None) {
-            if is_last {
-                results.extend(filter_findall_results(elem, matches, "DirectChild", filter));
-            } else {
-                results.extend(matches);
+        let step_matches: Vec<UIElement> = if let Some(ref cond) = condition {
+            // Primary path: FindAll(Children) — works in Chrome/WebView
+            match elem.find_all(TreeScope::Children, cond) {
+                Ok(candidates) => {
+                    if has_complex {
+                        // Secondary Rust-side filter for starts-with/contains/matches
+                        candidates
+                            .into_iter()
+                            .filter(|c| element_matches_parsed_step(c, parsed))
+                            .collect()
+                    } else {
+                        candidates
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[DirectChild] FindAll(Children) failed: {:?}, falling back to uiauto-xpath", e);
+                    // Fallback: uiauto-xpath (TreeWalker)
+                    let step_xpath = format!("/{}", step_to_xpath_str(parsed));
+                    if let Ok((matches, _)) = search_descendants_via_uiauto_xpath(auto, elem, &step_xpath, None) {
+                        matches
+                    } else {
+                        continue;
+                    }
+                }
             }
+        } else {
+            // No UIA condition could be built (e.g., only complex predicates) — fallback to uiauto-xpath
+            log::info!("[DirectChild] No UIA condition built, falling back to uiauto-xpath");
+            let step_xpath = format!("/{}", step_to_xpath_str(parsed));
+            if let Ok((matches, _)) = search_descendants_via_uiauto_xpath(auto, elem, &step_xpath, None) {
+                matches
+            } else {
+                continue;
+            }
+        };
+
+        if is_last {
+            results.extend(filter_findall_results(elem, step_matches, "DirectChild", filter));
+        } else {
+            results.extend(step_matches);
         }
     }
     Ok(results)
 }
 
 /// Execute `//A` step in Fast mode: ControlView FindAll.
+/// Returns `(results, all_steps_consumed)` where `all_steps_consumed` indicates whether
+/// the Chain optimization consumed all remaining steps (so the main loop should break).
 fn execute_descendant_fast(
     auto: &UIAutomation,
     current_elements: &[UIElement],
@@ -364,7 +425,7 @@ fn execute_descendant_fast(
     is_last: bool,
     search_mode: SearchMode,
     filter: &FindAllFilter,
-) -> anyhow::Result<Vec<UIElement>> {
+) -> anyhow::Result<(Vec<UIElement>, bool)> {
     use super::find_control::search_descendants_via_control_view;
 
     let mut results = Vec::new();
@@ -380,10 +441,14 @@ fn execute_descendant_fast(
             break; // Only search from first current element
         }
     }
-    Ok(results)
+    // 当 Chain 成功解析了所有剩余步骤时，返回的结果已经是最终结果
+    // Chain 会在 search_descendants_via_control_view 内部处理多步路径
+    let all_steps_consumed = !is_last && !results.is_empty();
+    Ok((results, all_steps_consumed))
 }
 
 /// Execute `//A` step in Full mode: RawView FindAll.
+/// Returns `(results, all_steps_consumed)` — same as `execute_descendant_fast`.
 fn execute_descendant_full(
     auto: &UIAutomation,
     current_elements: &[UIElement],
@@ -392,7 +457,7 @@ fn execute_descendant_full(
     is_last: bool,
     search_mode: SearchMode,
     filter: &FindAllFilter,
-) -> anyhow::Result<Vec<UIElement>> {
+) -> anyhow::Result<(Vec<UIElement>, bool)> {
     use super::find_raw::search_descendants_via_raw_view;
 
     let mut results = Vec::new();
@@ -407,7 +472,8 @@ fn execute_descendant_full(
             break;
         }
     }
-    Ok(results)
+    let all_steps_consumed = !is_last && !results.is_empty();
+    Ok((results, all_steps_consumed))
 }
 
 /// Reconstruct an XPath step string from parsed step (for uiauto-xpath).
