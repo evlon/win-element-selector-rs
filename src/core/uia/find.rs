@@ -431,7 +431,9 @@ fn execute_descendant_fast(
     let mut results = Vec::new();
     for elem in current_elements {
         let remaining: String = xpath_parts[step_idx..].join("/");
-        let desc_xpath = format!("//{}", remaining);
+        // trim leading slashes: xpath_parts already contains prefixes (// or /),
+        // so we must strip them to avoid ////Group... when prepending //
+        let desc_xpath = format!("//{}", remaining.trim_start_matches('/'));
         if let Ok((matches, _)) = search_descendants_via_control_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {
@@ -463,7 +465,9 @@ fn execute_descendant_full(
     let mut results = Vec::new();
     for elem in current_elements {
         let remaining: String = xpath_parts[step_idx..].join("/");
-        let desc_xpath = format!("//{}", remaining);
+        // trim leading slashes: xpath_parts already contains prefixes (// or /),
+        // so we must strip them to avoid ////Group... when prepending //
+        let desc_xpath = format!("//{}", remaining.trim_start_matches('/'));
         if let Ok((matches, _)) = search_descendants_via_raw_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {

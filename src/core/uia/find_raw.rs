@@ -96,27 +96,48 @@ pub(super) fn search_descendants_depth_limited(
                 }).collect();
                 return Ok((results, segments));
             }
-            // Chain found nothing but was valid
-            if !filter.enable_findall {
-                // Default: skip expensive FindAll, return empty fast
-                log::info!("[Raw Desc] Chain found 0 results, enable_findall=false → skipping FindAll (fast fail)");
-                let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult::not_found(
-                    0, xpath.to_string(), "RawTree", "Chain FindFirst found no matches (FindAll fallback disabled)", duration_ms,
-                )]));
+            // Chain found nothing but was valid — fallback to TreeWalker (uiauto-xpath)
+            // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
+            // deep nodes, but RawViewWalker traversal triggers subtree expansion.
+            // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
+            log::info!("[Raw Desc] Chain found 0 results → falling back to TreeWalker (Chromium virtualization workaround)");
+            let duration_ms = start.elapsed().as_millis() as u64;
+            match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                Ok((matches, segments)) if !matches.is_empty() => {
+                    log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                    return Ok((matches, segments));
+                }
+                Ok((_, segments)) => {
+                    log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                    return Ok((vec![], segments));
+                }
+                Err(e) => {
+                    log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                    return Ok((vec![], vec![SegmentValidationResult::not_found(
+                        0, xpath.to_string(), "RawTree", "Chain found 0 and TreeWalker fallback failed", duration_ms,
+                    )]));
+                }
             }
-            // enable_findall=true: Chain found 0 but was valid, fall through to FindAll
-            log::info!("[Raw Desc] Chain found 0 results, enable_findall=true → trying FindAll fallback");
         } else {
-            // Chain not applicable (complex predicates?)
-            if !filter.enable_findall {
-                log::info!("[Raw Desc] Chain not applicable, enable_findall=false → returning empty (fast fail)");
-                let duration_ms = start.elapsed().as_millis() as u64;
-                return Ok((vec![], vec![SegmentValidationResult::not_found(
-                    0, xpath.to_string(), "RawTree", "Chain not applicable (complex predicates), FindAll fallback disabled", duration_ms,
-                )]));
+            // Chain not applicable (complex predicates?) — fallback to TreeWalker
+            log::info!("[Raw Desc] Chain not applicable → falling back to TreeWalker (Chromium virtualization workaround)");
+            let duration_ms = start.elapsed().as_millis() as u64;
+            match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                Ok((matches, segments)) if !matches.is_empty() => {
+                    log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                    return Ok((matches, segments));
+                }
+                Ok((_, segments)) => {
+                    log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                    return Ok((vec![], segments));
+                }
+                Err(e) => {
+                    log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                    return Ok((vec![], vec![SegmentValidationResult::not_found(
+                        0, xpath.to_string(), "RawTree", "Chain not applicable and TreeWalker fallback failed", duration_ms,
+                    )]));
+                }
             }
-            log::info!("[Raw Desc] Chain not applicable (complex predicates?), enable_findall=true → falling back to FindAll");
         }
     }
 
@@ -171,11 +192,27 @@ pub(super) fn search_descendants_depth_limited(
     };
 
     if first_step_matches.is_empty() {
+        // FindAll/FindFirst returned 0 — fallback to TreeWalker (Chromium virtualization workaround)
+        // Chromium UIA virtualizes deep nodes; FindAll(Subtree) can't see them,
+        // but RawViewWalker traversal triggers subtree expansion.
         let duration_ms = start.elapsed().as_millis() as u64;
-        log::info!("[Raw Desc] FindAll returned 0 ({}ms)", duration_ms);
-        return Ok((vec![], vec![SegmentValidationResult::not_found(
-            0, first_step.to_string(), "RawTree", "No raw tree element matches this step", duration_ms,
-        )]));
+        log::info!("[Raw Desc] FindAll/FindFirst returned 0 for '{}' → falling back to TreeWalker ({}ms)", first_step, duration_ms);
+        match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+            Ok((matches, segments)) if !matches.is_empty() => {
+                log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), start.elapsed().as_millis());
+                return Ok((matches, segments));
+            }
+            Ok((_, segments)) => {
+                log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", start.elapsed().as_millis());
+                return Ok((vec![], segments));
+            }
+            Err(e) => {
+                log::warn!("[Raw Desc] TreeWalker fallback failed: {}", e);
+                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                    0, first_step.to_string(), "RawTree", "FindAll returned 0 and TreeWalker fallback failed", duration_ms,
+                )]));
+            }
+        }
     }
 
     // Build remaining XPath (steps after the first)

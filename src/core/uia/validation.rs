@@ -19,7 +19,7 @@ pub fn validate_xpath(
             _ => 5000,
         }
     });
-    
+    log::info!("\n------------- begin validate_xpath -------------");
     log::info!("[PERF] Starting validation for window_selector='{}' xpath='{}' timeout={}ms", window_selector, element_xpath, effective_timeout);
     
     let auto = match get_automation() {
