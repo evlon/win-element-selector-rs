@@ -22,6 +22,7 @@ use super::find_control::{
     search_descendants_via_uiauto_xpath,
     search_descendants_chain_find_first,
     search_descendants_chain_find_all,
+    try_item_container_search,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -96,11 +97,24 @@ pub(super) fn search_descendants_depth_limited(
                 }).collect();
                 return Ok((results, segments));
             }
-            // Chain found nothing but was valid — fallback to TreeWalker (uiauto-xpath)
+            // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
             // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
             // deep nodes, but RawViewWalker traversal triggers subtree expansion.
             // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
-            log::info!("[Raw Desc] Chain found 0 results → falling back to TreeWalker (Chromium virtualization workaround)");
+            log::info!("[Raw Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+
+            // P0: Try ItemContainerPattern first (O(1) lookup if supported)
+            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                }).collect();
+                return Ok((vec![elem], segments));
+            }
+
+            // Fallback: TreeWalker (uiauto-xpath)
             let duration_ms = start.elapsed().as_millis() as u64;
             match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
                 Ok((matches, segments)) if !matches.is_empty() => {
@@ -119,8 +133,21 @@ pub(super) fn search_descendants_depth_limited(
                 }
             }
         } else {
-            // Chain not applicable (complex predicates?) — fallback to TreeWalker
-            log::info!("[Raw Desc] Chain not applicable → falling back to TreeWalker (Chromium virtualization workaround)");
+            // Chain not applicable — try ItemContainerPattern, then TreeWalker
+            log::info!("[Raw Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
+
+            // P0: Try ItemContainerPattern first
+            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                }).collect();
+                return Ok((vec![elem], segments));
+            }
+
+            // Fallback: TreeWalker
             let duration_ms = start.elapsed().as_millis() as u64;
             match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
                 Ok((matches, segments)) if !matches.is_empty() => {
@@ -192,11 +219,19 @@ pub(super) fn search_descendants_depth_limited(
     };
 
     if first_step_matches.is_empty() {
-        // FindAll/FindFirst returned 0 — fallback to TreeWalker (Chromium virtualization workaround)
-        // Chromium UIA virtualizes deep nodes; FindAll(Subtree) can't see them,
-        // but RawViewWalker traversal triggers subtree expansion.
+        // FindAll/FindFirst returned 0 — try ItemContainerPattern, then TreeWalker
         let duration_ms = start.elapsed().as_millis() as u64;
-        log::info!("[Raw Desc] FindAll/FindFirst returned 0 for '{}' → falling back to TreeWalker ({}ms)", first_step, duration_ms);
+        log::info!("[Raw Desc] FindAll/FindFirst returned 0 for '{}' → trying ItemContainerPattern then TreeWalker ({}ms)", first_step, duration_ms);
+
+        // P0: Try ItemContainerPattern first
+        if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+            log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", start.elapsed().as_millis());
+            return Ok((vec![elem], vec![SegmentValidationResult::matched(
+                0, first_step.to_string(), 1, start.elapsed().as_millis() as u64,
+            )]));
+        }
+
+        // Fallback: TreeWalker
         match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
             Ok((matches, segments)) if !matches.is_empty() => {
                 log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), start.elapsed().as_millis());

@@ -18,6 +18,7 @@ use super::find::{
     parse_xpath_step,
     step_has_complex_predicates,
 };
+use uiautomation::patterns::UIItemContainerPattern;
 
 /// Generate a brief element summary for logging: "Type[ClassName='xx', Name='yy']"
 fn elem_summary(elem: &UIElement) -> String {
@@ -105,11 +106,24 @@ fn search_descendants_via_control_view_impl(
                 }).collect();
                 return Ok((results, segments));
             }
-            // Chain found nothing but was valid — fallback to TreeWalker (uiauto-xpath)
+            // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
             // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
             // deep nodes, but ControlViewWalker traversal triggers subtree expansion.
             // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
-            log::info!("[Ctrl Desc] Chain found 0 results → falling back to TreeWalker (Chromium virtualization workaround)");
+            log::info!("[Ctrl Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+
+            // P0: Try ItemContainerPattern first (O(1) lookup if supported)
+            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                }).collect();
+                return Ok((vec![elem], segments));
+            }
+
+            // Fallback: TreeWalker (uiauto-xpath)
             let duration_ms = start.elapsed().as_millis() as u64;
             match search_descendants_via_control_walker(auto, window, xpath) {
                 Ok((matches, segments)) if !matches.is_empty() => {
@@ -128,8 +142,21 @@ fn search_descendants_via_control_view_impl(
                 }
             }
         } else {
-            // Chain not applicable (complex predicates?) — fallback to TreeWalker
-            log::info!("[Ctrl Desc] Chain not applicable → falling back to TreeWalker (Chromium virtualization workaround)");
+            // Chain not applicable — try ItemContainerPattern, then TreeWalker
+            log::info!("[Ctrl Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
+
+            // P0: Try ItemContainerPattern first
+            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                }).collect();
+                return Ok((vec![elem], segments));
+            }
+
+            // Fallback: TreeWalker
             let duration_ms = start.elapsed().as_millis() as u64;
             match search_descendants_via_control_walker(auto, window, xpath) {
                 Ok((matches, segments)) if !matches.is_empty() => {
@@ -201,11 +228,19 @@ fn search_descendants_via_control_view_impl(
     };
 
     if first_step_matches.is_empty() {
-        // FindAll/FindFirst returned 0 — fallback to TreeWalker (Chromium virtualization workaround)
-        // Chromium UIA virtualizes deep nodes; FindAll(Subtree) can't see them,
-        // but ControlViewWalker traversal triggers subtree expansion.
+        // FindAll/FindFirst returned 0 — try ItemContainerPattern, then TreeWalker
         let duration_ms = start.elapsed().as_millis() as u64;
-        log::info!("[Ctrl Desc] FindAll/FindFirst returned 0 for '{}' → falling back to TreeWalker ({}ms)", first_step, duration_ms);
+        log::info!("[Ctrl Desc] FindAll/FindFirst returned 0 for '{}' → trying ItemContainerPattern then TreeWalker ({}ms)", first_step, duration_ms);
+
+        // P0: Try ItemContainerPattern first
+        if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+            log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", start.elapsed().as_millis());
+            return Ok((vec![elem], vec![SegmentValidationResult::matched(
+                0, first_step.to_string(), 1, start.elapsed().as_millis() as u64,
+            )]));
+        }
+
+        // Fallback: TreeWalker
         match search_descendants_via_control_walker(auto, window, xpath) {
             Ok((matches, segments)) if !matches.is_empty() => {
                 log::info!("[Ctrl Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), start.elapsed().as_millis());
@@ -663,6 +698,82 @@ pub(super) fn search_descendants_chain_find_first(
 
     // Should not reach here, but just in case
     None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ItemContainerPattern optimization
+//
+// ItemContainerPattern::FindItemByProperty is a native UIA API designed for
+// virtualized containers. It can directly search for a child by property
+// (e.g., AutomationId) without traversing the entire tree, which is
+// dramatically faster than TreeWalker when dealing with Chromium UIA
+// virtualization.
+//
+// Strategy: Before falling back to the expensive TreeWalker traversal,
+// check if the root element supports ItemContainerPattern. If it does,
+// try FindItemByProperty for each simple predicate in the XPath.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Try to find an element using ItemContainerPattern::FindItemByProperty.
+///
+/// Only supports simple property lookups (AutomationId, Name, ClassName).
+/// Returns `Ok(Some(element))` if found, `Ok(None)` if pattern not available
+/// or property not supported, `Err` on actual failure.
+pub(super) fn try_item_container_search(
+    root: &UIElement,
+    xpath: &str,
+) -> anyhow::Result<Option<UIElement>> {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    // Step 1: Check if root supports ItemContainerPattern
+    let container_pattern: UIItemContainerPattern = match root.get_pattern() {
+        Ok(p) => p,
+        Err(_) => {
+            log::debug!("[ItemContainer] Root does not support ItemContainerPattern, skipping");
+            return Ok(None);
+        }
+    };
+
+    // Step 2: Parse the XPath and extract a simple property we can search by
+    let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+    if xpath_parts.is_empty() {
+        return Ok(None);
+    }
+
+    // Use the LAST step (the leaf we're actually looking for)
+    let last_step = xpath_parts.last().unwrap();
+    let parsed = parse_xpath_step(last_step);
+
+    // Pick the best property for FindItemByProperty
+    // Priority: AutomationId > Name > ClassName
+    let (property, value) = if let Some(aid) = parsed.required_props.iter().find(|(k, _)| k.as_attr_name() == "AutomationId") {
+        (UIProperty::AutomationId, aid.1.clone())
+    } else if let Some(nm) = parsed.required_props.iter().find(|(k, _)| k.as_attr_name() == "Name") {
+        (UIProperty::Name, nm.1.clone())
+    } else if let Some(cn) = parsed.required_props.iter().find(|(k, _)| k.as_attr_name() == "ClassName") {
+        (UIProperty::ClassName, cn.1.clone())
+    } else {
+        log::debug!("[ItemContainer] No simple property to search by in '{}'", last_step);
+        return Ok(None);
+    };
+
+    log::info!("[ItemContainer] Trying FindItemByProperty({:?}='{}') ({}ms)",
+        property, value, start.elapsed().as_millis());
+
+    // Step 3: Call FindItemByProperty with null start_after (search from beginning)
+    match container_pattern.find_first_item_by_property(property, Variant::from(value.as_str())) {
+        Ok(elem) => {
+            log::info!("[ItemContainer] ✓ Found element via FindItemByProperty({:?}='{}') ({}ms)",
+                property, value, start.elapsed().as_millis());
+            Ok(Some(elem))
+        }
+        Err(e) => {
+            log::info!("[ItemContainer] FindItemByProperty({:?}='{}') not found ({}ms): {:?}",
+                property, value, start.elapsed().as_millis(), e);
+            Ok(None)
+        }
+    }
 }
 
 /// Chain FindAll: resolve multi-layer descendant XPath, collecting ALL matches at the last step.
