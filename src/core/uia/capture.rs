@@ -245,10 +245,11 @@ fn truncate_hierarchy_to_child(
     // Keep the boundary node as a sub-window identifier in the hierarchy.
     // It acts as the first element node (depth=0) and its ClassName/Name
     // serve as child HWND constraints in XPath, speeding up validation.
-    // Note: In child mode validation, the XPath first step (boundary node)
-    // will be skipped because it's already matched via child_hwnd_hint.
+    // Mark as is_child_container so it's visible in UI but excluded from XPath generation
+    // (the `[fast-child @ClassName='...']` prefix already matches this node).
     let mut boundary_node = hierarchy[boundary_idx].clone();
     boundary_node.depth_from_window = 0; // Root of the sub-HWND search scope
+    boundary_node.is_child_container = true; // Exclude from XPath — already matched by prefix
     let mut result = vec![window_node, boundary_node];
     for (i, mut node) in child_nodes.into_iter().enumerate() {
         node.depth_from_window = i + 1; // +1 because boundary node occupies depth=0

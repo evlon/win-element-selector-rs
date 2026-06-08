@@ -2,7 +2,8 @@
 //
 // Core data models shared between GUI and HTTP API.
 
-use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
+
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 // ─── CaptureMode ─────────────────────────────────────────────────────────────
@@ -932,6 +933,12 @@ pub struct HierarchyNode {
     pub filters:               Vec<PropertyFilter>,
     /// Whether this node should be included in the final XPath.
     pub included:              bool,
+    /// Whether this node is the child HWND container (boundary node in cross-process scenarios).
+    /// In child mode, this node is already matched by the `[fast-child @ClassName='...']` prefix,
+    /// so it should be visible in the UI hierarchy but excluded from XPath generation.
+    /// Unlike `included` (user-controlled), this is set automatically during capture.
+    #[serde(default)]
+    pub is_child_container:    bool,
     /// Whether this node is the target element (the one user captured).
     /// Used by optimizer to correctly identify the target node.
     pub is_target:             bool,
@@ -992,15 +999,10 @@ impl HierarchyNode {
         let nm  = name.into();
 
         // Build filters with extended properties
-        // ClassName: detect dynamic class names and use stable prefix
-        let class_filter = if is_dynamic_class(&cn) {
-            let prefix = extract_stable_prefix(&cn);
-            if prefix.len() >= 4 {
-                PropertyFilter::new_with_operator("ClassName", prefix, Operator::StartsWith)
-            } else {
-                // Prefix too short, disable ClassName filter
-                PropertyFilter::new_disabled("ClassName")
-            }
+        // ClassName: 优先使用完整类名（精确匹配），不再自动生成 starts-with
+        // 用户可在 UI 中手动选择 StartsWith 运算符
+        let class_filter = if cn.is_empty() {
+            PropertyFilter::new_disabled("ClassName")
         } else {
             PropertyFilter::new("ClassName", &cn)
         };
@@ -1039,6 +1041,7 @@ impl HierarchyNode {
             process_id,
             filters,
             included: true,
+            is_child_container: false, // 默认非子窗口容器，捕获时在 truncate_hierarchy_to_child 中设置
             is_target: false,          // 默认非目标节点，捕获时会设置最后一个节点为目标
             position_mode: "position".to_string(),  // Default to position()=N
             sibling_count: 0,  // Will be computed during capture

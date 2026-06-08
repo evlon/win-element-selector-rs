@@ -7,8 +7,8 @@
 // - 本模块只做数据格式转换：HierarchyNode ↔ XPath 字符串
 // - 统计信息直接由 uiauto-xpath 库提供
 
-use super::model::{HierarchyNode, Operator, PropertyFilter};
-use uiauto_xpath::{XPath, is_dynamic_class, extract_stable_prefix};
+use super::model::{HierarchyNode, PropertyFilter};
+use uiauto_xpath::XPath;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 /// 优化摘要（用于 UI 显示）
@@ -241,7 +241,7 @@ impl XPathOptimizer {
     
     /// 优化单个节点的属性过滤器
     /// - AutomationId：保留（锚点节点）
-    /// - ClassName：动态类名改用 starts-with
+    /// - ClassName：优先使用完整类名（精确匹配），不再自动生成 starts-with
     /// - Name：过长的禁用
     /// - ControlType：保留
     /// - Index：保留
@@ -259,21 +259,9 @@ impl XPathOptimizer {
                     }
                 }
                 "ClassName" => {
-                    // 动态类名改用 starts-with
-                    if is_dynamic_class(&f.value) {
-                        let prefix = extract_stable_prefix(&f.value);
-                        if prefix.len() >= 4 {
-                            optimized_filter.operator = Operator::StartsWith;
-                            optimized_filter.value = prefix;
-                            optimized_filter.enabled = true;
-                        } else {
-                            // 前缀太短，禁用
-                            optimized_filter.enabled = false;
-                        }
-                    } else {
-                        // 稳定类名保留
-                        optimized_filter.enabled = !f.value.is_empty();
-                    }
+                    // 优先使用完整类名（精确匹配），避免生成 starts-with
+                    // 如果类名为空则禁用
+                    optimized_filter.enabled = !f.value.is_empty();
                 }
                 "Name" => {
                     // 过长的 Name 可能是动态标题，禁用
@@ -694,7 +682,7 @@ impl XPathOptimizer {
 mod tests {
     use super::*;
     use crate::core::model::ElementRect;
-    // is_dynamic_class, extract_stable_prefix 已在 use 模块顶部导入，不需要重复导入
+    use uiauto_xpath::{is_dynamic_class, extract_stable_prefix};
     
     #[test]
     fn test_optimize_with_automation_id() {
@@ -787,8 +775,12 @@ mod tests {
         println!("minimal_xpath: {}", result.minimal_xpath);
         println!("compression: {:.1}%", result.summary.compression_ratio * 100.0);
         
-        // 压缩率应大于 70%
-        assert!(result.summary.compression_ratio > 0.5);
+        // 验证生成 XPath 不包含 starts-with（新策略：优先完整类名）
+        assert!(!result.optimized_xpath.contains("starts-with"));
+        // 验证使用完整类名
+        assert!(result.optimized_xpath.contains("@ClassName='temp-dialogue-btnBOp4 winFolder_optionsZJ07f t-popup-open'"));
+        // 验证锚点定位
+        assert!(result.summary.used_anchor);
     }
     
     #[test]

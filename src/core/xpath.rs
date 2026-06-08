@@ -108,7 +108,7 @@ fn generate_element_xpath(nodes: &[HierarchyNode], locate_mode: LocateMode) -> S
     }
     
     let included: Vec<&HierarchyNode> = nodes.iter()
-        .filter(|n| n.included)
+        .filter(|n| n.included && !n.is_child_container)
         .collect();
     
     if included.is_empty() {

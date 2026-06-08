@@ -711,17 +711,23 @@ mod xpath_regex {
     pub(super) static ATTR_EQ: Lazy<Regex> = Lazy::new(||
         Regex::new(r#"@(\w+)\s*=\s*'([^']*)'"#).unwrap()
     );
-    /// `starts-with(@Name, 'value')` — 前缀匹配
+    /// 前缀匹配 — 支持两种格式：
+    ///   标准: `starts-with(@Name, 'value')`
+    ///   非标: `@Name=starts-with('value')`
     pub(super) static STARTS_WITH: Lazy<Regex> = Lazy::new(||
-        Regex::new(r#"@(\w+)\s*=\s*starts-with\(\s*'([^']*)'\s*\)"#).unwrap()
+        Regex::new(r#"(?:starts-with\(\s*@(\w+)\s*,\s*'([^']*)'\s*\)|@(\w+)\s*=\s*starts-with\(\s*'([^']*)'\s*\))"#).unwrap()
     );
-    /// `contains(@Name, 'value')` — 子串包含
+    /// 子串包含 — 支持两种格式：
+    ///   标准: `contains(@Name, 'value')`
+    ///   非标: `@Name=contains('value')`
     pub(super) static CONTAINS: Lazy<Regex> = Lazy::new(||
-        Regex::new(r#"@(\w+)\s*=\s*contains\(\s*'([^']*)'\s*\)"#).unwrap()
+        Regex::new(r#"(?:contains\(\s*@(\w+)\s*,\s*'([^']*)'\s*\)|@(\w+)\s*=\s*contains\(\s*'([^']*)'\s*\))"#).unwrap()
     );
-    /// `matches(@Name, 'pattern'[, 'flags'])` — 正则匹配
+    /// 正则匹配 — 支持两种格式：
+    ///   标准: `matches(@Name, 'pattern'[, 'flags'])`
+    ///   非标: `@Name=matches('pattern'[, 'flags'])`
     pub(super) static MATCHES: Lazy<Regex> = Lazy::new(||
-        Regex::new(r#"@(\w+)\s*=\s*matches\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)"#).unwrap()
+        Regex::new(r#"(?:matches\(\s*@(\w+)\s*,\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\)|@(\w+)\s*=\s*matches\(\s*'([^']*)'\s*(?:,\s*'([^']*)'\s*)?\))"#).unwrap()
     );
     /// 步骤前缀解析: `//`, `/*/`, `/*n/`, `/`, 以及不带尾部 `/` 的 `/*n`
     /// 当 XPath 被 split 后，`/*9/Text` 变成 `/*9` + `Text`，所以 `/*9` 也需要能匹配
@@ -798,28 +804,32 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         required_props.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
     }
 
-    // [@Attr=starts-with('Value')]
+    // starts-with(@Attr, 'Value') 或 @Attr=starts-with('Value')
     for cap in xpath_regex::STARTS_WITH.captures_iter(predicates_str) {
-        require_starts_with.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
+        let attr = cap.get(1).or_else(|| cap.get(3)).unwrap().as_str();
+        let value = cap.get(2).or_else(|| cap.get(4)).unwrap().as_str();
+        require_starts_with.push((XPathProperty::from_attr_name(attr), value.to_string()));
     }
 
-    // [@Attr=contains('Value')]
+    // contains(@Attr, 'Value') 或 @Attr=contains('Value')
     for cap in xpath_regex::CONTAINS.captures_iter(predicates_str) {
-        require_contains.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
+        let attr = cap.get(1).or_else(|| cap.get(3)).unwrap().as_str();
+        let value = cap.get(2).or_else(|| cap.get(4)).unwrap().as_str();
+        require_contains.push((XPathProperty::from_attr_name(attr), value.to_string()));
     }
 
-    // [@Attr=matches('Value')] or [@Attr=matches('Value','flags')]
+    // matches(@Attr, 'Pattern'[, 'flags']) 或 @Attr=matches('Pattern'[, 'flags'])
     for cap in xpath_regex::MATCHES.captures_iter(predicates_str) {
-        let key = XPathProperty::from_attr_name(&cap[1]);
-        let pattern = cap[2].to_string();
-        let flags = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+        let attr = cap.get(1).or_else(|| cap.get(4)).unwrap().as_str();
+        let pattern = cap.get(2).or_else(|| cap.get(5)).unwrap().as_str();
+        let flags = cap.get(3).or_else(|| cap.get(6)).map(|m| m.as_str()).unwrap_or("");
         let full_pattern = if flags.is_empty() {
             format!("(?i){}", pattern)
         } else {
             format!("(?{}){}", flags, pattern)
         };
         if let Ok(re) = Regex::new(&full_pattern) {
-            require_matches.push((key, re));
+            require_matches.push((XPathProperty::from_attr_name(attr), re));
         }
     }
 
@@ -1567,23 +1577,41 @@ mod tests {
 
     #[test]
     fn test_parse_starts_with() {
-        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        // 标准格式: starts-with(@Attr, 'value')
+        let step = parse_xpath_step("//Pane[starts-with(@ClassName, 'Chrome')]");
         assert_eq!(step.require_starts_with.len(), 1);
         assert_eq!(step.require_starts_with[0], (XPathProperty::ClassName, "Chrome".to_string()));
+
+        // 兼容非标格式: @Attr=starts-with('value')
+        let step2 = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        assert_eq!(step2.require_starts_with.len(), 1);
+        assert_eq!(step2.require_starts_with[0], (XPathProperty::ClassName, "Chrome".to_string()));
     }
 
     #[test]
     fn test_parse_contains() {
-        let step = parse_xpath_step("//Text[@Name=contains('Widget')]");
+        // 标准格式: contains(@Attr, 'value')
+        let step = parse_xpath_step("//Text[contains(@Name, 'Widget')]");
         assert_eq!(step.require_contains.len(), 1);
         assert_eq!(step.require_contains[0], (XPathProperty::Name, "Widget".to_string()));
+
+        // 兼容非标格式
+        let step2 = parse_xpath_step("//Text[@Name=contains('Widget')]");
+        assert_eq!(step2.require_contains.len(), 1);
+        assert_eq!(step2.require_contains[0], (XPathProperty::Name, "Widget".to_string()));
     }
 
     #[test]
     fn test_parse_matches() {
-        let step = parse_xpath_step("//Button[@Name=matches('^Chrome.*')]");
+        // 标准格式: matches(@Attr, 'pattern')
+        let step = parse_xpath_step("//Button[matches(@Name, '^Chrome.*')]");
         assert_eq!(step.require_matches.len(), 1);
         assert_eq!(step.require_matches[0].0, XPathProperty::Name);
+
+        // 兼容非标格式
+        let step2 = parse_xpath_step("//Button[@Name=matches('^Chrome.*')]");
+        assert_eq!(step2.require_matches.len(), 1);
+        assert_eq!(step2.require_matches[0].0, XPathProperty::Name);
     }
 
     #[test]
@@ -1635,13 +1663,13 @@ mod tests {
 
     #[test]
     fn test_has_complex_with_starts_with() {
-        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        let step = parse_xpath_step("//Pane[starts-with(@ClassName, 'Chrome')]");
         assert!(step_has_complex_predicates(&step));
     }
 
     #[test]
     fn test_has_complex_with_contains() {
-        let step = parse_xpath_step("//Text[@Name=contains('Widget')]");
+        let step = parse_xpath_step("//Text[contains(@Name, 'Widget')]");
         assert!(step_has_complex_predicates(&step));
     }
 
@@ -1669,6 +1697,11 @@ mod tests {
     fn test_precompiled_regexes_exist() {
         // 验证 lazy_static 已初始化（通过实际解析触发）
         let _ = xpath_regex::ATTR_EQ.captures("@Name='OK'");
+        // 标准格式
+        let _ = xpath_regex::STARTS_WITH.captures("starts-with(@ClassName, 'X')");
+        let _ = xpath_regex::CONTAINS.captures("contains(@Name, 'x')");
+        let _ = xpath_regex::MATCHES.captures("matches(@Name, '^x')");
+        // 非标格式兼容
         let _ = xpath_regex::STARTS_WITH.captures("@ClassName=starts-with('X')");
         let _ = xpath_regex::CONTAINS.captures("@Name=contains('x')");
         let _ = xpath_regex::MATCHES.captures("@Name=matches('^x')");
@@ -1763,13 +1796,13 @@ mod tests {
         assert!(s.contains("@Name='OK'"));
     }
 
-    /// 验证 step_to_xpath_str 处理 starts-with
+    /// 验证 step_to_xpath_str 处理 starts-with（输出标准格式）
     #[test]
     fn test_step_to_xpath_str_starts_with() {
-        let step = parse_xpath_step("//Pane[@ClassName=starts-with('Chrome')]");
+        let step = parse_xpath_step("//Pane[starts-with(@ClassName, 'Chrome')]");
         let s = step_to_xpath_str(&step);
         assert!(s.contains("Pane"));
-        assert!(s.contains("starts-with"));
+        assert!(s.contains("starts-with(@ClassName, 'Chrome')"));
     }
 
     /// 验证 step_to_xpath_str 处理无类型名的纯谓词
