@@ -91,87 +91,160 @@ fn search_descendants_via_control_view_impl(
         } else {
             search_descendants_chain_find_all(auto, window, &xpath_parts, filter)
         };
-        if let Some(results) = chain_result {
-            if !results.is_empty() {
+        match chain_result {
+            ChainResult::Complete(results) => {
+                if !results.is_empty() {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Ctrl Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
+                        results.len(), duration_ms);
+                    let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(
+                            i, step.to_string(),
+                            if i == xpath_parts.len() - 1 { results.len() } else { 0 },
+                            0,
+                        )
+                    }).collect();
+                    return Ok((results, segments));
+                }
+                // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
+                // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
+                // deep nodes, but ControlViewWalker traversal triggers subtree expansion.
+                // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
+                log::info!("[Ctrl Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+
+                // P0: Try ItemContainerPattern first (O(1) lookup if supported)
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
+                }
+
+                // Fallback: TreeWalker (uiauto-xpath) from root
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Ctrl Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
-                    results.len(), duration_ms);
-                let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(
-                        i,
-                        step.to_string(),
-                        if i == xpath_parts.len() - 1 { results.len() } else { 0 },
-                        0,
-                    )
-                }).collect();
-                return Ok((results, segments));
+                match search_descendants_via_control_walker(auto, window, xpath) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Ctrl Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                        return Ok((matches, segments));
+                    }
+                    Ok((_, segments)) => {
+                        log::info!("[Ctrl Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                        return Ok((vec![], segments));
+                    }
+                    Err(e) => {
+                        log::warn!("[Ctrl Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                        return Ok((vec![], vec![SegmentValidationResult::not_found(
+                            0, xpath.to_string(), "ControlTree", "Chain found 0 and TreeWalker fallback failed", duration_ms,
+                        )]));
+                    }
+                }
             }
-            // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
-            // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
-            // deep nodes, but ControlViewWalker traversal triggers subtree expansion.
-            // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
-            log::info!("[Ctrl Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+            ChainResult::Partial(progress) => {
+                // P1: Chain partially succeeded — use narrowed scope for TreeWalker fallback
+                // Instead of searching from root, search from the last successful element's subtree
+                let remaining_parts = &xpath_parts[progress.last_successful_step + 1..];
+                let remaining_xpath = format!("//{}", remaining_parts.join("//"));
+                log::info!("[Ctrl Desc] Chain partial: steps 0..{} resolved, searching '{}' from {} ({}ms)",
+                    progress.last_successful_step, remaining_xpath, elem_summary(&progress.last_element),
+                    start.elapsed().as_millis());
 
-            // P0: Try ItemContainerPattern first (O(1) lookup if supported)
-            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Try ItemContainerPattern first
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
+                }
+
+                // TreeWalker from the partial element (narrowed scope — much faster than from root)
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
-                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
-                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
-                }).collect();
-                return Ok((vec![elem], segments));
+                match search_descendants_via_control_walker(auto, &progress.last_element, &remaining_xpath) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Ctrl Desc] ✓ TreeWalker from partial element found {} results ({}ms total)", matches.len(), duration_ms);
+                        // Build full segment results: mark earlier steps as matched
+                        let mut all_segments: Vec<SegmentValidationResult> = xpath_parts[..=progress.last_successful_step]
+                            .iter().enumerate().map(|(i, step)| {
+                                SegmentValidationResult::matched(i, step.to_string(), 0, 0)
+                            }).collect();
+                        for mut s in segments {
+                            s.segment_index += progress.last_successful_step + 1;
+                            all_segments.push(s);
+                        }
+                        return Ok((matches, all_segments));
+                    }
+                    Ok((_, _segments)) => {
+                        log::info!("[Ctrl Desc] TreeWalker from partial element also found 0 results ({}ms total)", duration_ms);
+                        // Fallback: try from root as last resort
+                        match search_descendants_via_control_walker(auto, window, xpath) {
+                            Ok((matches, segs)) if !matches.is_empty() => {
+                                log::info!("[Ctrl Desc] ✓ TreeWalker from root found {} results ({}ms)", matches.len(), start.elapsed().as_millis());
+                                return Ok((matches, segs));
+                            }
+                            Ok((_, segs)) => return Ok((vec![], segs)),
+                            Err(e) => {
+                                log::warn!("[Ctrl Desc] TreeWalker from root also failed: {}", e);
+                                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                                    0, xpath.to_string(), "ControlTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
+                                )]));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[Ctrl Desc] TreeWalker from partial element failed: {}, trying from root", e);
+                        match search_descendants_via_control_walker(auto, window, xpath) {
+                            Ok((matches, segs)) if !matches.is_empty() => {
+                                log::info!("[Ctrl Desc] ✓ TreeWalker from root found {} results ({}ms)", matches.len(), start.elapsed().as_millis());
+                                return Ok((matches, segs));
+                            }
+                            Ok((_, segs)) => return Ok((vec![], segs)),
+                            Err(e2) => {
+                                log::warn!("[Ctrl Desc] TreeWalker from root also failed: {}", e2);
+                                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                                    0, xpath.to_string(), "ControlTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
+                                )]));
+                            }
+                        }
+                    }
+                }
             }
+            ChainResult::NotApplicable => {
+                // Chain not applicable — try ItemContainerPattern, then TreeWalker
+                log::info!("[Ctrl Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
 
-            // Fallback: TreeWalker (uiauto-xpath)
-            let duration_ms = start.elapsed().as_millis() as u64;
-            match search_descendants_via_control_walker(auto, window, xpath) {
-                Ok((matches, segments)) if !matches.is_empty() => {
-                    log::info!("[Ctrl Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
-                    return Ok((matches, segments));
+                // P0: Try ItemContainerPattern first
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
                 }
-                Ok((_, segments)) => {
-                    log::info!("[Ctrl Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
-                    return Ok((vec![], segments));
-                }
-                Err(e) => {
-                    log::warn!("[Ctrl Desc] TreeWalker fallback failed: {}, returning not_found", e);
-                    return Ok((vec![], vec![SegmentValidationResult::not_found(
-                        0, xpath.to_string(), "ControlTree", "Chain found 0 and TreeWalker fallback failed", duration_ms,
-                    )]));
-                }
-            }
-        } else {
-            // Chain not applicable — try ItemContainerPattern, then TreeWalker
-            log::info!("[Ctrl Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
 
-            // P0: Try ItemContainerPattern first
-            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Fallback: TreeWalker
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
-                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
-                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
-                }).collect();
-                return Ok((vec![elem], segments));
-            }
-
-            // Fallback: TreeWalker
-            let duration_ms = start.elapsed().as_millis() as u64;
-            match search_descendants_via_control_walker(auto, window, xpath) {
-                Ok((matches, segments)) if !matches.is_empty() => {
-                    log::info!("[Ctrl Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
-                    return Ok((matches, segments));
-                }
-                Ok((_, segments)) => {
-                    log::info!("[Ctrl Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
-                    return Ok((vec![], segments));
-                }
-                Err(e) => {
-                    log::warn!("[Ctrl Desc] TreeWalker fallback failed: {}, returning not_found", e);
-                    return Ok((vec![], vec![SegmentValidationResult::not_found(
-                        0, xpath.to_string(), "ControlTree", "Chain not applicable and TreeWalker fallback failed", duration_ms,
-                    )]));
+                match search_descendants_via_control_walker(auto, window, xpath) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Ctrl Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                        return Ok((matches, segments));
+                    }
+                    Ok((_, segments)) => {
+                        log::info!("[Ctrl Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                        return Ok((vec![], segments));
+                    }
+                    Err(e) => {
+                        log::warn!("[Ctrl Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                        return Ok((vec![], vec![SegmentValidationResult::not_found(
+                            0, xpath.to_string(), "ControlTree", "Chain not applicable and TreeWalker fallback failed", duration_ms,
+                        )]));
+                    }
                 }
             }
         }
@@ -614,9 +687,29 @@ fn search_uiauto_xpath_core(
 // large Chrome/WebView subtrees.
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Chain execution progress: which step succeeded last, and the element found.
+/// Used for P1 optimization: when Chain partially succeeds, we can narrow
+/// the TreeWalker search scope to the last successful element's subtree.
+pub(super) struct ChainProgress {
+    /// Index of the last successfully resolved step (0-based)
+    pub last_successful_step: usize,
+    /// The element found at that step (will be used as root for TreeWalker)
+    pub last_element: UIElement,
+}
+
+/// Result of Chain execution: either fully resolved, partially resolved, or not applicable.
+pub(super) enum ChainResult {
+    /// All steps resolved successfully
+    Complete(Vec<UIElement>),
+    /// Some steps resolved, then failed. Contains progress info for fallback optimization.
+    Partial(ChainProgress),
+    /// Chain not applicable (e.g., complex predicates)
+    NotApplicable,
+}
+
 /// Chain FindFirst: resolve multi-layer descendant XPath step by step.
-/// Returns `Some(results)` if all steps resolved successfully, `None` if any step
-/// cannot build a UIA condition (e.g., complex predicates) or FindFirst fails.
+/// Returns `ChainResult` indicating whether all steps resolved, partially resolved,
+/// or Chain was not applicable (e.g., complex predicates).
 ///
 /// For SearchMode::First: uses FindFirst at each step (fastest).
 /// For SearchMode::All: uses FindAll at the last step.
@@ -625,7 +718,7 @@ pub(super) fn search_descendants_chain_find_first(
     root: &UIElement,
     xpath_parts: &[&str],
     filter: &FindAllFilter,
-) -> Option<Vec<UIElement>> {
+) -> ChainResult {
     use std::time::Instant;
     let chain_start = Instant::now();
 
@@ -640,10 +733,30 @@ pub(super) fn search_descendants_chain_find_first(
         if step_has_complex_predicates(&parsed) {
             log::info!("[Chain FindFirst] Step {}: complex predicates, falling back ({}ms)",
                 step_idx, chain_start.elapsed().as_millis());
-            return None;
+            // If we already resolved some steps, return Partial progress
+            if step_idx > 0 {
+                return ChainResult::Partial(ChainProgress {
+                    last_successful_step: step_idx - 1,
+                    last_element: current_root,
+                });
+            }
+            return ChainResult::NotApplicable;
         }
 
-        let condition = build_uia_condition_from_step(auto, &parsed)?;
+        let condition = match build_uia_condition_from_step(auto, &parsed) {
+            Some(c) => c,
+            None => {
+                log::info!("[Chain FindFirst] Step {}: cannot build UIA condition ({}ms)",
+                    step_idx, chain_start.elapsed().as_millis());
+                if step_idx > 0 {
+                    return ChainResult::Partial(ChainProgress {
+                        last_successful_step: step_idx - 1,
+                        last_element: current_root,
+                    });
+                }
+                return ChainResult::NotApplicable;
+            }
+        };
         let t_step = Instant::now();
 
         if is_last {
@@ -658,22 +771,20 @@ pub(super) fn search_descendants_chain_find_first(
                     let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
                     if results.is_empty() {
                         log::info!("[Chain FindFirst] Step {}: filtered to 0 results", step_idx);
-                        return Some(vec![]);
+                        return ChainResult::Complete(vec![]);
                     }
 
                     log::info!("[Chain FindFirst] ✓ All {} steps resolved in {}ms [{}]",
                         xpath_parts.len(), chain_start.elapsed().as_millis(),
                         step_times.iter().map(|ms| format!("{}ms", ms)).collect::<Vec<_>>().join(", "));
-                    return Some(results);
+                    return ChainResult::Complete(results);
                 }
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
-                    // FindFirst returned "not found" — the Chain IS applicable (condition was built,
-                    // no complex predicates), it just found 0 results. Return Some(vec![]) so the
-                    // caller can distinguish "found 0" from "truly not applicable" (None).
-                    return Some(vec![]);
+                    // Last step not found — Chain fully applicable but 0 results
+                    return ChainResult::Complete(vec![]);
                 }
             }
         } else {
@@ -689,15 +800,23 @@ pub(super) fn search_descendants_chain_find_first(
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
-                    // Intermediate step not found — can't continue Chain, return empty
-                    return Some(vec![]);
+                    // Intermediate step not found — return Partial progress
+                    // (we successfully resolved steps 0..step_idx-1, current_root is the last success)
+                    if step_idx > 0 {
+                        return ChainResult::Partial(ChainProgress {
+                            last_successful_step: step_idx - 1,
+                            last_element: current_root,
+                        });
+                    }
+                    // Even the first step failed — Chain is applicable but found nothing
+                    return ChainResult::Complete(vec![]);
                 }
             }
         }
     }
 
     // Should not reach here, but just in case
-    None
+    ChainResult::NotApplicable
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -777,14 +896,14 @@ pub(super) fn try_item_container_search(
 }
 
 /// Chain FindAll: resolve multi-layer descendant XPath, collecting ALL matches at the last step.
-/// Returns `Some(results)` if all steps resolved successfully, `None` if any step
-/// cannot build a UIA condition or an intermediate FindFirst fails.
+/// Returns `ChainResult` indicating whether all steps resolved, partially resolved,
+/// or Chain was not applicable.
 pub(super) fn search_descendants_chain_find_all(
     auto: &UIAutomation,
     root: &UIElement,
     xpath_parts: &[&str],
     filter: &FindAllFilter,
-) -> Option<Vec<UIElement>> {
+) -> ChainResult {
     use std::time::Instant;
     let chain_start = Instant::now();
 
@@ -798,10 +917,29 @@ pub(super) fn search_descendants_chain_find_all(
         if step_has_complex_predicates(&parsed) {
             log::info!("[Chain FindAll] Step {}: complex predicates, falling back ({}ms)",
                 step_idx, chain_start.elapsed().as_millis());
-            return None;
+            if step_idx > 0 {
+                return ChainResult::Partial(ChainProgress {
+                    last_successful_step: step_idx - 1,
+                    last_element: current_root,
+                });
+            }
+            return ChainResult::NotApplicable;
         }
 
-        let condition = build_uia_condition_from_step(auto, &parsed)?;
+        let condition = match build_uia_condition_from_step(auto, &parsed) {
+            Some(c) => c,
+            None => {
+                log::info!("[Chain FindAll] Step {}: cannot build UIA condition ({}ms)",
+                    step_idx, chain_start.elapsed().as_millis());
+                if step_idx > 0 {
+                    return ChainResult::Partial(ChainProgress {
+                        last_successful_step: step_idx - 1,
+                        last_element: current_root,
+                    });
+                }
+                return ChainResult::NotApplicable;
+            }
+        };
         let t_step = Instant::now();
 
         if is_last {
@@ -815,19 +953,19 @@ pub(super) fn search_descendants_chain_find_all(
                     let results = filter_findall_results(root, elems, "ChainAll", filter);
                     if results.is_empty() {
                         log::info!("[Chain FindAll] Step {}: filtered to 0 results", step_idx);
-                        return Some(vec![]);
+                        return ChainResult::Complete(vec![]);
                     }
 
                     log::info!("[Chain FindAll] ✓ All {} steps resolved in {}ms [{}]",
                         xpath_parts.len(), chain_start.elapsed().as_millis(),
                         step_times.iter().map(|ms| format!("{}ms", ms)).collect::<Vec<_>>().join(", "));
-                    return Some(results);
+                    return ChainResult::Complete(results);
                 }
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindAll] Step {}: FindAll(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
-                    return Some(vec![]);
+                    return ChainResult::Complete(vec![]);
                 }
             }
         } else {
@@ -843,11 +981,17 @@ pub(super) fn search_descendants_chain_find_all(
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindAll] Step {}: FindFirst(Subtree) not found '{}' in {}ms: {:?}", step_idx, step_str, ms, e);
-                    return Some(vec![]);
+                    if step_idx > 0 {
+                        return ChainResult::Partial(ChainProgress {
+                            last_successful_step: step_idx - 1,
+                            last_element: current_root,
+                        });
+                    }
+                    return ChainResult::Complete(vec![]);
                 }
             }
         }
     }
 
-    None
+    ChainResult::NotApplicable
 }

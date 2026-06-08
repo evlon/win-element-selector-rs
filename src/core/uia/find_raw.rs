@@ -23,6 +23,7 @@ use super::find_control::{
     search_descendants_chain_find_first,
     search_descendants_chain_find_all,
     try_item_container_search,
+    ChainResult,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -83,86 +84,154 @@ pub(super) fn search_descendants_depth_limited(
         } else {
             search_descendants_chain_find_all(auto, window, &xpath_parts, filter)
         };
-        if let Some(results) = chain_result {
-            if !results.is_empty() {
+        match chain_result {
+            ChainResult::Complete(results) => {
+                if !results.is_empty() {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Raw Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
+                        results.len(), duration_ms);
+                    let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(
+                            i, step.to_string(),
+                            if i == xpath_parts.len() - 1 { results.len() } else { 0 },
+                            0,
+                        )
+                    }).collect();
+                    return Ok((results, segments));
+                }
+                // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
+                log::info!("[Raw Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+
+                // P0: Try ItemContainerPattern first (O(1) lookup if supported)
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
+                }
+
+                // Fallback: TreeWalker (uiauto-xpath) from root
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Raw Desc] ✓ Chain FindFirst/FindAll found {} results ({}ms) — fast path!",
-                    results.len(), duration_ms);
-                let segments: Vec<SegmentValidationResult> = xpath_parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(
-                        i, step.to_string(),
-                        if i == xpath_parts.len() - 1 { results.len() } else { 0 },
-                        0,
-                    )
-                }).collect();
-                return Ok((results, segments));
+                match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                        return Ok((matches, segments));
+                    }
+                    Ok((_, segments)) => {
+                        log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                        return Ok((vec![], segments));
+                    }
+                    Err(e) => {
+                        log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                        return Ok((vec![], vec![SegmentValidationResult::not_found(
+                            0, xpath.to_string(), "RawTree", "Chain found 0 and TreeWalker fallback failed", duration_ms,
+                        )]));
+                    }
+                }
             }
-            // Chain found nothing but was valid — try ItemContainerPattern, then TreeWalker
-            // Reason: Chromium UIA virtualization means FindFirst(Subtree) cannot see
-            // deep nodes, but RawViewWalker traversal triggers subtree expansion.
-            // enable_findall only controls FindAll(Subtree), NOT TreeWalker fallback.
-            log::info!("[Raw Desc] Chain found 0 results → trying ItemContainerPattern then TreeWalker");
+            ChainResult::Partial(progress) => {
+                // P1: Chain partially succeeded — use narrowed scope for TreeWalker fallback
+                let remaining_parts = &xpath_parts[progress.last_successful_step + 1..];
+                let remaining_xpath = format!("//{}", remaining_parts.join("//"));
+                log::info!("[Raw Desc] Chain partial: steps 0..{} resolved, searching '{}' from element ({}ms)",
+                    progress.last_successful_step, remaining_xpath, start.elapsed().as_millis());
 
-            // P0: Try ItemContainerPattern first (O(1) lookup if supported)
-            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Try ItemContainerPattern first
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
+                }
+
+                // TreeWalker from the partial element (narrowed scope)
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
-                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
-                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
-                }).collect();
-                return Ok((vec![elem], segments));
+                match search_descendants_via_uiauto_xpath(auto, &progress.last_element, &remaining_xpath, None) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Raw Desc] ✓ TreeWalker from partial element found {} results ({}ms total)", matches.len(), duration_ms);
+                        let mut all_segments: Vec<SegmentValidationResult> = xpath_parts[..=progress.last_successful_step]
+                            .iter().enumerate().map(|(i, step)| {
+                                SegmentValidationResult::matched(i, step.to_string(), 0, 0)
+                            }).collect();
+                        for mut s in segments {
+                            s.segment_index += progress.last_successful_step + 1;
+                            all_segments.push(s);
+                        }
+                        return Ok((matches, all_segments));
+                    }
+                    Ok((_, _)) => {
+                        log::info!("[Raw Desc] TreeWalker from partial element also found 0 results ({}ms total)", duration_ms);
+                        // Fallback: try from root
+                        match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                            Ok((matches, segs)) if !matches.is_empty() => {
+                                log::info!("[Raw Desc] ✓ TreeWalker from root found {} results ({}ms)", matches.len(), start.elapsed().as_millis());
+                                return Ok((matches, segs));
+                            }
+                            Ok((_, segs)) => return Ok((vec![], segs)),
+                            Err(e) => {
+                                log::warn!("[Raw Desc] TreeWalker from root also failed: {}", e);
+                                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                                    0, xpath.to_string(), "RawTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
+                                )]));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[Raw Desc] TreeWalker from partial element failed: {}, trying from root", e);
+                        match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                            Ok((matches, segs)) if !matches.is_empty() => {
+                                log::info!("[Raw Desc] ✓ TreeWalker from root found {} results ({}ms)", matches.len(), start.elapsed().as_millis());
+                                return Ok((matches, segs));
+                            }
+                            Ok((_, segs)) => return Ok((vec![], segs)),
+                            Err(e2) => {
+                                log::warn!("[Raw Desc] TreeWalker from root also failed: {}", e2);
+                                return Ok((vec![], vec![SegmentValidationResult::not_found(
+                                    0, xpath.to_string(), "RawTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
+                                )]));
+                            }
+                        }
+                    }
+                }
             }
+            ChainResult::NotApplicable => {
+                // Chain not applicable — try ItemContainerPattern, then TreeWalker
+                log::info!("[Raw Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
 
-            // Fallback: TreeWalker (uiauto-xpath)
-            let duration_ms = start.elapsed().as_millis() as u64;
-            match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
-                Ok((matches, segments)) if !matches.is_empty() => {
-                    log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
-                    return Ok((matches, segments));
+                // P0: Try ItemContainerPattern first
+                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
+                    let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+                    let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
+                        SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
+                    }).collect();
+                    return Ok((vec![elem], segments));
                 }
-                Ok((_, segments)) => {
-                    log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
-                    return Ok((vec![], segments));
-                }
-                Err(e) => {
-                    log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
-                    return Ok((vec![], vec![SegmentValidationResult::not_found(
-                        0, xpath.to_string(), "RawTree", "Chain found 0 and TreeWalker fallback failed", duration_ms,
-                    )]));
-                }
-            }
-        } else {
-            // Chain not applicable — try ItemContainerPattern, then TreeWalker
-            log::info!("[Raw Desc] Chain not applicable → trying ItemContainerPattern then TreeWalker");
 
-            // P0: Try ItemContainerPattern first
-            if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Fallback: TreeWalker
                 let duration_ms = start.elapsed().as_millis() as u64;
-                log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
-                let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
-                let segments: Vec<SegmentValidationResult> = parts.iter().enumerate().map(|(i, step)| {
-                    SegmentValidationResult::matched(i, step.to_string(), if i == parts.len() - 1 { 1 } else { 0 }, 0)
-                }).collect();
-                return Ok((vec![elem], segments));
-            }
-
-            // Fallback: TreeWalker
-            let duration_ms = start.elapsed().as_millis() as u64;
-            match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
-                Ok((matches, segments)) if !matches.is_empty() => {
-                    log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
-                    return Ok((matches, segments));
-                }
-                Ok((_, segments)) => {
-                    log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
-                    return Ok((vec![], segments));
-                }
-                Err(e) => {
-                    log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
-                    return Ok((vec![], vec![SegmentValidationResult::not_found(
-                        0, xpath.to_string(), "RawTree", "Chain not applicable and TreeWalker fallback failed", duration_ms,
-                    )]));
+                match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
+                    Ok((matches, segments)) if !matches.is_empty() => {
+                        log::info!("[Raw Desc] ✓ TreeWalker fallback found {} results ({}ms total)", matches.len(), duration_ms);
+                        return Ok((matches, segments));
+                    }
+                    Ok((_, segments)) => {
+                        log::info!("[Raw Desc] TreeWalker fallback also found 0 results ({}ms total)", duration_ms);
+                        return Ok((vec![], segments));
+                    }
+                    Err(e) => {
+                        log::warn!("[Raw Desc] TreeWalker fallback failed: {}, returning not_found", e);
+                        return Ok((vec![], vec![SegmentValidationResult::not_found(
+                            0, xpath.to_string(), "RawTree", "Chain not applicable and TreeWalker fallback failed", duration_ms,
+                        )]));
+                    }
                 }
             }
         }
