@@ -227,5 +227,7 @@ pub(super) struct ParsedXPathStep {
     pub(super) require_matches: Vec<(XPathProperty, regex::Regex)>,
     /// 是否为 or/not 复杂谓词（无法用简单属性表达，需客户端二次过滤）
     pub(super) is_complex: bool,
+    /// 反向轴谓词（parent::, ancestor:: 等），剥离后保存以供客户端验证
+    pub(super) reverse_axis_predicates: Vec<super::find::ReverseAxisPredicate>,
 }
 

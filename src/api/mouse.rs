@@ -982,7 +982,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
     let delta = options.delta.unwrap_or(120);
     let timeout_ms = options.timeout.unwrap_or(5000);
     let auto_delta = options.auto_delta.unwrap_or(false);
-    let _delta_factor = options.delta_factor.unwrap_or(0.8); // 保留参数声明，auto_delta 模式下使用
+    let delta_factor = options.delta_factor.unwrap_or(0.8);
     let wait_visible = options.wait_mode.as_deref() == Some("visible");
     let scroll_to_center = options.scroll_to_center.unwrap_or(true);
     let _scroll_to_center_adjust_times = options.scroll_to_center_adjust_times.unwrap_or(5); // 黄金微调模式下由 golden_adjust_max_steps 替代
@@ -1111,7 +1111,7 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         warn!("scrollToCenter enabled but golden target Y unavailable");
     }
 
-    let _container_height_for_auto = container_rect.as_ref().map(|r| r.height); // auto_delta 模式下使用
+    // auto_delta 模式下使用容器高度计算自适应步长
     // 容器视口高度，用于百分比计算（threshold、delta 缩放等都基于此）
     // 必须从 UIA 获取，不允许硬编码降级——不同屏幕/DPI 下差异巨大
     let container_height = match container_rect.as_ref() {
@@ -1192,20 +1192,25 @@ pub async fn scroll_mouse(body: web::Json<MouseScrollRequest>) -> impl Responder
         let start_time = std::time::Instant::now();
 
         // ── 滚动步长 ──
-        // smooth_step_delta=0 时使用原始 delta（向后兼容旧行为）
-        let step_delta = if smooth_step_delta > 0 { smooth_step_delta * delta.signum() } else { delta };
-        let step_delay_ms = if smooth_step_delta > 0 { smooth_step_delay_ms } else { options.scroll_interval_ms.unwrap_or(1000) };
-
-        // ── auto_delta 初始滚动（保留兼容） ──
-        if auto_delta && step_delta.abs() == delta.abs() {
-            // 先滚动一次固定 delta 以获得实际容器高度
-            let _ = mouse_control::scroll_wheel(delta);
-            scrolled += 1;
-            tokio::time::sleep(tokio::time::Duration::from_millis(options.auto_delta_initial_delay_ms.unwrap_or(1000))).await;
-            // 重新获取容器高度
-            // （autoDelta 模式下后续使用自适应步长，此处跳过重算以简化）
-            info!("Auto delta initial scroll done, step_delta={}", step_delta);
-        }
+        // autoDelta 优先：根据容器高度自适应步长；否则使用 smoothStepDelta 或原始 delta
+        let (step_delta, step_delay_ms) = if auto_delta {
+            // autoDelta 模式：步长 = 容器高度 * delta_factor，但不超过 0.9 倍容器高度（防跳过目标）
+            let auto_step = (container_height * delta_factor).min(container_height * 0.9);
+            let auto_step_i32 = auto_step as i32;
+            // 互斥告警：autoDelta 与 smoothStepDelta 同时设置时，smoothStepDelta 被忽略
+            if smooth_step_delta > 0 {
+                warn!("autoDelta=true 与 smoothStepDelta={} 互斥，autoDelta 优先，smoothStepDelta 被忽略", smooth_step_delta);
+            }
+            info!("autoDelta mode: step_delta={} * {} = {}px (capped at 0.9*container={}px)", container_height, delta_factor, auto_step_i32, (container_height * 0.9) as i32);
+            // autoDelta 使用较长的滚动间隔，给 UI 刷新留时间
+            (auto_step_i32 * delta.signum(), options.scroll_interval_ms.unwrap_or(500))
+        } else if smooth_step_delta > 0 {
+            // 平滑小步滚动
+            (smooth_step_delta * delta.signum(), smooth_step_delay_ms)
+        } else {
+            // 原始大步滚动（向后兼容旧行为）
+            (delta, options.scroll_interval_ms.unwrap_or(1000))
+        };
 
         // ── 滚动到底检测 ──
         const STUCK_CHECK_INTERVAL: u32 = 10;

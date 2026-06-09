@@ -226,6 +226,51 @@ pub(super) fn execute_xpath_steps_filtered(
 
 // ── execute_xpath_steps helpers ───────────────────────────────────────────
 
+/// 将 split_xpath_steps 产生的带前缀步骤片段重建为有效的 Descendant XPath。
+///
+/// `parts` 中每个 step 自带前缀（`//`、`/`、`/*n/`），直接 concat 即可，
+/// 但需要把第一个 step 的前缀统一替换为 `//`（Descendant 语义）。
+///
+/// 例：`["//Group[@AutomationId='x']", "//Button[@Name='赞']"]`
+///   → `//Group[@AutomationId='x']//Button[@Name='赞']`
+///
+/// 例：`["/Pane", "//Button[@Name='赞']"]`
+///   → `//Pane//Button[@Name='赞']`
+pub(super) fn reconstruct_descendant_xpath(parts: &[&str]) -> String {
+    if parts.is_empty() {
+        return String::new();
+    }
+    let first = parts[0];
+    // 去掉第一个 step 的轴前缀（// 或 / 或 /*n/），保留节点测试和谓词
+    // 安全做法：找到第一个大写字母或 * 的位置
+    let first_body = if let Some(pos) = first.find(|c: char| c.is_uppercase() || c == '*') {
+        &first[pos..]
+    } else {
+        first.trim_start_matches('/')
+    };
+    // 重新加 // 前缀（Descendant 语义）
+    let mut result = format!("//{}", first_body);
+    for part in &parts[1..] {
+        // 后续 step 保留原有前缀（它们已经是正确的 / 或 // 或 /*n/）
+        result.push_str(part);
+    }
+    result
+}
+
+/// 去掉步骤的轴前缀（`//`、`/*n/`、`/`），返回节点测试和谓词部分。
+///
+/// 例：`//Group[@Name='x']` → `Group[@Name='x']`
+/// 例：`/*9/Text` → `Text`
+/// 例：`/Button` → `Button`
+pub(super) fn strip_step_prefix(step: &str) -> &str {
+    // 找到第一个大写字母或 * 的位置（XPath 节点测试始终以大写字母或 * 开头）
+    if let Some(pos) = step.find(|c: char| c.is_uppercase() || c == '*') {
+        &step[pos..]
+    } else {
+        step.trim_start_matches('/')
+    }
+}
+
 /// 分割 XPath 为步骤，保留前缀（`//`, `/*n/`, `/`）。
 ///
 /// 不能用 naive `split('/')`：`/*9/Text[@Name='背影']` 会变成 `["*9", "Text"]`，
@@ -235,7 +280,7 @@ pub(super) fn execute_xpath_steps_filtered(
 /// - `//Button/Text` → `["//Button", "/Text"]`
 /// - `/*9/Text[@Name='x']` → `["/*9", "/Text[@Name='x']"]`
 /// - `/Pane/Button` → `["Pane", "/Button"]`（第一个 `/` 表示从根开始=Descendant，去掉；后续 `/` 保留=Child）
-fn split_xpath_steps(xpath: &str) -> Vec<&str> {
+pub(super) fn split_xpath_steps(xpath: &str) -> Vec<&str> {
     use regex::Regex;
     use once_cell::sync::Lazy;
     static STEP_SPLIT: Lazy<Regex> = Lazy::new(|| {
@@ -430,10 +475,9 @@ fn execute_descendant_fast(
 
     let mut results = Vec::new();
     for elem in current_elements {
-        let remaining: String = xpath_parts[step_idx..].join("/");
-        // trim leading slashes: xpath_parts already contains prefixes (// or /),
-        // so we must strip them to avoid ////Group... when prepending //
-        let desc_xpath = format!("//{}", remaining.trim_start_matches('/'));
+        // xpath_parts 各 step 自带前缀（// 或 / 或 /*n/），直接 concat 不加分隔符
+        // 然后把第一个 step 的前缀替换为 //（Descendant 语义）
+        let desc_xpath = reconstruct_descendant_xpath(&xpath_parts[step_idx..]);
         if let Ok((matches, _)) = search_descendants_via_control_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {
@@ -464,10 +508,9 @@ fn execute_descendant_full(
 
     let mut results = Vec::new();
     for elem in current_elements {
-        let remaining: String = xpath_parts[step_idx..].join("/");
-        // trim leading slashes: xpath_parts already contains prefixes (// or /),
-        // so we must strip them to avoid ////Group... when prepending //
-        let desc_xpath = format!("//{}", remaining.trim_start_matches('/'));
+        // xpath_parts 各 step 自带前缀（// 或 / 或 /*n/），直接 concat 不加分隔符
+        // 然后把第一个 step 的前缀替换为 //（Descendant 语义）
+        let desc_xpath = reconstruct_descendant_xpath(&xpath_parts[step_idx..]);
         if let Ok((matches, _)) = search_descendants_via_raw_view(auto, elem, &desc_xpath, search_mode, filter) {
             results.extend(matches);
             if !is_last && !results.is_empty() {
@@ -765,6 +808,26 @@ pub(super) fn find_with_depth_limit(
 }
 
 
+/// 反向轴类型
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ReverseAxisKind {
+    Parent,
+    Ancestor,
+    AncestorOrSelf,
+    PrecedingSibling,
+    Preceding,
+}
+
+/// 反向轴谓词（如 `parent::Group[@AutomationId='x']`）
+#[derive(Debug, Clone)]
+pub(super) struct ReverseAxisPredicate {
+    pub(super) axis: ReverseAxisKind,
+    /// 目标节点的 ControlType 名称
+    pub(super) type_name: Option<String>,
+    /// 目标节点的精确匹配属性
+    pub(super) required_props: Vec<(XPathProperty, String)>,
+}
+
 pub(super) fn step_has_complex_predicates(step: &ParsedXPathStep) -> bool {
     step.is_complex
         || !step.require_starts_with.is_empty()
@@ -859,11 +922,12 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         || predicates_str.contains("preceding::");
 
     // 对于反向轴谓词，剥离反向轴部分，只保留叶节点自身的谓词用于 FindAll 过滤
+    // 同时收集被剥离的反向轴谓词，供客户端二次验证
     // 例如: [@AutomationId='js_name'][ancestor::Group[@id='x']] → 只保留 [@AutomationId='js_name']
-    let effective_predicates = if has_reverse_axis {
-        strip_reverse_axis_predicates(predicates_str)
+    let (effective_predicates, reverse_axis_predicates) = if has_reverse_axis {
+        strip_and_collect_reverse_axis_predicates(predicates_str)
     } else {
-        predicates_str.to_string()
+        (predicates_str.to_string(), Vec::new())
     };
 
     let is_complex = predicates_str.contains(" or ") || predicates_str.contains("not(") || has_reverse_axis;
@@ -878,6 +942,7 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
             require_contains: Default::default(),
             require_matches: Default::default(),
             is_complex: true,
+            reverse_axis_predicates,
         };
     }
 
@@ -930,14 +995,17 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         require_contains,
         require_matches,
         is_complex,
+        reverse_axis_predicates,
     }
 }
 
-/// 剥离反向轴谓词，只保留叶节点自身的谓词
-/// 例如: "[@AutomationId='js_name' and @Name='test'][ancestor::Group[@id='x']][parent::Group[@id='y']]"
-///    →  "[@AutomationId='js_name' and @Name='test']"
-fn strip_reverse_axis_predicates(predicates_str: &str) -> String {
+/// 剥离反向轴谓词，同时收集被剥离的反向轴谓词信息。
+/// 返回 (保留的非反向轴谓词字符串, 收集到的反向轴谓词列表)
+/// 例如: "[@AutomationId='js_name'][ancestor::Group[@id='x']][parent::Group[@id='y']]"
+///    →  ("[@AutomationId='js_name']", [ancestor::Group, parent::Group])
+fn strip_and_collect_reverse_axis_predicates(predicates_str: &str) -> (String, Vec<ReverseAxisPredicate>) {
     let mut result = String::new();
+    let mut reverse_predicates = Vec::new();
     let mut depth = 0i32;
     let mut start = 0usize;
     let bytes = predicates_str.as_bytes();
@@ -956,17 +1024,63 @@ fn strip_reverse_axis_predicates(predicates_str: &str) -> String {
             // 完整谓词: predicates_str[start..=i]
             let pred = &predicates_str[start..=i];
             // 检查是否是反向轴谓词
-            let is_reverse = pred.contains("ancestor::")
-                || pred.contains("ancestor-or-self::")
-                || pred.contains("parent::")
-                || pred.contains("preceding-sibling::")
-                || pred.contains("preceding::");
-            if !is_reverse {
+            let axis_info = detect_reverse_axis(pred);
+            if let Some((axis, axis_body)) = axis_info {
+                // 解析反向轴目标节点的类型名和属性
+                let (tn, props) = parse_reverse_axis_node(axis_body);
+                reverse_predicates.push(ReverseAxisPredicate {
+                    axis,
+                    type_name: tn,
+                    required_props: props,
+                });
+            } else {
                 result.push_str(pred);
             }
         }
     }
-    result
+    (result, reverse_predicates)
+}
+
+/// 检测谓词是否包含反向轴，返回 (轴类型, 轴目标部分)
+/// 例如 `[parent::Group[@AutomationId='x']]` → (Parent, `Group[@AutomationId='x']`)
+fn detect_reverse_axis(pred: &str) -> Option<(ReverseAxisKind, &str)> {
+    // pred 形如 `[parent::Group[@AutomationId='x']]`
+    // 去掉外层 []
+    let inner = pred.trim_start_matches('[').trim_end_matches(']');
+    let (axis, rest) = if let Some(body) = inner.strip_prefix("parent::") {
+        (ReverseAxisKind::Parent, body)
+    } else if let Some(body) = inner.strip_prefix("ancestor-or-self::") {
+        (ReverseAxisKind::AncestorOrSelf, body)
+    } else if let Some(body) = inner.strip_prefix("ancestor::") {
+        (ReverseAxisKind::Ancestor, body)
+    } else if let Some(body) = inner.strip_prefix("preceding-sibling::") {
+        (ReverseAxisKind::PrecedingSibling, body)
+    } else if let Some(body) = inner.strip_prefix("preceding::") {
+        (ReverseAxisKind::Preceding, body)
+    } else {
+        return None;
+    };
+    Some((axis, rest))
+}
+
+/// 解析反向轴目标节点的类型名和属性
+/// 例如 `Group[@AutomationId='x']` → (Some("Group"), [("AutomationId", "x")])
+fn parse_reverse_axis_node(body: &str) -> (Option<String>, Vec<(XPathProperty, String)>) {
+    let (type_name, predicates_str): (Option<String>, &str) = if body.starts_with('[') {
+        (None, body)
+    } else if let Some(bracket_pos) = body.find('[') {
+        (Some(body[..bracket_pos].to_string()), &body[bracket_pos..])
+    } else {
+        if body.is_empty() { (None, "") }
+        else { (Some(body.to_string()), "") }
+    };
+
+    let mut props = Vec::new();
+    for cap in xpath_regex::ATTR_EQ.captures_iter(predicates_str) {
+        props.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
+    }
+
+    (type_name, props)
 }
 
 fn get_uia_property_for_xpath(elem: &UIElement, prop: &XPathProperty) -> String {
@@ -1028,6 +1142,127 @@ pub(super) fn element_matches_parsed_step(elem: &UIElement, step: &ParsedXPathSt
         }
     }
 
+    // Check reverse axis predicates (parent::, ancestor::, etc.)
+    for rap in &step.reverse_axis_predicates {
+        if !element_matches_reverse_axis(elem, rap) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// 验证元素是否满足反向轴谓词
+fn element_matches_reverse_axis(elem: &UIElement, rap: &ReverseAxisPredicate) -> bool {
+    match rap.axis {
+        ReverseAxisKind::Parent => {
+            // 获取父元素
+            let parent = match elem.get_cached_parent() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            element_matches_node_spec(&parent, &rap.type_name, &rap.required_props)
+        }
+        ReverseAxisKind::Ancestor => {
+            // 沿 parent 链向上查找，任一祖先匹配即可
+            let mut current = match elem.get_cached_parent() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            loop {
+                if element_matches_node_spec(&current, &rap.type_name, &rap.required_props) {
+                    return true;
+                }
+                match current.get_cached_parent() {
+                    Ok(p) => current = p,
+                    Err(_) => return false,
+                }
+            }
+        }
+        ReverseAxisKind::AncestorOrSelf => {
+            // 先检查自身，再沿 parent 链向上
+            if element_matches_node_spec(elem, &rap.type_name, &rap.required_props) {
+                return true;
+            }
+            let mut current = match elem.get_cached_parent() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            loop {
+                if element_matches_node_spec(&current, &rap.type_name, &rap.required_props) {
+                    return true;
+                }
+                match current.get_cached_parent() {
+                    Ok(p) => current = p,
+                    Err(_) => return false,
+                }
+            }
+        }
+        ReverseAxisKind::PrecedingSibling | ReverseAxisKind::Preceding => {
+            // preceding-sibling 和 preceding 较少使用，简单实现：
+            // 获取父元素的所有子元素，检查当前元素之前是否有匹配的兄弟
+            let parent = match elem.get_cached_parent() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            let self_runtime_id = match elem.get_runtime_id() {
+                Ok(id) => id,
+                Err(_) => return false,
+            };
+            // 遍历父元素子节点，找到自己之前的兄弟
+            if let Ok(children) = parent.get_cached_children() {
+                if rap.axis == ReverseAxisKind::PrecedingSibling {
+                    let mut found_self = false;
+                    for child in children.iter().rev() {
+                        if let Ok(child_id) = child.get_runtime_id() {
+                            if child_id == self_runtime_id {
+                                found_self = true;
+                                continue;
+                            }
+                        }
+                        if found_self && element_matches_node_spec(child, &rap.type_name, &rap.required_props) {
+                            return true;
+                        }
+                    }
+                } else {
+                    // preceding: 检查自身之前的所有兄弟
+                    for child in children.iter() {
+                        if let Ok(child_id) = child.get_runtime_id() {
+                            if child_id == self_runtime_id {
+                                break;
+                            }
+                        }
+                        if element_matches_node_spec(child, &rap.type_name, &rap.required_props) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
+/// 检查一个元素是否匹配给定的类型名和属性规范
+fn element_matches_node_spec(elem: &UIElement, type_name: &Option<String>, required_props: &[(XPathProperty, String)]) -> bool {
+    if let Some(ref tn) = type_name {
+        let actual = elem.get_control_type().map(|ct| format!("{:?}", ct)).unwrap_or_default();
+        if !actual.eq_ignore_ascii_case(tn) {
+            if let Some(ct_id) = control_type_name_to_id(tn) {
+                if elem.get_control_type().map(|ct| ct as i32) != Ok(ct_id as i32) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    for (key, value) in required_props {
+        let actual = get_uia_property_for_xpath(elem, key);
+        if !actual.eq_ignore_ascii_case(value) {
+            return false;
+        }
+    }
     true
 }
 

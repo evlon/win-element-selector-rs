@@ -17,6 +17,9 @@ use super::find::{
     filter_findall_results,
     parse_xpath_step,
     step_has_complex_predicates,
+    split_xpath_steps,
+    reconstruct_descendant_xpath,
+    strip_step_prefix,
 };
 use super::find_control::{
     search_descendants_via_uiauto_xpath,
@@ -57,14 +60,16 @@ pub(super) fn search_descendants_depth_limited(
     use std::time::Instant;
     let start = Instant::now();
 
-    // Parse XPath steps (skip leading // or /)
-    let xpath_parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
+    // Parse XPath steps — 保留前缀（//、/、/*n/），避免轴信息丢失
+    let xpath_parts: Vec<&str> = split_xpath_steps(xpath);
     if xpath_parts.is_empty() {
         return Ok((vec![], vec![]));
     }
 
     let first_step = xpath_parts[0];
-    let first_step_parsed = parse_xpath_step(first_step);
+    // 去掉第一步的前缀来解析节点测试和谓词
+    let first_step_body = strip_step_prefix(first_step);
+    let first_step_parsed = parse_xpath_step(first_step_body);
     let has_complex = step_has_complex_predicates(&first_step_parsed);
     log::info!("[Raw Desc] First step: type={:?}, exact={:?}, complex={}",
         first_step_parsed.type_name, first_step_parsed.required_props, has_complex);
@@ -135,7 +140,7 @@ pub(super) fn search_descendants_depth_limited(
             ChainResult::Partial(progress) => {
                 // P1: Chain partially succeeded — use narrowed scope for TreeWalker fallback
                 let remaining_parts = &xpath_parts[progress.last_successful_step + 1..];
-                let remaining_xpath = format!("//{}", remaining_parts.join("//"));
+                let remaining_xpath = reconstruct_descendant_xpath(remaining_parts);
                 log::info!("[Raw Desc] Chain partial: steps 0..{} resolved, searching '{}' from element ({}ms)",
                     progress.last_successful_step, remaining_xpath, start.elapsed().as_millis());
 
@@ -326,7 +331,7 @@ pub(super) fn search_descendants_depth_limited(
     let remaining_xpath = if remaining_parts.is_empty() {
         String::new()
     } else {
-        format!("/{}", remaining_parts.join("/"))
+        reconstruct_descendant_xpath(remaining_parts)
     };
 
     // If no remaining steps, the first-step matches ARE the result
@@ -455,7 +460,7 @@ fn search_descendants_via_raw_view_manual(
     let remaining_xpath = if remaining_parts.is_empty() {
         String::new()
     } else {
-        format!("/{}", remaining_parts.join("/"))
+        reconstruct_descendant_xpath(remaining_parts)
     };
 
     if remaining_parts.is_empty() {
