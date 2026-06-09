@@ -1,7 +1,7 @@
 # element-selector
 
 Windows UI Automation 元素捕获与 XPath 定位规则编辑工具。
-使用 **Rust + Egui (eframe)** 构建，零外部运行时依赖。
+使用 **Rust + Iced** 构建，零外部运行时依赖。
 
 ---
 
@@ -9,17 +9,20 @@ Windows UI Automation 元素捕获与 XPath 定位规则编辑工具。
 
 | 功能 | 说明 |
 |------|------|
-| **F4 捕获** | 进入等待状态（5s 倒计时），点击屏幕任意控件，自动解析 IUIAutomation 层级树 |
+| **F4 捕获** | 进入等待状态，点击屏幕任意控件，自动解析 IUIAutomation 层级树 |
 | **F7 校验** | 用当前 XPath 在屏幕上查找元素，高亮闪烁结果 |
 | **层级树** | 完整祖先链 Root→Target，支持逐节点点击、右键菜单排除节点 |
-| **属性编辑** | AutomationId / ClassName / Name / Index，运算符下拉（等于/不等于/包含/开头为/结尾为） |
-| **XPath 生成** | 自动生成 / 精简模式（去掉无标识节点） |
+| **属性编辑** | AutomationId / ClassName / Name / Index，运算符下拉（等于/不等于/包含/开头为/结尾为/正则） |
+| **XPath 生成** | 自动生成 / 精简模式 / 智能优化 / 极简优化 / Leaf-First |
 | **自定义 XPath** | 手动编辑，带语法 lint（括号匹配、格式检查） |
-| **元素高亮** | 捕获和校验时在目标元素上闪烁红色边框（透明覆盖窗口） |
+| **元素高亮** | 捕获和校验时在目标元素上闪烁红色边框（透明覆盖窗口，两阶段高亮优化） |
 | **历史记录** | 最多保留 20 条 XPath 历史，下拉复用 |
-| **配置持久化** | 精简模式开关、历史记录通过 eframe storage 跨会话保存 |
+| **配置持久化** | 精简模式开关、历史记录跨会话保存 |
 | **节点 Tooltip** | 悬停显示完整属性 + 屏幕坐标 |
 | **右键菜单** | 节点排除/高亮操作 |
+| **多模式定位** | Fast(ControlView) / Full(RawView) / FastChild / FullChild |
+| **深度限制语法** | `/*n/` 限制搜索深度（n=1~N） |
+| **position() 支持** | `position()=1` / `position()=N` / `position()=last()` 标准 XPath 1.0 |
 
 ---
 
@@ -58,59 +61,64 @@ cargo test
 
 ```
 src/
-├── main.rs              入口：COM STA 初始化 + ComWorker 启动，eframe 启动
+├── main.rs              入口：COM MTA 初始化，iced 启动
 ├── core/
-│   ├── com_worker.rs    COM 工作线程（单例，所有 UIA 操作统一入口）
-│   ├── uia.rs           底层 UIA API + BFS 优化算法
-│   ├── model.rs         数据模型：HierarchyNode / PropertyFilter / ValidationResult
-│   └── xpath.rs         XPath 生成 / 精简 / lint
-├── capture.rs           捕获/验证 API（全部通过 ComWorker 执行）
+│   ├── model.rs         数据模型：HierarchyNode / PropertyFilter / CaptureMode / LocateMode
+│   ├── commonality.rs   公共类型与常量
+│   ├── xpath.rs         XPath 生成 / 精简 / lint / Leaf-First
+│   └── uia/
+│       ├── mod.rs       模块入口，re-export 所有子模块
+│       ├── helpers.rs   AutomationProvider + 工具函数
+│       ├── capture.rs   捕获：ElementFromPoint + 两阶段高亮
+│       ├── validation.rs 校验：SearchContext + NotFoundReason
+│       ├── window.rs    窗口查找/激活/枚举
+│       ├── element.rs   invoke/focus/set_value
+│       ├── cache.rs     ParsedXPathStep + XPath 缓存
+│       ├── find.rs      主调度：策略分发 + 共享解析函数
+│       ├── find_control.rs  ControlView 搜索：Chain FindFirst/FindAll + uiauto-xpath
+│       ├── find_raw.rs  RawView 搜索：Chain FindFirst/FindAll
+│       ├── navigation.rs    导航：方向/可见元素查找
+│       ├── inspect.rs   检查：子树结构分析
+│       └── visibility.rs    可见性计算
 ├── gui/
-│   ├── app.rs           Egui 应用主逻辑
-│   ├── layout.rs        UI 布局组件
-│   ├── highlight.rs     高亮覆盖窗口
-│   └── mouse_hook.rs    全局鼠标钩子
-└── api/                 HTTP API 端点（server binary）
+│   ├── iced_app.rs      Iced 应用主逻辑
+│   └── highlight.rs     高亮覆盖窗口（SetWindowPos 移动优化）
+└── api/                 HTTP API 端点（Actix-web server binary）
+    ├── element.rs       元素查找/操作
+    ├── mouse.rs         鼠标/滚动/空闲
+    ├── keyboard.rs      键盘输入
+    ├── window.rs        窗口操作
+    └── types.rs         API 数据类型
 ```
 
 ### 关键设计决策
 
 #### COM 线程模型（v2.0.0 最新架构）
-采用**单线程 COM 工作线程**架构：
-- 主线程调用 `CoInitializeEx(COINIT_APARTMENTTHREADED)` 初始化 COM
-- 创建专用的 **ComWorker** 后台线程，在 STA 模式下运行
-- 所有 UIA 操作通过 mpsc channel 发送到 ComWorker 串行执行
-- 单一 `IUIAutomation` 实例，天然无并发竞争
-- 详见 [COM_MIGRATION_REPORT_FINAL.md](docs/COM_MIGRATION_REPORT_FINAL.md)
+采用 **后台 MTA 线程** 架构：
+- 主线程运行 Iced UI（OleInitialize STA）
+- 专用的 `uia-mta-init` 后台线程初始化 COM MTA
+- `AutomationProvider` 使用 `UIAutomation::new_direct()` 获取自动化实例
+- 所有 UIA 操作通过 `AutomationProvider::get_healthy()` 获取实例
 
-**优势**：
-- ✅ 代码简洁（删除 70+ 行冗余代码）
-- ✅ 系统稳定（消除 COM 失效、并发竞争问题）
-- ✅ 资源节约（单一 IUIAutomation 实例，内存降低 50%+）
+#### XPath 定位模式
+| 前缀 | 定位模式 | Walker | 说明 |
+|------|----------|--------|------|
+| `[fast]` | Fast | ControlView | 默认，快速定位 |
+| `[full]` | Full | RawView | 完整元素树 |
+| `[fast-child]` | FastChild | ControlView | 跨进程子窗口 |
+| `[full-child]` | FullChild | RawView | 跨进程子窗口(完整) |
 
-#### 高亮窗口
-使用 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` 创建一个完全穿透鼠标的覆盖窗口，在目标元素的 `BoundingRectangle` 上画红色边框，闪烁后自动销毁。运行在独立线程，不阻塞 UI。
+#### 链式 FindFirst 优化
+多层 descendant XPath（`//A//B//C`）逐层调用 `FindFirst(Subtree)`，避免 `FindAll(Subtree)` 遍历整棵子树。支持 `position()` 谓词加速：
+- `position()=1` → `FindFirst`（最快）
+- `2 <= position()=N <= FINDFIRST_NEXT_MAX_N` → `FindAll` + 取第 N 个
+- `position()=last()` 或 N > MAX_N → 降级到 uiauto-xpath 引擎
 
-#### 捕获流程
-```
-F4 按下
-  → CaptureState::WaitingClick（30s 倒计时）
-  → 用户点击屏幕
-  → 发送请求到 ComWorker 线程
-  → ComWorker: ElementFromPoint(cursor) → IUIAutomationTreeWalker 向上遍历祖先
-  → 构建 HierarchyNode 链（最多 32 层）
-  → 计算目标节点 sibling index
-  → 返回结果到 GUI 线程
-  → 更新 UI + 生成 XPath + 高亮闪烁
-```
-
-#### XPath 生成规则
-- 每个 `included=true` 的节点生成一个 `//ControlType[@Attr='val' and ...]` 片段
-- 精简模式：跳过没有 AutomationId 也没有 Name 的中间节点
-- Lint 检查：括号平衡、引号闭合、必须以 `//` 开头
-
-#### 校验（Validation）
-解析 XPath 片段序列，对每段用 `IUIAutomationCondition` + `FindAll(TreeScope_Subtree)` 逐层缩小候选集，最终返回匹配数量。
+#### XPath position() 标准语法
+使用标准 XPath 1.0 语法替代自定义函数：
+- `first()` → `position()=1`
+- `last()` → `position()=last()`
+- `position()=N` 保持不变
 
 ---
 
@@ -170,21 +178,52 @@ POST /api/mouse/scroll
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `window` | string | 窗口选择器（可选，默认 `"Window"`） |
-| `element` | string | 要滚动到的元素 XPath |
-| `options.delta` | number | 滚动量（正值向上，负值向下，默认 120） |
-| `options.times` | number | 最大滚动次数（默认 3） |
-| `options.autoDelta` | bool | 自动根据容器高度计算滚动量（默认 false） |
-| `options.deltaFactor` | number | autoDelta 乘数因子（默认 0.8） |
-| `options.wait` | string | 等待目标元素出现的 XPath |
-| `options.waitMode` | string | `"visible"` 或 `"exist"`（默认 exist） |
-| `options.timeout` | number | 超时毫秒数（默认 5000） |
+| `element` | string | 要滚动的容器元素 XPath |
+| `delta` | number | 滚动量（正值向上，负值向下，默认 120） |
+| `times` | number | 最大滚动次数（默认 3） |
+| `autoScrollAmount` | bool | 自动根据容器高度计算滚动量（默认 false） |
+| `scrollAmountRatio` | number | 自动滚动量比率 |
+| `scrollToCenter` | bool | 滚动到视口中心 |
+| `centerAdjustTimes` | number | 居中调整最大次数（默认 5） |
+| `scrollInterval` | number | 滚动间隔毫秒 |
+| `autoScrollDelay` | number | 自动滚动延迟 |
+| `minScrollRatio` | number | 最小滚动比率 |
+| `centerSnapThreshold` | number | 居中吸附阈值 |
+| `viewportInset` | object | 视口内边距 `{ top, bottom, left, right }` |
+| `smoothStepDelta` | number | 平滑滚动步长（0=禁用，与 autoScrollAmount 互斥） |
+| `wait` | string | 等待目标元素出现的 XPath |
+| `waitMode` | string | `"visible"` 或 `"exist"`（默认 exist） |
+| `timeout` | number | 超时毫秒数（默认 5000） |
 
 ```
-POST /api/move/mouse      → 鼠标移动
-POST /api/mouse/scroll    → 鼠标滚动
+POST /api/mouse/move       → 鼠标移动
+POST /api/mouse/scroll     → 鼠标滚动
 POST /api/mouse/idle/start → 启动空闲移动
 POST /api/mouse/idle/stop  → 停止空闲移动
 GET  /api/mouse/idle/status → 空闲移动状态
+```
+
+### 元素操作
+
+```text
+POST /api/element/invoke    → 调用元素
+POST /api/element/focus     → 聚焦元素
+POST /api/element/set-value → 设置值
+POST /api/element/flash     → 闪烁高亮
+POST /api/element/inspect   → 检查子树
+POST /api/element/visibility → 可见性检查
+POST /api/element/find-from → 从元素查找
+POST /api/element/refresh   → 刷新缓存
+```
+
+### 缓存管理
+
+```text
+GET  /api/cache/stats       → 缓存统计
+POST /api/cache/clear       → 清除缓存
+POST /api/cache/config      → 缓存配置
+GET  /api/cache/xpath/stats → XPath 缓存统计
+POST /api/cache/xpath/clear → 清除 XPath 缓存
 ```
 
 ### 键盘操作
@@ -219,3 +258,5 @@ GET /api/health → {"status": "ok", "version": "1.0.0"}
 - [ ] 导出定位配置（JSON / CSV）
 - [ ] 深色/浅色主题切换
 - [ ] 多监视器 DPI 感知（`SetProcessDpiAwarenessContext`）
+- [ ] Leaf-First XPath 执行层优化（当前仅生成，搜索引擎尚未支持 ancestor 轴）
+- [ ] `FINDFIRST_NEXT_MAX_N` 可通过 API 动态配置

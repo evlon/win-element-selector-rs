@@ -125,9 +125,13 @@ enum ClassStrategy {
 
 - **策略**：当其他属性不足时使用
 - **优化**：
-  - 位置 1 → `first()`
-  - 最后位置 → `last()`
+  - 位置 1 → `position()=1`（标准 XPath 1.0，替代非标准 `first()`）
+  - 最后位置 → `position()=last()`
   - 中间位置 → `position()=N`
+- **Chain FindFirst 加速**：
+  - `position()=1` 或省略 → `FindFirst`（最快路径）
+  - `2 <= position()=N <= FINDFIRST_NEXT_MAX_N` → `FindAll` + 取第 N 个
+  - `position()=last()` 或 N > MAX_N → 降级到 uiauto-xpath 引擎
 
 ### 3.2 锚点间接定位
 
