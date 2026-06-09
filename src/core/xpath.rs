@@ -439,8 +439,8 @@ mod tests {
 
         let result = generate(&nodes, None, LocateMode::Fast);
         
-        // Check that first() is used for position 1
-        assert!(result.element_xpath.contains("first()"), "Should use first() for position 1");
+        // Check that position()=1 is used for position 1
+        assert!(result.element_xpath.contains("position()=1"), "Should use position()=1 for position 1");
         
         // Check that position()=N is used for middle elements
         assert!(result.element_xpath.contains("position()=2"), "Should use position()=2 for middle element");
@@ -463,7 +463,7 @@ mod tests {
         println!("XPath segment with @Index:\n{}", segment);
     }
 
-    /// Test first() function
+    /// Test position()=1 function
     #[test]
     fn first_function_generation() {
         let mut node = HierarchyNode::new("Button", "", "", "", 1, ElementRect::default(), 0);
@@ -471,14 +471,13 @@ mod tests {
         
         let segment = node.xpath_segment();
         
-        // Default mode should use first() for position 1
-        assert!(segment.contains("first()"), "Should use first() for position 1");
-        assert!(!segment.contains("position()"), "Should not use position()=1");
+        // Default mode should use position()=1 for position 1
+        assert!(segment.contains("position()=1"), "Should use position()=1 for position 1");
         
-        println!("XPath segment with first():\n{}", segment);
+        println!("XPath segment with position()=1:\n{}", segment);
     }
 
-    /// Test last() function
+    /// Test position()=last() function
     #[test]
     fn last_function_generation() {
         let mut node = HierarchyNode::new("Button", "", "", "", 3, ElementRect::default(), 0);
@@ -486,30 +485,29 @@ mod tests {
         
         let segment = node.xpath_segment();
         
-        // Default mode should use last() when position equals sibling_count
-        assert!(segment.contains("last()"), "Should use last() for last sibling");
-        assert!(!segment.contains("position()"), "Should not use position() for last");
+        // Default mode should use position()=last() when position equals sibling_count
+        assert!(segment.contains("position()=last()"), "Should use position()=last() for last sibling");
         
-        println!("XPath segment with last():\n{}", segment);
+        println!("XPath segment with position()=last():\n{}", segment);
     }
 
-    /// Test manual first() and last() mode override
+    /// Test manual first and last mode override
     #[test]
     fn position_mode_override() {
-        // Test manual first() override
+        // Test manual first override → position()=1
         let mut node1 = HierarchyNode::new("Button", "", "", "", 2, ElementRect::default(), 0);
         node1.position_mode = "first".to_string();
         let segment1 = node1.xpath_segment();
-        assert!(segment1.contains("first()"), "Manual first() mode should always use first()");
+        assert!(segment1.contains("position()=1"), "Manual first mode should always use position()=1");
         
-        // Test manual last() override
+        // Test manual last override → position()=last()
         let mut node2 = HierarchyNode::new("Button", "", "", "", 1, ElementRect::default(), 0);
         node2.position_mode = "last".to_string();
         let segment2 = node2.xpath_segment();
-        assert!(segment2.contains("last()"), "Manual last() mode should always use last()");
+        assert!(segment2.contains("position()=last()"), "Manual last mode should always use position()=last()");
         
-        println!("Manual first(): {}", segment1);
-        println!("Manual last(): {}", segment2);
+        println!("Manual first: {}", segment1);
+        println!("Manual last: {}", segment2);
     }
 
     /// Test new operators: NotContains, NotStartsWith, NotEndsWith

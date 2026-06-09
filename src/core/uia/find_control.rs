@@ -21,6 +21,14 @@ use super::find::{
     reconstruct_descendant_xpath,
     strip_step_prefix,
 };
+use super::cache::PositionPredicate;
+
+/// Chain FindFirst 加速上限：position()=N 中 N 的最大允许值。
+/// - position()=1: FindFirst (最快，O(1))
+/// - position()=N (2 <= N <= MAX_N): FindAll + 取第N个
+/// - position()=last() 或 N > MAX_N: 降级到 uiauto-xpath 引擎
+/// 默认值 1 表示只加速 position()=1（即 FindFirst），需要更大值时手动调整。
+const FINDFIRST_NEXT_MAX_N: i32 = 1;
 use uiautomation::patterns::UIItemContainerPattern;
 
 /// Generate a brief element summary for logging: "Type[ClassName='xx', Name='yy']"
@@ -740,7 +748,6 @@ pub(super) fn search_descendants_chain_find_first(
         if step_has_complex_predicates(&parsed) {
             log::info!("[Chain FindFirst] Step {}: complex predicates, falling back ({}ms)",
                 step_idx, chain_start.elapsed().as_millis());
-            // If we already resolved some steps, return Partial progress
             if step_idx > 0 {
                 return ChainResult::Partial(ChainProgress {
                     last_successful_step: step_idx - 1,
@@ -749,6 +756,40 @@ pub(super) fn search_descendants_chain_find_first(
             }
             return ChainResult::NotApplicable;
         }
+
+        // Check if position predicate is within FINDFIRST_NEXT_MAX_N limit
+        // position()=None → treated as position()=1 (take first)
+        // position()=1 → FindFirst (always OK)
+        // position()=N (2<=N<=MAX_N) → FindAll + pick N-th (acceptable)
+        // position()=last() or N > MAX_N → degrade to uiauto-xpath
+        let position_n = match &parsed.position {
+            None => 1,           // No position → default to first
+            Some(PositionPredicate::Index(1)) => 1,
+            Some(PositionPredicate::Index(n)) if *n >= 2 && *n <= FINDFIRST_NEXT_MAX_N => *n,
+            Some(PositionPredicate::Index(n)) if *n > FINDFIRST_NEXT_MAX_N => {
+                log::info!("[Chain FindFirst] Step {}: position()={} > FINDFIRST_NEXT_MAX_N={}, degrading ({}ms)",
+                    step_idx, n, FINDFIRST_NEXT_MAX_N, chain_start.elapsed().as_millis());
+                if step_idx > 0 {
+                    return ChainResult::Partial(ChainProgress {
+                        last_successful_step: step_idx - 1,
+                        last_element: current_root,
+                    });
+                }
+                return ChainResult::NotApplicable;
+            }
+            Some(PositionPredicate::Last) => {
+                log::info!("[Chain FindFirst] Step {}: position()=last() not supported, degrading ({}ms)",
+                    step_idx, chain_start.elapsed().as_millis());
+                if step_idx > 0 {
+                    return ChainResult::Partial(ChainProgress {
+                        last_successful_step: step_idx - 1,
+                        last_element: current_root,
+                    });
+                }
+                return ChainResult::NotApplicable;
+            }
+            Some(PositionPredicate::Index(_)) => 1, // edge case (position()=0 etc) → FindFirst
+        };
 
         let condition = match build_uia_condition_from_step(auto, &parsed) {
             Some(c) => c,
@@ -766,10 +807,6 @@ pub(super) fn search_descendants_chain_find_first(
         };
         let t_step = Instant::now();
 
-        // Choose TreeScope based on parsed prefix — crucial to avoid matching self!
-        // Subtree = Element + Descendants (includes self → broken for bare type steps like "Pane")
-        // Children = direct children only (for / axis)
-        // Descendants = all descendants excluding self (for // axis)
         let scope = match &parsed.prefix {
             XPathStepPrefix::Child => TreeScope::Children,
             XPathStepPrefix::Descendant | XPathStepPrefix::DepthLimited { .. } => TreeScope::Descendants,
@@ -780,56 +817,94 @@ pub(super) fn search_descendants_chain_find_first(
             _ => "Other",
         };
 
-        if is_last {
-            // Last step: use FindFirst for :first mode (only need 1 result)
+        // Resolve element based on position_n
+        if position_n == 1 {
+            // position()=1 or no position → FindFirst (fastest path)
             match current_root.find_first(scope, &condition) {
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindFirst] Step {}: FindFirst({}) found {} in {}ms", step_idx, scope_name, elem_summary(&elem), ms);
-
-                    // Apply post-filter (offscreen/zero-size/out-of-bounds)
-                    let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
-                    if results.is_empty() {
-                        log::info!("[Chain FindFirst] Step {}: filtered to 0 results", step_idx);
-                        return ChainResult::Complete(vec![]);
+                    if is_last {
+                        let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
+                        if results.is_empty() {
+                            log::info!("[Chain FindFirst] Step {}: filtered to 0 results", step_idx);
+                            return ChainResult::Complete(vec![]);
+                        }
+                        log::info!("[Chain FindFirst] ✓ All {} steps resolved in {}ms [{}]",
+                            xpath_parts.len(), chain_start.elapsed().as_millis(),
+                            step_times.iter().map(|ms| format!("{}ms", ms)).collect::<Vec<_>>().join(", "));
+                        return ChainResult::Complete(results);
                     }
-
-                    log::info!("[Chain FindFirst] ✓ All {} steps resolved in {}ms [{}]",
-                        xpath_parts.len(), chain_start.elapsed().as_millis(),
-                        step_times.iter().map(|ms| format!("{}ms", ms)).collect::<Vec<_>>().join(", "));
-                    return ChainResult::Complete(results);
-                }
-                Err(e) => {
-                    let ms = t_step.elapsed().as_millis();
-                    step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) not found '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
-                    // Last step not found — Chain fully applicable but 0 results
-                    return ChainResult::Complete(vec![]);
-                }
-            }
-        } else {
-            // Intermediate step: use FindFirst to narrow down to single candidate
-            match current_root.find_first(scope, &condition) {
-                Ok(elem) => {
-                    let ms = t_step.elapsed().as_millis();
-                    step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) found {} in {}ms", step_idx, scope_name, elem_summary(&elem), ms);
                     current_root = elem;
                 }
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
                     log::info!("[Chain FindFirst] Step {}: FindFirst({}) not found '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
-                    // Intermediate step not found — return Partial progress
-                    // (we successfully resolved steps 0..step_idx-1, current_root is the last success)
+                    if is_last {
+                        return ChainResult::Complete(vec![]);
+                    }
                     if step_idx > 0 {
                         return ChainResult::Partial(ChainProgress {
                             last_successful_step: step_idx - 1,
                             last_element: current_root,
                         });
                     }
-                    // Even the first step failed — Chain is applicable but found nothing
+                    return ChainResult::Complete(vec![]);
+                }
+            }
+        } else {
+            // position()=N (2 <= N <= FINDFIRST_NEXT_MAX_N) → FindAll + pick N-th
+            match current_root.find_all(scope, &condition) {
+                Ok(elems) => {
+                    let ms = t_step.elapsed().as_millis();
+                    step_times.push(ms);
+                    let idx = (position_n - 1) as usize;
+                    if idx < elems.len() {
+                        let elem = elems[idx].clone();
+                        log::info!("[Chain FindFirst] Step {}: FindAll({}) found {} elems, picked [{}] {} in {}ms",
+                            step_idx, scope_name, elems.len(), position_n, elem_summary(&elem), ms);
+                        if is_last {
+                            let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
+                            if results.is_empty() {
+                                log::info!("[Chain FindFirst] Step {}: filtered to 0 results", step_idx);
+                                return ChainResult::Complete(vec![]);
+                            }
+                            log::info!("[Chain FindFirst] ✓ All {} steps resolved in {}ms [{}]",
+                                xpath_parts.len(), chain_start.elapsed().as_millis(),
+                                step_times.iter().map(|ms| format!("{}ms", ms)).collect::<Vec<_>>().join(", "));
+                            return ChainResult::Complete(results);
+                        }
+                        current_root = elem;
+                    } else {
+                        log::info!("[Chain FindFirst] Step {}: FindAll({}) found {} elems, but need position {} ({}ms)",
+                            step_idx, scope_name, elems.len(), position_n, ms);
+                        if is_last {
+                            return ChainResult::Complete(vec![]);
+                        }
+                        if step_idx > 0 {
+                            return ChainResult::Partial(ChainProgress {
+                                last_successful_step: step_idx - 1,
+                                last_element: current_root,
+                            });
+                        }
+                        return ChainResult::Complete(vec![]);
+                    }
+                }
+                Err(e) => {
+                    let ms = t_step.elapsed().as_millis();
+                    step_times.push(ms);
+                    log::info!("[Chain FindFirst] Step {}: FindAll({}) failed '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
+                    if is_last {
+                        return ChainResult::Complete(vec![]);
+                    }
+                    if step_idx > 0 {
+                        return ChainResult::Partial(ChainProgress {
+                            last_successful_step: step_idx - 1,
+                            last_element: current_root,
+                        });
+                    }
                     return ChainResult::Complete(vec![]);
                 }
             }

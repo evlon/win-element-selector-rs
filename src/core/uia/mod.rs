@@ -8,7 +8,7 @@
 // IMPORTANT: All UIA operations use uiautomation-rs safe wrappers.
 // windows-rs is only used for non-UIA Win32 APIs (EnumWindows, GetCursorPos, etc.)
 
-use super::model::{CaptureMode, CaptureResult, ChildHwndHint, DetailedValidationResult, ElementRect, FindAllFilter, HierarchyNode, LayerValidationResult, LocateMode, NotFoundReason, Operator, PropertyValidationResult, SearchContext, SearchMode, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo, XPathProperty};
+use super::model::{CaptureMode, CaptureResult, ChildHwndHint, DetailedValidationResult, ElementRect, FindAllFilter, HierarchyNode, LayerValidationResult, LocateMode, NotFoundReason, Operator, PropertyFilter, PropertyValidationResult, SearchContext, SearchMode, SegmentValidationResult, ValidationResult, WalkerHint, WindowInfo, XPathProperty};
 use log::{debug, error, info};
 use regex::Regex;
 use uiauto_xpath::{XPath, UiElement as UiaXPathElement, control_type_name_to_id};

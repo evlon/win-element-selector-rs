@@ -1132,16 +1132,16 @@ impl HierarchyNode {
         }
     }
 
-    /// Format position using XPath functions: first(), last(), or position()=N
+    /// Format position using standard XPath 1.0: position()=1, position()=last(), or position()=N
     fn format_position(&self, pos: i32) -> String {
         match self.position_mode.as_str() {
             "first" => {
-                // Always use first() (user override)
-                "first()".to_string()
+                // Always use position()=1 (user override)
+                "position()=1".to_string()
             }
             "last" => {
-                // Always use last() (user override)
-                "last()".to_string()
+                // Always use position()=last() (user override)
+                "position()=last()".to_string()
             }
             "index" => {
                 // Fallback to @Index attribute
@@ -1150,11 +1150,11 @@ impl HierarchyNode {
             _ => {
                 // Default: "position" mode - use smart detection
                 if pos == 1 {
-                    // First element: use first()
-                    "first()".to_string()
+                    // First element: use position()=1
+                    "position()=1".to_string()
                 } else if self.sibling_count > 0 && pos == self.sibling_count {
-                    // Last element: use last()
-                    "last()".to_string()
+                    // Last element: use position()=last()
+                    "position()=last()".to_string()
                 } else {
                     // Middle element: use position()=N
                     format!("position()={}", pos)

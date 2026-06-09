@@ -725,6 +725,7 @@ pub(super) fn sibling_index(
     let parent = walker.get_parent(target).ok()?;
     let mut child = walker.get_first_child(&parent).ok()?;
     let target_ct = target.get_control_type_raw().ok()?;
+    let target_rid = target.get_runtime_id().ok()?;
 
     let mut idx = 0i32;
     loop {
@@ -732,16 +733,17 @@ pub(super) fn sibling_index(
         if ct == target_ct {
             idx += 1;
         }
-        // Compare by AutomationId (same logic as before)
-        let aid_child = child.get_automation_id().unwrap_or_default();
-        let aid_target = target.get_automation_id().unwrap_or_default();
-        if aid_child == aid_target { return Some(idx); }
+        // Match by RuntimeId (more reliable than AutomationId which can be empty/duplicated)
+        if let Ok(rid) = child.get_runtime_id() {
+            if rid == target_rid {
+                return Some(idx);
+            }
+        }
         match walker.get_next_sibling(&child) {
             Ok(next) => child = next,
-            Err(_)   => break,
+            Err(_) => return None, // Exhausted all siblings without finding target
         }
     }
-    None
 }
 
 pub(super) fn count_siblings(

@@ -53,17 +53,8 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
 
     // 2. Build ancestor chain using ControlViewWalker (per design: normal capture uses ControlViewWalker).
     let t2 = std::time::Instant::now();
-    let mut walker_is_control_view = true;
-    let walker = match auto.get_control_view_walker() {
-        Ok(w) => w,
-        Err(_) => {
-            walker_is_control_view = false;
-            log::warn!("[CAP] ControlViewWalker unavailable, falling back to RawViewWalker");
-            auto.get_raw_view_walker()
-                .map_err(|e| anyhow::anyhow!("RawViewWalker: {e}"))?
-        }
-    };
-    log::info!("[PERF][CAP] Walker type: {}", if walker_is_control_view { "ControlView" } else { "RawView (FALLBACK)" });
+    let walker = auto.get_control_view_walker()
+        .map_err(|e| anyhow::anyhow!("ControlViewWalker unavailable: {e}"))?;
     let desktop = auto.get_root_element()?;
 
     let mut chain: Vec<UIElement> = vec![target.clone()];
@@ -100,37 +91,48 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
     }
     log::info!("[PERF][CAP] Build hierarchy: {} nodes in {}ms", hierarchy.len(), t3.elapsed().as_millis());
 
-    // 4. Compute sibling index for the target element
-    // Skip sibling index computation when target is inside an embedded browser (Chrome WebView),
+    // 4. Compute sibling index for ALL nodes (not just target)
+    // Skip sibling index computation when node's parent is an embedded browser (Chrome WebView),
     // because traversing thousands of DOM siblings is extremely slow (5-7s) and
     // sibling index is unreliable for web content anyway.
     let t4 = std::time::Instant::now();
-    // Read parent info before mutable borrow
-    let parent_class_fw = if hierarchy.len() >= 2 {
-        let parent = &hierarchy[hierarchy.len() - 2];
-        Some((parent.class_name.clone(), parent.framework_id.clone()))
-    } else {
-        None
-    };
+    // Pre-compute skip flags to avoid borrow checker conflict with iter_mut
+    let skip_flags: Vec<bool> = hierarchy.iter().map(|node| {
+        node.framework_id == "Chrome"
+            || node.class_name.contains("Chrome_")
+            || node.class_name.contains("WebView")
+    }).collect();
+
+    for (i, node) in hierarchy.iter_mut().enumerate() {
+        if i < 2 { continue; } // Skip Desktop(0) and Window(1)
+
+        // Skip nodes whose parent is an embedded browser
+        if skip_flags.get(i - 1).copied().unwrap_or(false) {
+            log::info!("[CAP] Sibling index: node[{}] '{}' skipped (parent is embedded browser)", i, node.control_type);
+            continue;
+        }
+
+        if let Some(elem) = chain.get(i) {
+            let idx = sibling_index(elem, &walker).unwrap_or(0);
+            node.index = idx;
+            if idx > 0 {
+                if let Some(f) = node.filters.iter_mut().find(|f| f.name == "Index") {
+                    f.value = idx.to_string();
+                    f.enabled = true;
+                } else {
+                    // Index filter doesn't exist (node was created with index=0), add it now
+                    node.filters.push(PropertyFilter::new("Index", idx.to_string()));
+                }
+                node.sibling_count = count_siblings(elem, &walker).unwrap_or(0);
+            }
+            log::info!("[CAP] Sibling index: node[{}] '{}' name='{}' index={}/{}",
+                i, node.control_type, node.name, node.index, node.sibling_count);
+        }
+    }
+
+    // Mark target node
     if let Some(last) = hierarchy.last_mut() {
         last.is_target = true;
-        let skip_sibling = parent_class_fw.as_ref().map_or(false, |(cls, fw)| {
-            fw == "Chrome" || cls.contains("Chrome_") || cls.contains("WebView")
-        });
-        if skip_sibling {
-            log::info!("[PERF][CAP] Sibling index: skipped (parent is embedded browser: class='{}' fw='{}')",
-                parent_class_fw.as_ref().map(|(c, _)| c.as_str()).unwrap_or(""),
-                parent_class_fw.as_ref().map(|(_, f)| f.as_str()).unwrap_or(""));
-        } else if let Ok(ctrl_walker) = auto.get_control_view_walker() {
-            last.index = sibling_index(&target, &ctrl_walker).unwrap_or(0);
-            if last.index > 0 {
-                if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
-                    f.value   = last.index.to_string();
-                    f.enabled = true;
-                }
-                last.sibling_count = count_siblings(&target, &ctrl_walker).unwrap_or(0);
-            }
-        }
     }
     log::info!("[PERF][CAP] Sibling index: {}ms", t4.elapsed().as_millis());
 
@@ -659,15 +661,36 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
                     hierarchy.push(node);
                 }
             }
+            // Compute sibling index for ALL nodes in fallback path
+            // Pre-compute skip flags to avoid borrow checker conflict with iter_mut
+            let skip_flags: Vec<bool> = hierarchy.iter().map(|node| {
+                node.framework_id == "Chrome"
+                    || node.class_name.contains("Chrome_")
+                    || node.class_name.contains("WebView")
+            }).collect();
+            for (i, node) in hierarchy.iter_mut().enumerate() {
+                if i < 2 { continue; }
+                if skip_flags.get(i - 1).copied().unwrap_or(false) {
+                    log::info!("[Enhanced] Fallback sibling index: node[{}] '{}' skipped (parent is embedded browser)", i, node.control_type);
+                    continue;
+                }
+                if let Some(elem) = ch.get(i) {
+                    let idx = sibling_index(elem, &raw_walker).unwrap_or(0);
+                    node.index = idx;
+                    if idx > 0 {
+                        if let Some(f) = node.filters.iter_mut().find(|f| f.name == "Index") {
+                            f.value = idx.to_string(); f.enabled = true;
+                        } else {
+                            node.filters.push(PropertyFilter::new("Index", idx.to_string()));
+                        }
+                        node.sibling_count = count_siblings(elem, &raw_walker).unwrap_or(0);
+                    }
+                    log::info!("[Enhanced] Fallback sibling index: node[{}] '{}' name='{}' index={}/{}",
+                        i, node.control_type, node.name, node.index, node.sibling_count);
+                }
+            }
             if let Some(last) = hierarchy.last_mut() {
                 last.is_target = true;
-                last.index = sibling_index(&hit_elem, &raw_walker).unwrap_or(0);
-                if last.index > 0 {
-                    if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
-                        f.value = last.index.to_string(); f.enabled = true;
-                    }
-                    last.sibling_count = count_siblings(&hit_elem, &raw_walker).unwrap_or(0);
-                }
             }
             let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);
             set_walker_hints(&mut hierarchy, window_pid);
@@ -788,15 +811,40 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
         }
     }
 
+    // Compute sibling index for ALL nodes (not just target)
+    // Pre-compute skip flags to avoid borrow checker conflict with iter_mut
+    let skip_flags: Vec<bool> = hierarchy.iter().map(|node| {
+        node.framework_id == "Chrome"
+            || node.class_name.contains("Chrome_")
+            || node.class_name.contains("WebView")
+    }).collect();
+
+    for (i, node) in hierarchy.iter_mut().enumerate() {
+        if i < 2 { continue; } // Skip Desktop(0) and Window(1)
+
+        if skip_flags.get(i - 1).copied().unwrap_or(false) {
+            log::info!("[Enhanced] Sibling index: node[{}] '{}' skipped (parent is embedded browser)", i, node.control_type);
+            continue;
+        }
+
+        if let Some(elem) = chain.get(i) {
+            let idx = sibling_index(elem, &raw_walker).unwrap_or(0);
+            node.index = idx;
+            if idx > 0 {
+                if let Some(f) = node.filters.iter_mut().find(|f| f.name == "Index") {
+                    f.value = idx.to_string(); f.enabled = true;
+                } else {
+                    node.filters.push(PropertyFilter::new("Index", idx.to_string()));
+                }
+                node.sibling_count = count_siblings(elem, &raw_walker).unwrap_or(0);
+            }
+            log::info!("[Enhanced] Sibling index: node[{}] '{}' name='{}' index={}/{}",
+                i, node.control_type, node.name, node.index, node.sibling_count);
+        }
+    }
+
     if let Some(last) = hierarchy.last_mut() {
         last.is_target = true;
-        last.index = sibling_index(&target_elem, &raw_walker).unwrap_or(0);
-        if last.index > 0 {
-            if let Some(f) = last.filters.iter_mut().find(|f| f.name == "Index") {
-                f.value = last.index.to_string(); f.enabled = true;
-            }
-            last.sibling_count = count_siblings(&target_elem, &raw_walker).unwrap_or(0);
-        }
     }
 
     let window_pid = hierarchy.get(window_index).map(|n| n.process_id).unwrap_or(0);

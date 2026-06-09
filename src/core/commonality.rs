@@ -282,6 +282,7 @@ mod tests {
             is_clickable: false,
             is_scrollable: false,
             is_selected: None,
+            is_child_container: false,
         }
     }
 
@@ -318,6 +319,7 @@ mod tests {
             is_clickable: false,
             is_scrollable: false,
             is_selected: None,
+            is_child_container: false,
         }
     }
 

@@ -225,9 +225,21 @@ pub(super) struct ParsedXPathStep {
     pub(super) require_contains: Vec<(XPathProperty, String)>,
     /// 正则匹配谓词: matches(@Name, 'pattern')
     pub(super) require_matches: Vec<(XPathProperty, regex::Regex)>,
+    /// 位置谓词: position()=N 或 position()=last()
+    /// None = 无位置约束, Some(PositionPredicate::Index(N)) = 第N个, Some(PositionPredicate::Last) = 最后一个
+    pub(super) position: Option<PositionPredicate>,
     /// 是否为 or/not 复杂谓词（无法用简单属性表达，需客户端二次过滤）
     pub(super) is_complex: bool,
     /// 反向轴谓词（parent::, ancestor:: 等），剥离后保存以供客户端验证
     pub(super) reverse_axis_predicates: Vec<super::find::ReverseAxisPredicate>,
+}
+
+/// position() 谓词类型
+#[derive(Debug, Clone)]
+pub(super) enum PositionPredicate {
+    /// position()=N (N >= 1)
+    Index(i32),
+    /// position()=last()
+    Last,
 }
 

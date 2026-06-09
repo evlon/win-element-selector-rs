@@ -867,6 +867,14 @@ mod xpath_regex {
     pub(super) static STEP_PREFIX: Lazy<Regex> = Lazy::new(||
         Regex::new(r"^(//|/\*(\d+)?/?|/)").unwrap()
     );
+    /// position()=N 谓词
+    pub(super) static POSITION_EQ: Lazy<Regex> = Lazy::new(||
+        Regex::new(r"position\(\)\s*=\s*(\d+)").unwrap()
+    );
+    /// position()=last() 谓词
+    pub(super) static POSITION_LAST: Lazy<Regex> = Lazy::new(||
+        Regex::new(r"position\(\)\s*=\s*last\(\)").unwrap()
+    );
 }
 
 /// 解析 XPath 步骤为结构化数据。
@@ -941,6 +949,7 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
             require_starts_with: Default::default(),
             require_contains: Default::default(),
             require_matches: Default::default(),
+            position: None,
             is_complex: true,
             reverse_axis_predicates,
         };
@@ -987,6 +996,16 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         }
     }
 
+    // position()=last() 谓词
+    let position = if xpath_regex::POSITION_LAST.is_match(&effective_predicates) {
+        Some(PositionPredicate::Last)
+    } else if let Some(cap) = xpath_regex::POSITION_EQ.captures(&effective_predicates) {
+        let n: i32 = cap[1].parse().unwrap_or(1);
+        Some(PositionPredicate::Index(n))
+    } else {
+        None
+    };
+
     ParsedXPathStep {
         prefix,
         type_name,
@@ -994,6 +1013,7 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         require_starts_with,
         require_contains,
         require_matches,
+        position,
         is_complex,
         reverse_axis_predicates,
     }
@@ -2066,6 +2086,39 @@ mod tests {
         let _ = xpath_regex::CONTAINS.captures("@Name=contains('x')");
         let _ = xpath_regex::MATCHES.captures("@Name=matches('^x')");
         let _ = xpath_regex::STEP_PREFIX.captures("//Button");
+        let _ = xpath_regex::POSITION_EQ.captures("position()=1");
+        let _ = xpath_regex::POSITION_LAST.captures("position()=last()");
+    }
+
+    #[test]
+    fn test_parse_position_eq_1() {
+        let step = parse_xpath_step("//Button[position()=1]");
+        assert!(matches!(step.position, Some(PositionPredicate::Index(1))));
+    }
+
+    #[test]
+    fn test_parse_position_eq_n() {
+        let step = parse_xpath_step("//Button[position()=3]");
+        assert!(matches!(step.position, Some(PositionPredicate::Index(3))));
+    }
+
+    #[test]
+    fn test_parse_position_last() {
+        let step = parse_xpath_step("//Button[position()=last()]");
+        assert!(matches!(step.position, Some(PositionPredicate::Last)));
+    }
+
+    #[test]
+    fn test_parse_no_position() {
+        let step = parse_xpath_step("//Button[@Name='OK']");
+        assert!(step.position.is_none());
+    }
+
+    #[test]
+    fn test_parse_position_with_other_predicates() {
+        let step = parse_xpath_step("//Button[@Name='OK' and position()=2]");
+        assert!(matches!(step.position, Some(PositionPredicate::Index(2))));
+        assert!(step.required_props.iter().any(|(k, v)| k.as_attr_name() == "Name" && v == "OK"));
     }
 
     // ─── 执行策略分派测试 (Phase 2.3) ─────────────────────────────────────────
