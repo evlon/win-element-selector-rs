@@ -31,7 +31,9 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         .map_err(|e| anyhow::anyhow!("ElementFromPoint: {e}"))?;
     let hit_name = hit_elem.get_name().unwrap_or_default();
     let hit_ct = hit_elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
-    log::info!("[PERF][CAP] ElementFromPoint: {}ms (type='{}' name='{}')", t1.elapsed().as_millis(), hit_ct, hit_name);
+    let hit_rid = hit_elem.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+    let hit_rect = hit_elem.get_bounding_rectangle().ok().map(|r| format!("({},{},{},{})", r.get_left(), r.get_top(), r.get_right(), r.get_bottom())).unwrap_or_default();
+    log::info!("[PERF][CAP] ElementFromPoint: {}ms (type='{}' name='{}' rid=[{}] rect={})", t1.elapsed().as_millis(), hit_ct, hit_name, hit_rid, hit_rect);
 
     // 1.5. Light BFS to find the deepest leaf element at (x,y)
     // This solves the issue where ElementFromPoint returns a container (Group/Pane)
@@ -41,10 +43,12 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
         .unwrap_or_else(|| hit_elem.clone());
     let target_name = target.get_name().unwrap_or_default();
     let target_ct = target.get_control_type_raw().map(control_type_name).unwrap_or_default();
+    let target_rid = target.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+    let target_rect_str = target.get_bounding_rectangle().ok().map(|r| format!("({},{},{},{})", r.get_left(), r.get_top(), r.get_right(), r.get_bottom())).unwrap_or_default();
     if !auto.compare_elements(&target, &hit_elem).unwrap_or(false) {
-        log::info!("[PERF][CAP] BFS found deeper target: {}ms (type='{}' name='{}')", t15.elapsed().as_millis(), target_ct, target_name);
+        log::info!("[PERF][CAP] BFS found deeper target: {}ms (type='{}' name='{}' rid=[{}] rect={})", t15.elapsed().as_millis(), target_ct, target_name, target_rid, target_rect_str);
     } else {
-        log::info!("[PERF][CAP] BFS no deeper target: {}ms", t15.elapsed().as_millis());
+        log::info!("[PERF][CAP] BFS no deeper target: {}ms (rid=[{}] rect={})", t15.elapsed().as_millis(), target_rid, target_rect_str);
     }
 
     // 2. Build ancestor chain using ControlViewWalker (per design: normal capture uses ControlViewWalker).
@@ -170,6 +174,14 @@ fn do_capture(x: i32, y: i32) -> anyhow::Result<CaptureResult> {
 
     log::info!("[PERF][CAP] Capture total: {}ms (hierarchy_depth={} target='{}' mode={:?})",
         capture_start.elapsed().as_millis(), hierarchy.len(), target_name, capture_mode);
+
+    // Log target element's runtimeId and rect for debugging
+    if let Some(last) = hierarchy.last() {
+        log::info!("[CAP] Target node: rid=[{}] rect=({},{},{},{}) name='{}' ctrl='{}'",
+            target_rid,
+            last.rect.x, last.rect.y, last.rect.x + last.rect.width, last.rect.y + last.rect.height,
+            last.name, last.control_type);
+    }
 
     let search_root = if locate_mode.is_child_mode() {
         if let Some(hint) = &child_hwnd_hint {
@@ -299,7 +311,9 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
     let mut hit_name = hit_elem.get_name().unwrap_or_default();
     let mut _hit_ct = hit_elem.get_control_type_raw().map(control_type_name).unwrap_or_default();
     let mut hit_fwid = hit_elem.get_framework_id().unwrap_or_default();
-    debug!("[Enhanced] ElementFromPoint: type='{}' name='{}' fwid='{}'", _hit_ct, hit_name, hit_fwid);
+    let hit_rid = hit_elem.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+    let hit_rect_str = hit_elem.get_bounding_rectangle().ok().map(|r| format!("({},{},{},{})", r.get_left(), r.get_top(), r.get_right(), r.get_bottom())).unwrap_or_default();
+    info!("[Enhanced] ElementFromPoint: type='{}' name='{}' fwid='{}' rid=[{}] rect={}", _hit_ct, hit_name, hit_fwid, hit_rid, hit_rect_str);
 
     let my_pid = std::process::id();
 
@@ -831,6 +845,15 @@ fn do_capture_enhanced(auto: &UIAutomation, x: i32, y: i32) -> anyhow::Result<Ca
     let normal_name = original_hit_elem.get_name().unwrap_or_default();
     info!("[Enhanced] hierarchy depth={} target='{}' name='{}' mode={:?} | ElementFromPoint type='{}' name='{}'",
         hierarchy.len(), target_ct, target_name, locate_mode, normal_ct, normal_name);
+
+    // Log target element's runtimeId and rect for debugging
+    if let Some(last) = hierarchy.last() {
+        let target_rid = target_elem.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+        info!("[CAP][Enhanced] Target node: rid=[{}] rect=({},{},{},{}) name='{}' ctrl='{}'",
+            target_rid,
+            last.rect.x, last.rect.y, last.rect.x + last.rect.width, last.rect.y + last.rect.height,
+            last.name, last.control_type);
+    }
 
     let search_root = if locate_mode.is_child_mode() {
         if let Some(hint) = &child_hwnd_hint {

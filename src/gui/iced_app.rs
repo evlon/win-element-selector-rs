@@ -562,15 +562,11 @@ impl State {
             .unwrap_or(false);
         let locate_mode = LocateMode::from_capture_mode(self.capture_mode, is_cross_process);
         // self.hierarchy already excludes the Window node (see complete_capture / handle_hover_capture).
-        // In child mode (cross-process / embedded WebView), use full hierarchy
-        // to preserve all intermediate nodes (e.g., Document → Group → Text).
-        // In normal mode, use simplified XPath that skips nodes without Name/AutomationId.
+        // Always use generate_elements (preserve all included nodes) — don't auto-simplify.
+        // XPath simplification is the job of the smart/minimal optimizer buttons, not default generation.
+        // This avoids losing intermediate layers (e.g., WeChat browser tab bar: 7 unnamed Panes → only 1 XPath step).
         let element_xpath_inner = if !self.hierarchy.is_empty() {
-            if is_cross_process {
-                xpath::generate_elements(&self.hierarchy, locate_mode)
-            } else {
-                xpath::generate_simplified_elements(&self.hierarchy, locate_mode)
-            }
+            xpath::generate_elements(&self.hierarchy, locate_mode)
         } else {
             String::new()
         };

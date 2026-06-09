@@ -766,13 +766,27 @@ pub(super) fn search_descendants_chain_find_first(
         };
         let t_step = Instant::now();
 
+        // Choose TreeScope based on parsed prefix — crucial to avoid matching self!
+        // Subtree = Element + Descendants (includes self → broken for bare type steps like "Pane")
+        // Children = direct children only (for / axis)
+        // Descendants = all descendants excluding self (for // axis)
+        let scope = match &parsed.prefix {
+            XPathStepPrefix::Child => TreeScope::Children,
+            XPathStepPrefix::Descendant | XPathStepPrefix::DepthLimited { .. } => TreeScope::Descendants,
+        };
+        let scope_name = match scope {
+            TreeScope::Children => "Children",
+            TreeScope::Descendants => "Descendants",
+            _ => "Other",
+        };
+
         if is_last {
             // Last step: use FindFirst for :first mode (only need 1 result)
-            match current_root.find_first(TreeScope::Subtree, &condition) {
+            match current_root.find_first(scope, &condition) {
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) found {} in {}ms", step_idx, scope_name, elem_summary(&elem), ms);
 
                     // Apply post-filter (offscreen/zero-size/out-of-bounds)
                     let results = filter_findall_results(root, vec![elem], "ChainFirst", filter);
@@ -789,24 +803,24 @@ pub(super) fn search_descendants_chain_find_first(
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) not found '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
                     // Last step not found — Chain fully applicable but 0 results
                     return ChainResult::Complete(vec![]);
                 }
             }
         } else {
             // Intermediate step: use FindFirst to narrow down to single candidate
-            match current_root.find_first(TreeScope::Subtree, &condition) {
+            match current_root.find_first(scope, &condition) {
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) found {} in {}ms", step_idx, scope_name, elem_summary(&elem), ms);
                     current_root = elem;
                 }
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindFirst] Step {}: FindFirst(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
+                    log::info!("[Chain FindFirst] Step {}: FindFirst({}) not found '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
                     // Intermediate step not found — return Partial progress
                     // (we successfully resolved steps 0..step_idx-1, current_root is the last success)
                     if step_idx > 0 {
@@ -949,13 +963,27 @@ pub(super) fn search_descendants_chain_find_all(
         };
         let t_step = Instant::now();
 
+        // Choose TreeScope based on parsed prefix — crucial to avoid matching self!
+        // Subtree = Element + Descendants (includes self → broken for bare type steps like "Pane")
+        // Children = direct children only (for / axis)
+        // Descendants = all descendants excluding self (for // axis)
+        let scope = match &parsed.prefix {
+            XPathStepPrefix::Child => TreeScope::Children,
+            XPathStepPrefix::Descendant | XPathStepPrefix::DepthLimited { .. } => TreeScope::Descendants,
+        };
+        let scope_name = match scope {
+            TreeScope::Children => "Children",
+            TreeScope::Descendants => "Descendants",
+            _ => "Other",
+        };
+
         if is_last {
             // Last step: use FindAll to collect all matches
-            match current_root.find_all(TreeScope::Subtree, &condition) {
+            match current_root.find_all(scope, &condition) {
                 Ok(elems) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindAll] Step {}: FindAll(Subtree) found {} in {}ms", step_idx, elems.len(), ms);
+                    log::info!("[Chain FindAll] Step {}: FindAll({}) found {} in {}ms", step_idx, scope_name, elems.len(), ms);
 
                     let results = filter_findall_results(root, elems, "ChainAll", filter);
                     if results.is_empty() {
@@ -971,23 +999,23 @@ pub(super) fn search_descendants_chain_find_all(
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindAll] Step {}: FindAll(Subtree) not found '{}' ({}ms): {:?}", step_idx, step_str, ms, e);
+                    log::info!("[Chain FindAll] Step {}: FindAll({}) not found '{}' ({}ms): {:?}", step_idx, scope_name, step_str, ms, e);
                     return ChainResult::Complete(vec![]);
                 }
             }
         } else {
             // Intermediate step: use FindFirst to narrow down
-            match current_root.find_first(TreeScope::Subtree, &condition) {
+            match current_root.find_first(scope, &condition) {
                 Ok(elem) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindAll] Step {}: FindFirst(Subtree) found {} in {}ms", step_idx, elem_summary(&elem), ms);
+                    log::info!("[Chain FindAll] Step {}: FindFirst({}) found {} in {}ms", step_idx, scope_name, elem_summary(&elem), ms);
                     current_root = elem;
                 }
                 Err(e) => {
                     let ms = t_step.elapsed().as_millis();
                     step_times.push(ms);
-                    log::info!("[Chain FindAll] Step {}: FindFirst(Subtree) not found '{}' in {}ms: {:?}", step_idx, step_str, ms, e);
+                    log::info!("[Chain FindAll] Step {}: FindFirst({}) not found '{}' in {}ms: {:?}", step_idx, scope_name, step_str, ms, e);
                     if step_idx > 0 {
                         return ChainResult::Partial(ChainProgress {
                             last_successful_step: step_idx - 1,

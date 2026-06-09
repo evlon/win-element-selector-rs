@@ -186,6 +186,15 @@ pub fn validate_xpath(
                         log::info!("[PERF][CHILD] HWND[{}] execute_xpath_steps: {}ms, {} results", 
                             hwnd_idx, t_find.elapsed().as_millis(), results.len());
                         if !results.is_empty() {
+                            // Log found element's runtimeId and rect
+                            let first = &results[0];
+                            let rid = first.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                            let rect_str = first.get_bounding_rectangle().ok().map(|r| format!("({},{},{},{})", r.get_left(), r.get_top(), r.get_right(), r.get_bottom())).unwrap_or_default();
+                            log::info!("[VAL][CHILD] Found element: rid=[{}] rect={} name='{}' ctrl='{}' (total={})",
+                                rid, rect_str,
+                                first.get_name().unwrap_or_default(),
+                                first.get_control_type_raw().map(control_type_name).unwrap_or_default(),
+                                results.len());
                             // Use BuildCache to batch-prefetch BoundingRectangle + IsOffscreen
                             let t_rect = Instant::now();
                             let result_cache = create_bfs_cache_request(&auto);
@@ -321,6 +330,15 @@ pub fn validate_xpath(
             Ok((results, segments)) => {
                 let window_duration = stage2_window_start.elapsed().as_millis();
                 if !results.is_empty() {
+                    // Log found element's runtimeId and rect
+                    let first = &results[0];
+                    let rid = first.get_runtime_id().ok().map(|ids| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    let rect_str = first.get_bounding_rectangle().ok().map(|r| format!("({},{},{},{})", r.get_left(), r.get_top(), r.get_right(), r.get_bottom())).unwrap_or_default();
+                    log::info!("[VAL] Found element: rid=[{}] rect={} name='{}' ctrl='{}' (total={}, window={})",
+                        rid, rect_str,
+                        first.get_name().unwrap_or_default(),
+                        first.get_control_type_raw().map(control_type_name).unwrap_or_default(),
+                        results.len(), win_idx + 1);
                     log::info!("[PERF] ✓ Window {} XPath succeeded in {}ms, found {} results", win_idx + 1, window_duration, results.len());
                     best_result = Some((results, segments));
                     break;
