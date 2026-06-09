@@ -60,8 +60,28 @@ fn generate_window_selector(node: &HierarchyNode, window_info: Option<&WindowInf
 
 /// Generate element XPath directly from element hierarchy (nodes after Window).
 /// Uses "/" for direct children, "//" when intermediate nodes are skipped.
+/// User's explicit uncheck (included=false) is ALWAYS respected, even for target node.
 pub fn generate_elements(nodes: &[HierarchyNode], locate_mode: LocateMode) -> String {
-    generate_element_xpath(nodes, locate_mode)
+    if nodes.is_empty() {
+        return String::new();
+    }
+    let last_idx = nodes.len() - 1;
+    let patched: Vec<HierarchyNode> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let mut node = n.clone();
+            if !n.included {
+                // 用户显式取消勾选 → 始终排除（即使 is_target）
+                node.included = false;
+            } else if n.is_target || i == last_idx {
+                // 目标节点（用户未取消勾选）→ 始终包含
+                node.included = true;
+            }
+            node
+        })
+        .collect();
+    generate_element_xpath(&patched, locate_mode)
 }
 
 /// Generate simplified element XPath from element hierarchy.
@@ -74,21 +94,22 @@ pub fn generate_simplified_elements(nodes: &[HierarchyNode], locate_mode: Locate
     let last_idx = nodes.len() - 1;
     
     // Create a filtered version with simplified inclusion.
-    // Rule: respect user's "uncheck" (included=false) unconditionally,
-    // then auto-simplify: keep nodes with AutomationId or Name (or the target if user didn't uncheck it).
+    // Rule: user's explicit uncheck (included=false) is ALWAYS respected, even for target.
+    //       target node (is_target or last) is included only if user didn't uncheck it.
+    //       then auto-simplify: keep nodes with AutomationId or Name.
     let simplified_nodes: Vec<HierarchyNode> = nodes
         .iter()
         .enumerate()
         .map(|(i, n)| {
             let mut node = n.clone();
             if !n.included {
-                // User explicitly unchecked this node → always exclude
+                // 用户显式取消勾选 → 始终排除（即使 is_target）
                 node.included = false;
-            } else if i == last_idx {
-                // Target node (user didn't uncheck) → always include
+            } else if n.is_target || i == last_idx {
+                // 目标节点（用户未取消勾选）→ 始终包含
                 node.included = true;
             } else {
-                // Non-target node (user didn't uncheck) → include only if it has AutomationId or Name
+                // 非目标节点（用户未取消勾选）→ 仅当有 AutomationId 或 Name 时包含
                 node.included = !n.automation_id.is_empty() || !n.name.is_empty();
             }
             node

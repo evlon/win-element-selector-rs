@@ -849,8 +849,27 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         else { (Some(rest.to_string()), "") }
     };
 
-    // 3. 检测 or/not 复杂谓词
+    // 3. 检测 or/not/ancestor/parent 复杂谓词
+    //    ancestor::/parent:: 等反向轴谓词中的属性不属于当前步骤，
+    //    且无法用 UIA FindAll 条件表达，必须标记为 complex 交由 uiauto-xpath 处理
+    let has_reverse_axis = predicates_str.contains("ancestor::")
+        || predicates_str.contains("ancestor-or-self::")
+        || predicates_str.contains("parent::")
+        || predicates_str.contains("preceding-sibling::")
+        || predicates_str.contains("preceding::");
+
+    // 对于反向轴谓词，剥离反向轴部分，只保留叶节点自身的谓词用于 FindAll 过滤
+    // 例如: [@AutomationId='js_name'][ancestor::Group[@id='x']] → 只保留 [@AutomationId='js_name']
+    let effective_predicates = if has_reverse_axis {
+        strip_reverse_axis_predicates(predicates_str)
+    } else {
+        predicates_str.to_string()
+    };
+
+    let is_complex = predicates_str.contains(" or ") || predicates_str.contains("not(") || has_reverse_axis;
+
     if predicates_str.contains(" or ") || predicates_str.contains("not(") {
+        // or/not 谓词：无法用 FindAll 表达，完全跳过属性提取
         return ParsedXPathStep {
             prefix,
             type_name,
@@ -867,29 +886,29 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
     let mut require_contains: Vec<(XPathProperty, String)> = Vec::new();
     let mut require_matches: Vec<(XPathProperty, Regex)> = Vec::new();
 
-    // 4. 解析谓词（使用预编译正则）
+    // 4. 解析谓词（使用预编译正则，基于 effective_predicates 而非原始 predicates_str）
 
     // [@Attr='Value'] — 精确相等
-    for cap in xpath_regex::ATTR_EQ.captures_iter(predicates_str) {
+    for cap in xpath_regex::ATTR_EQ.captures_iter(&effective_predicates) {
         required_props.push((XPathProperty::from_attr_name(&cap[1]), cap[2].to_string()));
     }
 
     // starts-with(@Attr, 'Value') 或 @Attr=starts-with('Value')
-    for cap in xpath_regex::STARTS_WITH.captures_iter(predicates_str) {
+    for cap in xpath_regex::STARTS_WITH.captures_iter(&effective_predicates) {
         let attr = cap.get(1).or_else(|| cap.get(3)).unwrap().as_str();
         let value = cap.get(2).or_else(|| cap.get(4)).unwrap().as_str();
         require_starts_with.push((XPathProperty::from_attr_name(attr), value.to_string()));
     }
 
     // contains(@Attr, 'Value') 或 @Attr=contains('Value')
-    for cap in xpath_regex::CONTAINS.captures_iter(predicates_str) {
+    for cap in xpath_regex::CONTAINS.captures_iter(&effective_predicates) {
         let attr = cap.get(1).or_else(|| cap.get(3)).unwrap().as_str();
         let value = cap.get(2).or_else(|| cap.get(4)).unwrap().as_str();
         require_contains.push((XPathProperty::from_attr_name(attr), value.to_string()));
     }
 
     // matches(@Attr, 'Pattern'[, 'flags']) 或 @Attr=matches('Pattern'[, 'flags'])
-    for cap in xpath_regex::MATCHES.captures_iter(predicates_str) {
+    for cap in xpath_regex::MATCHES.captures_iter(&effective_predicates) {
         let attr = cap.get(1).or_else(|| cap.get(4)).unwrap().as_str();
         let pattern = cap.get(2).or_else(|| cap.get(5)).unwrap().as_str();
         let flags = cap.get(3).or_else(|| cap.get(6)).map(|m| m.as_str()).unwrap_or("");
@@ -910,8 +929,44 @@ pub(super) fn parse_xpath_step(step: &str) -> ParsedXPathStep {
         require_starts_with,
         require_contains,
         require_matches,
-        is_complex: false,
+        is_complex,
     }
+}
+
+/// 剥离反向轴谓词，只保留叶节点自身的谓词
+/// 例如: "[@AutomationId='js_name' and @Name='test'][ancestor::Group[@id='x']][parent::Group[@id='y']]"
+///    →  "[@AutomationId='js_name' and @Name='test']"
+fn strip_reverse_axis_predicates(predicates_str: &str) -> String {
+    let mut result = String::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = predicates_str.as_bytes();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' if depth == 0 => {
+                start = i;
+                depth = 1;
+            }
+            b'[' => { depth += 1; }
+            b']' => { depth -= 1; }
+            _ => {}
+        }
+        if depth == 0 && b == b']' {
+            // 完整谓词: predicates_str[start..=i]
+            let pred = &predicates_str[start..=i];
+            // 检查是否是反向轴谓词
+            let is_reverse = pred.contains("ancestor::")
+                || pred.contains("ancestor-or-self::")
+                || pred.contains("parent::")
+                || pred.contains("preceding-sibling::")
+                || pred.contains("preceding::");
+            if !is_reverse {
+                result.push_str(pred);
+            }
+        }
+    }
+    result
 }
 
 fn get_uia_property_for_xpath(elem: &UIElement, prop: &XPathProperty) -> String {

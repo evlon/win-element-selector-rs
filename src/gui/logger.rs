@@ -1,9 +1,13 @@
 // src/gui/logger.rs
 //
 // GUI 内嵌日志面板 - 线程安全的日志收集器
+// 同时输出到日志文件（每次启动覆盖）
 
 use std::sync::{Arc, Mutex};
 use log::{Level, LevelFilter, Log, Metadata, Record};
+
+/// 日志文件路径（相对于 exe 所在目录的 log/debug/element-selector.log）
+const LOG_FILE_RELATIVE: &str = "log/debug/element-selector.log";
 
 /// 线程安全的 GUI 日志收集器
 #[derive(Clone)]
@@ -19,20 +23,14 @@ pub struct LogEntry {
     pub timestamp: std::time::SystemTime,
 }
 
-/// 获取当前 UTC 时间字符串（精确到毫秒），格式: HH:MM:SS.sss
+/// 获取当前本地时间字符串（精确到毫秒），格式: HH:MM:SS.sss
 fn local_time_ms() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = now.as_secs();
-    let millis = now.subsec_millis();
-    // 提取时分秒（UTC）
-    let day_secs = total_secs % 86400;
-    let h = day_secs / 3600;
-    let m = (day_secs / 60) % 60;
-    let s = day_secs % 60;
-    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    unsafe {
+        let st = GetLocalTime();
+        format!("{:02}:{:02}:{:02}.{:03}",
+            st.wHour, st.wMinute, st.wSecond, st.wMilliseconds)
+    }
 }
 
 impl GuiLogger {
@@ -77,10 +75,11 @@ impl GuiLogger {
     }
 }
 
-/// 组合日志器：同时输出到 GUI 面板和标准输出
+/// 组合日志器：同时输出到 GUI 面板、标准输出和日志文件
 /// 作为唯一的全局 logger，替代 env_logger + GuiLogger 双注册冲突
 struct CombinedLogger {
     gui: GuiLogger,
+    file: Arc<Mutex<std::fs::File>>,
 }
 
 impl Log for CombinedLogger {
@@ -98,25 +97,69 @@ impl Log for CombinedLogger {
                 Level::Debug => "DEBUG",
                 Level::Trace => "TRACE",
             };
-            // 输出到控制台（带毫秒级时间戳）
-            println!("{} [{}] {}", local_time_ms(), level_str, msg);
-            // 同时添加到 GUI 日志面板
+            let timestamp = local_time_ms();
+            let line = format!("{} [{}] {}", timestamp, level_str, msg);
+            // 输出到控制台
+            println!("{}", line);
+            // 写入日志文件
+            if let Ok(mut file) = self.file.lock() {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", line);
+            }
+            // 添加到 GUI 日志面板
             self.gui.add_log(record.level(), msg);
         }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        if let Ok(file) = self.file.lock() {
+            let _ = file.sync_all();
+        }
+    }
 }
 
-/// 初始化全局组合日志器（GUI 面板 + 控制台）
+/// 初始化全局组合日志器（GUI 面板 + 控制台 + 日志文件）
+/// 每次启动覆盖日志文件
 pub fn init_gui_logger(max_lines: usize) {
+    let log_path = get_log_file_path();
+    // 确保目录存在
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // 创建/覆盖日志文件，写入 UTF-8 BOM 以便 Windows 记事本等工具正确识别编码
+    let mut file = std::fs::File::create(&log_path)
+        .unwrap_or_else(|e| {
+            eprintln!("无法创建日志文件 {:?}: {}", log_path, e);
+            std::fs::File::create(std::env::temp_dir().join("element-selector.log"))
+                .expect("连临时目录都无法创建日志文件")
+        });
+    // 写入 UTF-8 BOM (EF BB BF)，让编辑器/记事本自动识别为 UTF-8
+    {
+        use std::io::Write;
+        let _ = file.write_all(&[0xEF, 0xBB, 0xBF]);
+    }
+
     let logger = CombinedLogger {
         gui: GuiLogger::new(max_lines),
+        file: Arc::new(Mutex::new(file)),
     };
     let gui = logger.gui.clone();
     log::set_boxed_logger(Box::new(logger)).expect("failed to set logger");
     log::set_max_level(LevelFilter::Info);
     GUI_LOGGER.with(|s| *s.borrow_mut() = Some(gui));
+    
+    log::info!("日志文件: {:?}", log_path);
+}
+
+/// 获取日志文件路径：exe 所在目录 / log/debug/element-selector.log
+fn get_log_file_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join(LOG_FILE_RELATIVE);
+        }
+    }
+    // 回退到当前工作目录
+    std::path::PathBuf::from(LOG_FILE_RELATIVE)
 }
 
 thread_local! {

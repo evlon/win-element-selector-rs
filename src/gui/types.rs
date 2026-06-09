@@ -77,6 +77,12 @@ pub struct PersistedCapture {
     /// 搜索模式（全部/只取第一个/必须唯一）
     #[serde(default)]
     pub search_mode:            Option<element_selector::core::model::SearchMode>,
+    /// Leaf-First 格式状态
+    #[serde(default)]
+    pub leaf_first_using:       Option<bool>,
+    /// Leaf-First 切换前备份的标准格式 XPath
+    #[serde(default)]
+    pub leaf_first_backup:      Option<String>,
 }
 
 /// 优化摘要持久化格式

@@ -139,8 +139,8 @@ pub(super) fn search_descendants_depth_limited(
                 log::info!("[Raw Desc] Chain partial: steps 0..{} resolved, searching '{}' from element ({}ms)",
                     progress.last_successful_step, remaining_xpath, start.elapsed().as_millis());
 
-                // Try ItemContainerPattern first
-                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Try ItemContainerPattern first (use remaining_xpath from partial element)
+                if let Ok(Some(elem)) = try_item_container_search(&progress.last_element, &remaining_xpath) {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     log::info!("[Raw Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
                     let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
@@ -151,9 +151,9 @@ pub(super) fn search_descendants_depth_limited(
                 }
 
                 // TreeWalker from the partial element (narrowed scope)
-                let duration_ms = start.elapsed().as_millis() as u64;
                 match search_descendants_via_uiauto_xpath(auto, &progress.last_element, &remaining_xpath, None) {
                     Ok((matches, segments)) if !matches.is_empty() => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
                         log::info!("[Raw Desc] ✓ TreeWalker from partial element found {} results ({}ms total)", matches.len(), duration_ms);
                         let mut all_segments: Vec<SegmentValidationResult> = xpath_parts[..=progress.last_successful_step]
                             .iter().enumerate().map(|(i, step)| {
@@ -166,6 +166,7 @@ pub(super) fn search_descendants_depth_limited(
                         return Ok((matches, all_segments));
                     }
                     Ok((_, _)) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
                         log::info!("[Raw Desc] TreeWalker from partial element also found 0 results ({}ms total)", duration_ms);
                         // Fallback: try from root
                         match search_descendants_via_uiauto_xpath(auto, window, xpath, None) {
@@ -192,6 +193,7 @@ pub(super) fn search_descendants_depth_limited(
                             Ok((_, segs)) => return Ok((vec![], segs)),
                             Err(e2) => {
                                 log::warn!("[Raw Desc] TreeWalker from root also failed: {}", e2);
+                                let duration_ms = start.elapsed().as_millis() as u64;
                                 return Ok((vec![], vec![SegmentValidationResult::not_found(
                                     0, xpath.to_string(), "RawTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
                                 )]));

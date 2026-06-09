@@ -93,6 +93,7 @@ pub enum Message {
     OptimizePressed,
     MinimalOptimizePressed,
     CancelOptimize,
+    ToggleLeafFirstFormat,
     SimilarSearchPressed,
     CodeDialogOpened,
     CodeDialogClosed,
@@ -130,6 +131,69 @@ pub enum PaneContent {
     Right,
 }
 
+// ─── Leaf-First State ─────────────────────────────────────────────────────────
+// 独立结构体：将 Leaf-First 相关的 3 个状态字段和所有操作封装在一起，
+// 避免散落在各处导致遗漏重置或状态不一致。
+
+#[derive(Debug, Clone, Default)]
+pub struct LeafFirstState {
+    /// 当前是否使用 Leaf-First 格式
+    pub using: bool,
+    /// 切换到 Leaf-First 前备份标准格式
+    pub backup: Option<String>,
+    /// 缓存 Leaf-First XPath（优化/捕获时计算，避免重复跑优化器）
+    pub cached: Option<String>,
+}
+
+impl LeafFirstState {
+    /// 重置所有状态（当 hierarchy 变化、手动编辑、切换窗口等场景调用）
+    pub fn reset(&mut self) {
+        self.using = false;
+        self.backup = None;
+        self.cached = None;
+    }
+
+    /// 仅清除缓存（当 filter/operator 变化时调用，hierarchy 层级未变所以 using/backup 保留）
+    pub fn invalidate_cache(&mut self) {
+        self.cached = None;
+    }
+
+    /// 从优化结果中缓存 leaf-first XPath（含前缀）
+    /// `leaf_first_xpath` 是优化器返回的（不含 locate mode 前缀）
+    /// `prefix` 是 locate mode 前缀
+    /// `current_element_xpath` 是当前 element_xpath（用于比较，避免无意义缓存）
+    pub fn cache_from_optimize(&mut self, leaf_first_xpath: &str, prefix: &str, current_element_xpath: &str) {
+        if leaf_first_xpath.is_empty() {
+            return;
+        }
+        let full = format!("{}{}", prefix, leaf_first_xpath);
+        if full != current_element_xpath {
+            self.cached = Some(full);
+        }
+    }
+
+    /// 切换到 leaf-first 格式
+    /// 返回 leaf-first XPath 字符串，调用者负责设置 element_xpath
+    pub fn activate(&mut self, current_element_xpath: &str) {
+        self.using = true;
+        self.backup = Some(current_element_xpath.to_string());
+    }
+
+    /// 切换回标准格式
+    /// 返回备份的标准 XPath，调用者负责恢复 element_xpath
+    pub fn deactivate(&mut self) -> Option<String> {
+        let backup = self.backup.take();
+        self.using = false;
+        self.backup = None;
+        backup
+    }
+
+    /// Leaf-First 按钮是否可点击
+    pub fn can_toggle(&self, hierarchy_not_empty: bool) -> bool {
+        self.cached.is_some() || hierarchy_not_empty
+    }
+}
+
 // ─── App State ───────────────────────────────────────────────────────────────
 
 pub struct State {
@@ -159,6 +223,7 @@ pub struct State {
     pub xpath_error: Option<String>,
     pub xpath_source: XPathSource,
     pub search_mode: SearchMode,    // XPath 搜索模式后缀（:first / :onlyone / :all）
+    pub leaf_first: LeafFirstState,       // Leaf-First 格式状态（独立结构体，隔离逻辑）
 
     // Validation
     pub validation: ValidationResult,
@@ -247,22 +312,24 @@ impl State {
         let config = persistence::load_config();
 
         // Try to restore last capture, track source for status message
-        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled, capture_mode, result_index, search_mode, load_source) =
+        let (hierarchy, selected_node, xpath_text, window_selector, element_xpath, window_info, xpath_source, window_filters_enabled, capture_mode, result_index, search_mode, load_source, leaf_first_using, leaf_first_backup) =
             if let Some(json) = persistence::load_capture_json() {
                 match serde_json::from_str::<PersistedCapture>(&json) {
                     Ok(c) => {
                         let sm = c.search_mode.unwrap_or(SearchMode::All);
+                        let lfu = c.leaf_first_using.unwrap_or(false);
+                        let lfb = c.leaf_first_backup.clone();
                         let result = Self::restore_from_persisted(c);
-                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, sm, "loaded")
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, sm, "loaded", lfu, lfb)
                     }
                     Err(_) => {
                         let result = Self::mock_capture();
-                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "corrupt")
+                        (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "corrupt", false, None)
                     }
                 }
             } else {
                 let result = Self::mock_capture();
-                (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "empty")
+                (result.0, result.1, result.2, result.3, result.4, result.5, result.6, result.7, result.8, result.9, SearchMode::First, "empty", false, None)
             };
 
         let status_msg = match load_source {
@@ -290,6 +357,8 @@ impl State {
             (Vec::new(), false)
         };
 
+        let leaf_first_state = LeafFirstState { using: leaf_first_using, backup: leaf_first_backup, cached: None };
+
         let app = Self {
             active_tab: ElementTab::Element,
             show_code_dialog: false,
@@ -315,6 +384,7 @@ impl State {
             xpath_source,
             search_mode,
 
+            leaf_first: leaf_first_state,
             validation: ValidationResult::Idle,
             detailed_validation: None,
 
@@ -424,7 +494,14 @@ impl State {
         let result_index = c.result_index.unwrap_or_default();
         let xpath_text = c.xpath_text.clone();
         let (window_selector, element_xpath) = if let Some(comma_pos) = xpath_text.find(", ") {
-            (xpath_text[..comma_pos].to_string(), xpath_text[comma_pos + 2..].to_string())
+            let ws = xpath_text[..comma_pos].to_string();
+            let raw_exp = xpath_text[comma_pos + 2..].to_string();
+            // 去掉 search mode 后缀（:all/:onlyone/:first），search_mode 单独保存
+            let exp = raw_exp.trim_end_matches(":all")
+                .trim_end_matches(":onlyone")
+                .trim_end_matches(":first")
+                .to_string();
+            (ws, exp)
         } else {
             let capture_mode = c.capture_mode.unwrap_or(CaptureMode::Normal);
             let locate_mode = LocateMode::from_capture_mode(capture_mode, false);
@@ -461,6 +538,8 @@ impl State {
             result_index: if self.result_index.is_empty() { None } else { Some(self.result_index.clone()) },
             capture_mode: Some(self.capture_mode),
             search_mode: Some(self.search_mode),
+            leaf_first_using: Some(self.leaf_first.using),
+            leaf_first_backup: self.leaf_first.backup.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&data) {
             persistence::save_capture(&json);
@@ -506,6 +585,47 @@ impl State {
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation = ValidationResult::Idle;
         self.xpath_source = XPathSource::AutoGenerated;
+    }
+
+    /// 从缓存获取或按需计算 Leaf-First 格式的 XPath
+
+
+    fn get_or_compute_leaf_first_xpath(&mut self) -> Option<String> {
+        if let Some(ref cached) = self.leaf_first.cached {
+            log::info!("[Leaf-First] 使用缓存: {}", cached);
+            return Some(cached.clone());
+        }
+        // 按需计算：跑一次优化器，缓存结果
+        if self.hierarchy.is_empty() {
+            log::info!("[Leaf-First] hierarchy 为空，无法计算");
+            return None;
+        }
+        let optimizer = XPathOptimizer::new();
+        let result = optimizer.optimize(&self.hierarchy);
+        log::info!("[Leaf-First] optimize 结果: leaf_first='{}', current_xpath='{}'", result.leaf_first_xpath, self.element_xpath);
+        if result.leaf_first_xpath.is_empty() {
+            log::info!("[Leaf-First] leaf_first_xpath 为空");
+            return None;
+        }
+
+        let is_cross_process = self.search_context.as_ref()
+            .map(|ctx| ctx.locate_mode.is_child_mode())
+            .unwrap_or(false);
+        let locate_mode = LocateMode::from_capture_mode(self.capture_mode, is_cross_process);
+        let hint = self.search_context.as_ref()
+            .and_then(|ctx| ctx.child_hwnd_hint.as_ref());
+        let prefix = locate_mode.xpath_prefix_with_hint(hint);
+
+        let leaf_first_full = format!("{}{}", prefix, result.leaf_first_xpath);
+        log::info!("[Leaf-First] 完整路径: '{}', 当前: '{}', 是否相同: {}", leaf_first_full, self.element_xpath, leaf_first_full == self.element_xpath);
+        // 仅当与当前 XPath 不同时才缓存（避免无意义的切换）
+        if leaf_first_full != self.element_xpath {
+            self.leaf_first.cached = Some(leaf_first_full.clone());
+            Some(leaf_first_full)
+        } else {
+            log::info!("[Leaf-First] 与当前 XPath 相同，无需切换");
+            None
+        }
     }
 
     /// Apply result index and search mode suffix to element_xpath.
@@ -870,6 +990,10 @@ impl State {
         let prefix = locate_mode.xpath_prefix_with_hint(hint);
         self.window_selector = window_selector;
         self.element_xpath = format!("{}{}", prefix, result.optimized_xpath);
+        log::info!("[do_optimize] element_xpath 设为: '{}', optimized_xpath='{}', leaf_first_xpath='{}'", self.element_xpath, result.optimized_xpath, result.leaf_first_xpath);
+        self.leaf_first.reset();
+        // 缓存 leaf-first xpath（含前缀），避免切换时重复跑优化器
+        self.leaf_first.cache_from_optimize(&result.leaf_first_xpath, &prefix, &self.element_xpath);
         self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
         self.xpath_error = xpath::lint(&self.xpath_text);
         self.validation = ValidationResult::Idle;
@@ -978,6 +1102,7 @@ impl State {
             self.hierarchy = element_hierarchy;
             self.capture_state = CaptureState::Idle;
             self.xpath_source = XPathSource::AutoGenerated;
+            self.leaf_first.reset();
             self.validation = ValidationResult::Idle;
             self.detailed_validation = None;
             self.pending_highlight_rx = None;
@@ -1262,6 +1387,9 @@ impl State {
                                 .and_then(|ctx| ctx.child_hwnd_hint.as_ref());
                             let prefix = locate_mode.xpath_prefix_with_hint(hint);
                             self.element_xpath = format!("{}{}", prefix, opt_result.optimized_xpath);
+                            self.leaf_first.reset();
+                            // 缓存 leaf-first xpath（含前缀）
+                            self.leaf_first.cache_from_optimize(&opt_result.leaf_first_xpath, &prefix, &self.element_xpath);
                             self.xpath_text = format!("{}, {}", self.window_selector, self.final_element_xpath());
                             self.xpath_error = xpath::lint(&self.xpath_text);
                             self.validation = ValidationResult::Idle;
@@ -1543,6 +1671,8 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.xpath_text = format!("{}, {}", state.window_selector, state.final_element_xpath());
             state.xpath_error = xpath::lint(&state.xpath_text);
             state.validation = ValidationResult::Idle;
+            // 窗口选择器变更可能导致定位模式变化，重置 leaf-first 状态
+            state.leaf_first.reset();
         }
         Message::ElementXPathChanged(val) => {
             state.element_xpath = val;
@@ -1550,6 +1680,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.xpath_error = xpath::lint(&state.xpath_text);
             state.validation = ValidationResult::Idle;
             state.xpath_source = XPathSource::Manual;
+            state.leaf_first.reset();
         }
         Message::XPathTextInput(val) => {
             state.element_xpath = val;
@@ -1557,18 +1688,21 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.xpath_error = xpath::lint(&state.xpath_text);
             state.validation = ValidationResult::Idle;
             state.xpath_source = XPathSource::Manual;
+            state.leaf_first.reset();
         }
         Message::XPathSubmitted => {
             let msg = state.sync_xpath_to_tree();
             if msg.starts_with("已同步") || msg.starts_with("部分同步") {
                 state.xpath_source = XPathSource::AutoGenerated;
                 state.rebuild_xpath();
+                state.leaf_first.reset();
             }
             state.status_msg = msg;
         }
         Message::XPathRestorePressed => {
             state.xpath_source = XPathSource::AutoGenerated;
             state.rebuild_xpath();
+            state.leaf_first.reset();
             state.status_msg = "已恢复为自动生成的 XPath".to_string();
         }
         Message::XPathSyncPressed => {
@@ -1609,6 +1743,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if idx < state.hierarchy.len() {
                 state.hierarchy[idx].included = !state.hierarchy[idx].included;
                 state.rebuild_xpath();
+                state.leaf_first.reset();
             }
         }
         Message::FilterOperatorChanged(node_idx, filter_idx, op) => {
@@ -1620,6 +1755,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 }
                 filter.operator = op;
                 state.rebuild_xpath();
+                state.leaf_first.invalidate_cache();
             }
         }
         Message::FilterValueChanged(node_idx, filter_idx, val) => {
@@ -1631,18 +1767,21 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                     filter.enabled = false;
                 }
                 state.rebuild_xpath();
+                state.leaf_first.invalidate_cache();
             }
         }
         Message::FilterEnabledToggled(node_idx, filter_idx, enabled) => {
             if node_idx < state.hierarchy.len() && filter_idx < state.hierarchy[node_idx].filters.len() {
                 state.hierarchy[node_idx].filters[filter_idx].enabled = enabled;
                 state.rebuild_xpath();
+                state.leaf_first.invalidate_cache();
             }
         }
         Message::IncludeTogglePressed(idx) => {
             if idx < state.hierarchy.len() {
                 state.hierarchy[idx].included = !state.hierarchy[idx].included;
                 state.rebuild_xpath();
+                state.leaf_first.reset();
             }
         }
         Message::WindowFilterEnabled(idx, enabled) => {
@@ -1684,6 +1823,38 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 info!("[极简优化] 用户请求取消，已发送取消信号");
             }
         }
+        Message::ToggleLeafFirstFormat => {
+            if state.leaf_first.using {
+                // 切回标准格式
+                log::info!("[ToggleLeafFirst] 切回标准格式, using=true, backup={:?}", state.leaf_first.backup);
+                if let Some(backup) = state.leaf_first.deactivate() {
+                    log::info!("[ToggleLeafFirst] 恢复 element_xpath: '{}' → '{}'", state.element_xpath, backup);
+                    state.element_xpath = backup;
+                    state.xpath_text = format!("{}, {}", state.window_selector, state.final_element_xpath());
+                    state.xpath_error = xpath::lint(&state.xpath_text);
+                    state.validation = ValidationResult::Idle;
+                    state.status_msg = String::from("已切换为标准 XPath 格式");
+                    state.do_validate();
+                    state.save_to_file();
+                }
+            } else {
+                // 切到 Leaf-First 格式（优先用缓存，否则按需计算）
+                log::info!("[ToggleLeafFirst] 切到 Leaf-First, using=false, cached={:?}", state.leaf_first.cached);
+                if let Some(leaf_first) = state.get_or_compute_leaf_first_xpath() {
+                    log::info!("[ToggleLeafFirst] element_xpath: '{}' → '{}'", state.element_xpath, leaf_first);
+                    state.leaf_first.activate(&state.element_xpath);
+                    state.element_xpath = leaf_first;
+                    state.xpath_text = format!("{}, {}", state.window_selector, state.final_element_xpath());
+                    state.xpath_error = xpath::lint(&state.xpath_text);
+                    state.validation = ValidationResult::Idle;
+                    state.status_msg = String::from("已切换为 Leaf-First XPath 格式");
+                    state.do_validate();
+                    state.save_to_file();
+                } else {
+                    state.status_msg = String::from("当前 XPath 无法生成 Leaf-First 格式（可能已经是最简形式）");
+                }
+            }
+        }
         Message::SimilarSearchPressed => {
             if state.similar_samples.len() >= 2 {
                 state.start_common_search();
@@ -1717,6 +1888,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.xpath_error = xpath::lint(&state.xpath_text);
                 state.validation = ValidationResult::Idle;
                 state.xpath_source = XPathSource::Manual;
+                state.leaf_first.reset();
             }
         }
         Message::CopyAllCode => {
@@ -1740,9 +1912,15 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.xpath_text = xpath;
                 if let Some(comma_pos) = state.xpath_text.find(", ") {
                     state.window_selector = state.xpath_text[..comma_pos].to_string();
-                    state.element_xpath = state.xpath_text[comma_pos + 2..].to_string();
+                    let raw_exp = state.xpath_text[comma_pos + 2..].to_string();
+                    // 去掉 search mode 后缀（:all/:onlyone/:first）
+                    state.element_xpath = raw_exp.trim_end_matches(":all")
+                        .trim_end_matches(":onlyone")
+                        .trim_end_matches(":first")
+                        .to_string();
                 }
                 state.show_history_panel = false;
+                state.leaf_first.reset();
                 state.status_msg = format!("✓ 已加载历史: {}", name);
             }
         }
@@ -2394,11 +2572,26 @@ fn view_xpath_frame(state: &State) -> Element<'_, Message> {
     .spacing(4)
     .align_y(Alignment::Center);
 
+    // Leaf-First 格式切换按钮（独立于优化功能）
+    let leaf_first_btn = if state.leaf_first.using {
+        button("标准格式")
+            .padding([2, 8])
+            .on_press(Message::ToggleLeafFirstFormat)
+    } else {
+        // 有缓存或 hierarchy 非空时才可点击（按需计算）
+        let can_switch = state.leaf_first.can_toggle(!state.hierarchy.is_empty());
+        button("Leaf-First")
+            .padding([2, 8])
+            .on_press_maybe(if can_switch { Some(Message::ToggleLeafFirstFormat) } else { None })
+    };
+
     // 合并为底部控件行
     let bottom_controls = row![
         result_index_row,
         Space::new().width(Length::Fixed(16.0)),
         search_mode_row,
+        Space::new().width(Length::Fixed(16.0)),
+        leaf_first_btn,
     ]
     .spacing(4)
     .align_y(Alignment::Center);

@@ -151,8 +151,8 @@ fn search_descendants_via_control_view_impl(
                     progress.last_successful_step, remaining_xpath, elem_summary(&progress.last_element),
                     start.elapsed().as_millis());
 
-                // Try ItemContainerPattern first
-                if let Ok(Some(elem)) = try_item_container_search(window, xpath) {
+                // Try ItemContainerPattern first (use remaining_xpath from partial element)
+                if let Ok(Some(elem)) = try_item_container_search(&progress.last_element, &remaining_xpath) {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     log::info!("[Ctrl Desc] ✓ ItemContainerPattern found result ({}ms)", duration_ms);
                     let parts: Vec<&str> = xpath.split('/').filter(|s| !s.is_empty()).collect();
@@ -163,9 +163,9 @@ fn search_descendants_via_control_view_impl(
                 }
 
                 // TreeWalker from the partial element (narrowed scope — much faster than from root)
-                let duration_ms = start.elapsed().as_millis() as u64;
                 match search_descendants_via_control_walker(auto, &progress.last_element, &remaining_xpath) {
                     Ok((matches, segments)) if !matches.is_empty() => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
                         log::info!("[Ctrl Desc] ✓ TreeWalker from partial element found {} results ({}ms total)", matches.len(), duration_ms);
                         // Build full segment results: mark earlier steps as matched
                         let mut all_segments: Vec<SegmentValidationResult> = xpath_parts[..=progress.last_successful_step]
@@ -179,6 +179,7 @@ fn search_descendants_via_control_view_impl(
                         return Ok((matches, all_segments));
                     }
                     Ok((_, _segments)) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
                         log::info!("[Ctrl Desc] TreeWalker from partial element also found 0 results ({}ms total)", duration_ms);
                         // Fallback: try from root as last resort
                         match search_descendants_via_control_walker(auto, window, xpath) {
@@ -205,6 +206,7 @@ fn search_descendants_via_control_view_impl(
                             Ok((_, segs)) => return Ok((vec![], segs)),
                             Err(e2) => {
                                 log::warn!("[Ctrl Desc] TreeWalker from root also failed: {}", e2);
+                                let duration_ms = start.elapsed().as_millis() as u64;
                                 return Ok((vec![], vec![SegmentValidationResult::not_found(
                                     0, xpath.to_string(), "ControlTree", "Partial Chain and TreeWalker fallback failed", duration_ms,
                                 )]));

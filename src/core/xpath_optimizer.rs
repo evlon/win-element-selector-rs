@@ -33,6 +33,9 @@ pub struct OptimizationResult {
     pub optimized_xpath: String,
     /// 最小化 XPath（备选）
     pub minimal_xpath: String,
+    /// Leaf-First XPath：先定位叶子节点，再用 ancestor/parent 轴约束祖先
+    /// 适用于 Chrome WebView 等场景，UIA FindFirst 可能找不到中间层但能找到叶子
+    pub leaf_first_xpath: String,
     /// 优化后的 hierarchy（已修改 included 和 filters）
     pub optimized_hierarchy: Vec<HierarchyNode>,
 }
@@ -92,6 +95,7 @@ impl XPathOptimizer {
                 summary: OptimizationSummary::default(),
                 optimized_xpath: String::new(),
                 minimal_xpath: String::new(),
+                leaf_first_xpath: String::new(),
                 optimized_hierarchy: Vec::new(),
             };
         }
@@ -101,25 +105,71 @@ impl XPathOptimizer {
             .position(|n| n.is_target)
             .unwrap_or(hierarchy.len() - 1);  // 如果没标记，默认最后一个
         
-        // 2. 构建 XPath 节点列表：只包含 included 且在目标之前（或等于目标）的节点
+        // DEBUG: 打印 hierarchy 所有节点的 included/is_target 状态
+        log::info!("[优化 DEBUG] hierarchy 共 {} 个节点, original_target_index={}", hierarchy.len(), original_target_index);
+        for (i, n) in hierarchy.iter().enumerate() {
+            log::info!("[优化 DEBUG]   [{}] ctrl='{}' aid='{}' name='{}' included={} is_target={}", 
+                i, n.control_type, n.automation_id, n.name, n.included, n.is_target);
+        }
+        
+        // 2. 如果 is_target 节点被用户排除（included=false），则将有效目标降级为最后一个 included 节点
+        //    这允许用户通过取消勾选原始目标来"上移"定位目标
+        let effective_target_index = if original_target_index < hierarchy.len()
+            && !hierarchy[original_target_index].included
+        {
+            // is_target 被排除 → 找最后一个 included 节点作为有效目标
+            let last_included = hierarchy.iter().enumerate()
+                .rev()
+                .find(|(_, n)| n.included)
+                .map(|(i, _)| i);
+            if let Some(idx) = last_included {
+                log::info!("[优化] is_target 节点 [{}] 被用户排除，降级有效目标为 [{}]", original_target_index, idx);
+                idx
+            } else {
+                log::warn!("[优化] 没有任何 included 节点，无法优化");
+                return OptimizationResult {
+                    anchor_index: None,
+                    target_index: original_target_index,
+                    summary: OptimizationSummary::default(),
+                    optimized_xpath: String::new(),
+                    minimal_xpath: String::new(),
+                    leaf_first_xpath: String::new(),
+                    optimized_hierarchy: hierarchy.to_vec(),
+                };
+            }
+        } else {
+            original_target_index
+        };
+        
+        // 3. 构建 XPath 节点列表：只包含 included 且在有效目标之前（或等于有效目标）的节点
         //    记录每个 XPath 节点对应的原始 hierarchy 索引
         let xpath_nodes_with_indices: Vec<(usize, &HierarchyNode)> = hierarchy.iter()
             .enumerate()
-            .filter(|(i, n)| n.included && *i <= original_target_index)  // 只包含目标之前的 included 节点
+            .filter(|(i, n)| {
+                if !n.included {
+                    false
+                } else {
+                    *i <= effective_target_index
+                }
+            })
             .collect();
         
-        // 3. 检查目标节点是否在 XPath 列表中
+        log::info!("[优化 DEBUG] 过滤后 xpath_nodes 共 {} 个: {:?}", xpath_nodes_with_indices.len(),
+            xpath_nodes_with_indices.iter().map(|(i, n)| format!("[{}]={}", i, n.control_type)).collect::<Vec<_>>());
+        
+        // 4. 检查有效目标节点是否在 XPath 列表中
         let target_xpath_pos = xpath_nodes_with_indices.iter()
-            .position(|(orig_idx, _)| *orig_idx == original_target_index);
+            .position(|(orig_idx, _)| *orig_idx == effective_target_index);
         
         if target_xpath_pos.is_none() {
-            log::warn!("[优化] 目标节点不在 XPath 列表中（可能 included=false），无法优化");
+            log::warn!("[优化] 有效目标节点 [{}] 不在 XPath 列表中，无法优化", effective_target_index);
             return OptimizationResult {
                 anchor_index: None,
-                target_index: original_target_index,
+                target_index: effective_target_index,
                 summary: OptimizationSummary::default(),
                 optimized_xpath: String::new(),
                 minimal_xpath: String::new(),
+                leaf_first_xpath: String::new(),
                 optimized_hierarchy: hierarchy.to_vec(),
             };
         }
@@ -163,11 +213,11 @@ impl XPathOptimizer {
                     .and_then(|ai| xpath_nodes_with_indices.get(ai))
                     .map(|(orig_idx, _)| *orig_idx);
                 
-                // 7. 应用优化到原始 hierarchy（使用原始索引）
+                // 7. 应用优化到原始 hierarchy（使用有效目标索引）
                 let optimized_hierarchy = self.apply_optimization_to_hierarchy(
                     hierarchy,
                     original_anchor_index,
-                    original_target_index,
+                    effective_target_index,
                 );
                     
                 // 统计信息
@@ -188,6 +238,7 @@ impl XPathOptimizer {
                     //    - 锚点不是根节点或无锚点：用 // 开头（相对路径）
                     optimized_xpath: self.fix_xpath_prefix(&opt_result.anchor_relative, original_anchor_index),
                     minimal_xpath: opt_result.minimal,
+                    leaf_first_xpath: self.fix_xpath_prefix(&opt_result.leaf_first, None),
                     optimized_hierarchy,
                 }
             }
@@ -199,6 +250,7 @@ impl XPathOptimizer {
                     summary: OptimizationSummary::default(),
                     optimized_xpath: full_xpath.clone(),
                     minimal_xpath: full_xpath.clone(),
+                    leaf_first_xpath: full_xpath.clone(),
                     optimized_hierarchy: hierarchy.to_vec(),
                 }
             }
@@ -363,17 +415,42 @@ impl XPathOptimizer {
             .position(|n| n.is_target)
             .unwrap_or(hierarchy.len() - 1);
 
-        // 2. 构建 XPath 节点列表
+        // 2. 如果 is_target 节点被用户排除（included=false），降级为最后一个 included 节点
+        let effective_target_index = if original_target_index < hierarchy.len()
+            && !hierarchy[original_target_index].included
+        {
+            let last_included = hierarchy.iter().enumerate()
+                .rev()
+                .find(|(_, n)| n.included)
+                .map(|(i, _)| i);
+            if let Some(idx) = last_included {
+                log::info!("[极简优化] is_target 节点 [{}] 被用户排除，降级有效目标为 [{}]", original_target_index, idx);
+                idx
+            } else {
+                log::warn!("[极简优化] 没有任何 included 节点");
+                return None;
+            }
+        } else {
+            original_target_index
+        };
+
+        // 3. 构建 XPath 节点列表
         let xpath_nodes_with_indices: Vec<(usize, &HierarchyNode)> = hierarchy.iter()
             .enumerate()
-            .filter(|(i, n)| n.included && *i <= original_target_index)
+            .filter(|(i, n)| {
+                if !n.included {
+                    false
+                } else {
+                    *i <= effective_target_index
+                }
+            })
             .collect();
 
         let target_xpath_pos = xpath_nodes_with_indices.iter()
-            .position(|(orig_idx, _)| *orig_idx == original_target_index);
+            .position(|(orig_idx, _)| *orig_idx == effective_target_index);
 
         if target_xpath_pos.is_none() {
-            log::warn!("[极简优化] 目标节点不在 XPath 列表中");
+            log::warn!("[极简优化] 有效目标节点 [{}] 不在 XPath 列表中", effective_target_index);
             return None;
         }
 
@@ -461,7 +538,7 @@ impl XPathOptimizer {
                 let optimized_hierarchy = self.apply_minimal_optimization_to_hierarchy(
                     hierarchy,
                     &minimal_xpath,
-                    original_target_index,
+                    effective_target_index,
                 );
                 
                 // 7. 统计信息
@@ -480,10 +557,11 @@ impl XPathOptimizer {
                 
                 Some(OptimizationResult {
                     anchor_index: None, // 极简优化不强调锚点
-                    target_index: original_target_index,
+                    target_index: effective_target_index,
                     summary,
                     optimized_xpath: minimal_xpath.clone(),
-                    minimal_xpath,
+                    minimal_xpath: minimal_xpath.clone(),
+                    leaf_first_xpath: minimal_xpath, // 极简优化不生成 leaf-first，使用 minimal 作为 fallback
                     optimized_hierarchy,
                 })
             }
