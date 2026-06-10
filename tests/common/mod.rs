@@ -115,7 +115,7 @@ fn build_test_server(port: u16) -> actix_web::dev::Server {
 async fn health_check() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
-        "version": "1.0.0",
+        "version": "0.2.0",
         "service": "element-selector-server"
     }))
 }

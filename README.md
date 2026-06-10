@@ -245,7 +245,7 @@ POST /api/window/focus-element → 聚焦元素
 ### 健康检查
 
 ```
-GET /api/health → {"status": "ok", "version": "1.0.0"}
+GET /api/health → {"status": "ok", "version": "0.2.0"}
 ```
 
 ---

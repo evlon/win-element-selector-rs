@@ -43,7 +43,7 @@ struct Args {
 async fn health_check() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
-        "version": "1.0.0",
+        "version": "0.2.0",
         "service": "element-selector-server"
     }))
 }
