@@ -80,7 +80,11 @@ pub async fn get_element(
                     );
                     match data {
                         Some(d) => (true, Some(d), None::<String>),
-                        None => (false, None, Some("无法读取元素属性".to_string())),
+                        None => {
+                            // COM proxy 已失效（元素被销毁），自动清除缓存
+                            crate::core::element_cache::remove_cached_element(&rid);
+                            (false, None, Some("无法读取元素属性（缓存已清除）".to_string()))
+                        }
                     }
                 }
                 None => (false, None, Some(format!("元素不在缓存中: runtimeId={}", rid))),
@@ -255,7 +259,11 @@ pub async fn get_all_elements(
                     );
                     match data {
                         Some(d) => (true, vec![d], None::<String>),
-                        None => (false, vec![], Some("无法读取元素属性".to_string())),
+                        None => {
+                            // COM proxy 已失效（元素被销毁），自动清除缓存
+                            crate::core::element_cache::remove_cached_element(&rid);
+                            (false, vec![], Some("无法读取元素属性（缓存已清除）".to_string()))
+                        }
                     }
                 }
                 None => (false, vec![], Some(format!("元素不在缓存中: runtimeId={}", rid))),
@@ -558,7 +566,11 @@ pub async fn flash_element(body: web::Json<ElementFlashRequest>) -> impl Respond
                     );
                     match data {
                         Some(d) => (true, d.rect.map(|r| (r.x, r.y, r.width, r.height)), d.control_type, None::<String>),
-                        None => (false, None, String::new(), Some("无法读取元素属性".to_string())),
+                        None => {
+                            // COM proxy 已失效（元素被销毁），自动清除缓存
+                            crate::core::element_cache::remove_cached_element(&rid);
+                            (false, None, String::new(), Some("无法读取元素属性（缓存已清除）".to_string()))
+                        }
                     }
                 }
                 None => (false, None, String::new(), Some(format!("元素不在缓存中: runtimeId={}", rid))),
@@ -1140,7 +1152,11 @@ pub async fn refresh_by_runtime_id(
                 );
                 match data {
                     Some(d) => (true, Some(d), None),
-                    None => (false, None, Some("无法读取元素属性".to_string())),
+                    None => {
+                        // COM proxy 已失效（元素被销毁），自动清除缓存
+                        crate::core::element_cache::remove_cached_element(&runtime_id);
+                        (false, None, Some("无法读取元素属性（缓存已清除）".to_string()))
+                    }
                 }
             }
             None => (false, None, Some("元素不在缓存中".to_string())),
