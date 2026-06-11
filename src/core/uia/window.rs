@@ -13,12 +13,12 @@ pub fn exists_window_by_selector(window_selector: &str) -> bool {
     !windows.is_empty()
 }
 
-pub fn activate_window_by_selector(window_selector: &str) -> bool {
+pub fn activate_window_by_selector(window_selector: &str) -> Option<crate::core::model::WindowInfo> {
     debug!("Activating window: {}", window_selector);
     
     let auto = match get_automation() {
         Ok(a) => a,
-        Err(_) => return false,
+        Err(_) => return None,
     };
 
     // Find the window element(s)
@@ -27,12 +27,27 @@ pub fn activate_window_by_selector(window_selector: &str) -> bool {
         Some(w) => w,
         None => {
             error!("Window not found for activation: {}", window_selector);
-            return false;
+            return None;
         }
     };
 
     // Use SetFocus to activate the window (brings to foreground)
-    window_element.set_focus().ok().is_some()
+    if window_element.set_focus().is_err() {
+        return None;
+    }
+
+    // Extract window info from the activated element
+    let title = window_element.get_name().unwrap_or_default();
+    let class_name = window_element.get_classname().unwrap_or_default();
+    let process_id = window_element.get_process_id().unwrap_or(0);
+    let process_name = get_process_name_by_id(process_id);
+
+    Some(crate::core::model::WindowInfo {
+        title,
+        class_name,
+        process_id,
+        process_name,
+    })
 }
 
 pub fn activate_and_focus_element(window_selector: &str, xpath: &str) -> bool {
@@ -99,11 +114,11 @@ pub(super) fn find_window_by_selector(
     use std::time::Instant;
     
     let start = Instant::now();
-    let (expected_name, expected_class, expected_process) = parse_window_selector(window_selector);
+    let (expected_name, expected_class, expected_process, expected_process_id) = parse_window_selector(window_selector);
     
     // Fast path: EnumWindows + ElementFromHandle
     let fast_results = find_window_by_enum_windows(
-        auto, &expected_name, &expected_class, &expected_process,
+        auto, &expected_name, &expected_class, &expected_process, &expected_process_id,
     );
     if !fast_results.is_empty() {
         log::info!("[Window Search] EnumWindows fast path found {} window(s) in {}ms", 
@@ -115,7 +130,7 @@ pub(super) fn find_window_by_selector(
     
     // Fallback: UIA condition-based search
     let fallback_results = find_window_by_uia_condition(
-        auto, &expected_name, &expected_class, &expected_process,
+        auto, &expected_name, &expected_class, &expected_process, &expected_process_id,
     );
     log::info!("[Window Search] UIA fallback found {} window(s) in {}ms total", 
         fallback_results.len(), start.elapsed().as_millis());
@@ -128,6 +143,7 @@ fn find_window_by_enum_windows(
     expected_name: &Option<String>,
     expected_class: &Option<String>,
     expected_process: &Option<String>,
+    expected_process_id: &Option<u32>,
 ) -> Vec<UIElement> {
     // Collect matching HWNDs via EnumWindows callback
     let matched_hwnds: Vec<HWND> = enumerate_top_level_windows();
@@ -136,8 +152,19 @@ fn find_window_by_enum_windows(
         return vec![];
     }
 
+    // When processId is the only condition, we can skip UIA property reads entirely
+    let pid_only = expected_process_id.is_some()
+        && expected_name.is_none()
+        && expected_class.is_none()
+        && expected_process.is_none();
+
     // Create cache request to batch-prefetch Name + ClassName (2-3x faster)
-    let window_cache = create_window_cache_request(auto);
+    // Skip cache when pid_only — no property reads needed
+    let window_cache = if pid_only {
+        None
+    } else {
+        create_window_cache_request(auto)
+    };
 
     let mut results = Vec::new();
 
@@ -147,7 +174,17 @@ fn find_window_by_enum_windows(
             continue;
         }
 
-        // Check PID if ProcessName filter is specified
+        // Fastest filter: ProcessId via GetWindowThreadProcessId (pure Win32, zero UIA overhead)
+        // Must come before element_from_handle to avoid expensive UIA calls for non-matching windows
+        if let Some(expected_pid) = expected_process_id {
+            let mut pid: u32 = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid != *expected_pid {
+                continue;
+            }
+        }
+
+        // Check ProcessName (requires PID → process name lookup)
         if let Some(ref expected_proc) = expected_process {
             let mut pid: u32 = 0;
             unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -171,6 +208,12 @@ fn find_window_by_enum_windows(
                 Err(_) => continue,
             },
         };
+
+        // pid_only shortcut: no need to read Name/ClassName
+        if pid_only {
+            results.push(elem);
+            continue;
+        }
 
         // Verify Name condition
         if let Some(ref expected) = expected_name {
@@ -231,6 +274,7 @@ fn find_window_by_uia_condition(
     expected_name: &Option<String>,
     expected_class: &Option<String>,
     expected_process: &Option<String>,
+    expected_process_id: &Option<u32>,
 ) -> Vec<UIElement> {
     let desktop = match auto.get_root_element() {
         Ok(d) => d,
@@ -250,6 +294,14 @@ fn find_window_by_uia_condition(
     for win in &windows {
         let pid = win.get_process_id().unwrap_or(0);
         
+        // ProcessId direct match (fastest)
+        if let Some(expected_pid) = expected_process_id {
+            if pid != *expected_pid {
+                continue;
+            }
+        }
+        
+        // ProcessName match
         if let Some(ref expected_proc) = expected_process {
             let process_name = get_process_name_by_id(pid);
             if &process_name != expected_proc {
@@ -325,10 +377,11 @@ fn build_window_find_condition(
     }
 }
 
-fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>, Option<String>) {
+fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>, Option<String>, Option<u32>) {
     let mut name = None;
     let mut class = None;
     let mut process_name = None;
+    let mut process_id = None;
     
     // Extract content between [ and ]
     if let Some(start) = selector.find('[') {
@@ -358,10 +411,18 @@ fn parse_window_selector(selector: &str) -> (Option<String>, Option<String>, Opt
                     process_name = Some(predicates[start_pos..start_pos + end_pos].to_string());
                 }
             }
+            
+            // Parse @ProcessId='12345'
+            if let Some(pos) = predicates.find("@ProcessId='") {
+                let start_pos = pos + 12;
+                if let Some(end_pos) = predicates[start_pos..].find('\'') {
+                    process_id = predicates[start_pos..start_pos + end_pos].parse::<u32>().ok();
+                }
+            }
         }
     }
     
-    (name, class, process_name)
+    (name, class, process_name, process_id)
 }
 
 pub(super) fn find_content_root(auto: &UIAutomation, window: &UIElement) -> Option<UIElement> {

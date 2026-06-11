@@ -5,7 +5,7 @@
 use actix_web::{HttpResponse, Responder, web};
 use log::info;
 
-use super::types::WindowListResponse;
+use super::types::{WindowInfoResponse, WindowListResponse};
 
 /// POST /api/window/list
 /// 列出当前所有可用窗口
@@ -77,6 +77,8 @@ pub struct ActivateWindowResponse {
     #[serde(rename = "windowSelector")]
     pub window_selector: String,
     pub error: Option<String>,
+    #[serde(rename = "windowInfo")]
+    pub window_info: Option<WindowInfoResponse>,
 }
 
 /// POST /api/window/activate
@@ -86,16 +88,20 @@ pub async fn activate_window(req: web::Json<ActivateWindowRequest>) -> impl Resp
     
     let window_selector = req.window_selector.clone();
     
-    let success = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         crate::core::uia::activate_window_by_selector(&window_selector)
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or(None);
+    
+    let success = result.is_some();
+    let window_info = result.map(WindowInfoResponse::from);
     
     let response = ActivateWindowResponse {
         success,
         window_selector: req.window_selector.clone(),
         error: if success { None } else { Some("窗口未找到或激活失败".to_string()) },
+        window_info,
     };
     
     info!("Activate result: {}", success);

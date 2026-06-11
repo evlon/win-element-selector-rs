@@ -678,7 +678,7 @@ async fn click_via_mouse(
         // 确保窗口在前台
         info!("Activating window before click: {}", ws_for_click);
         let activated = super::super::core::uia::activate_window_by_selector(&ws_for_click);
-        if !activated {
+        if !activated.is_some() {
             warn!("Failed to activate window, but continuing...");
         }
 
