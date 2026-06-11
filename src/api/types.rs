@@ -412,17 +412,121 @@ impl Default for MouseClickOptions {
     }
 }
 
-/// 点击区域限制（按比例）
+/// ClickArea 边界值：支持像素、百分比（含负值/超1值）
+///
+/// - 正值 = 内缩（从该边向元素中心收缩）
+/// - 负值 = 外扩（从该边向元素外部扩展）
+///
+/// 支持格式：
+/// - 数字（0~1 比例，向后兼容）：`0.3` = `"30%"`
+/// - 像素字符串：`"10px"` / `"-5px"`
+/// - 百分比字符串：`"30%"` / `"-5%"`
+#[derive(Debug, Clone)]
+pub enum ClickAreaValue {
+    /// 像素值，如 "10px" → 10，"-5px" → -5
+    Pixels(f32),
+    /// 百分比值，如 "30%" → 0.3，"-5%" → -0.05
+    /// 数字 0.3 也映射为此变体（向后兼容）
+    Percent(f32),
+}
+
+impl<'de> serde::Deserialize<'de> for ClickAreaValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct ClickAreaValueVisitor;
+
+        impl<'de> Visitor<'de> for ClickAreaValueVisitor {
+            type Value = ClickAreaValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a number (0-1 ratio), a pixel string ('10px'), or a percent string ('30%')")
+            }
+
+            /// 数字 → Percent（向后兼容：0.3 = 30%）
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ClickAreaValue::Percent(v as f32))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ClickAreaValue::Percent(v as f32))
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ClickAreaValue::Percent(v as f32))
+            }
+
+            /// 字符串 → 解析 "10px" 或 "30%"
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let trimmed = v.trim();
+                if trimmed.ends_with("px") {
+                    let num = trimmed[..trimmed.len() - 2].trim();
+                    num.parse::<f32>()
+                        .map(ClickAreaValue::Pixels)
+                        .map_err(|_| de::Error::custom(format!("invalid pixel value: '{}'", v)))
+                } else if trimmed.ends_with('%') {
+                    let num = trimmed[..trimmed.len() - 1].trim();
+                    num.parse::<f32>()
+                        .map(|p| ClickAreaValue::Percent(p / 100.0))
+                        .map_err(|_| de::Error::custom(format!("invalid percent value: '{}'", v)))
+                } else {
+                    Err(de::Error::custom(format!(
+                        "expected number, '10px', or '30%', got: '{}'",
+                        v
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ClickAreaValueVisitor)
+    }
+}
+
+impl ClickAreaValue {
+    /// 根据元素维度解析为像素偏移量
+    pub fn resolve(&self, dimension: i32) -> f32 {
+        match self {
+            ClickAreaValue::Pixels(px) => *px as f32,
+            ClickAreaValue::Percent(pct) => *pct * dimension as f32,
+        }
+    }
+}
+
+/// 点击区域（Inset 模型）
+///
+/// 每个字段表示从元素对应边的**内缩量**（正值）或**外扩量**（负值）：
+/// - 正值：向元素中心方向收缩（内缩）
+/// - 负值：向元素外部方向扩展（外扩）
+///
+/// 支持格式：
+/// - 数字（0~1 比例，向后兼容）：`0.3` = `"30%"`
+/// - 像素字符串：`"10px"` / `"-5px"`
+/// - 百分比字符串：`"30%"` / `"-5%"`
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ClickArea {
-    /// 左侧排除比例（0-1），如 0.3 表示左侧 30% 区域不点击
-    pub left: Option<f32>,
-    /// 右侧排除比例（0-1），如 0.3 表示右侧 30% 区域不点击
-    pub right: Option<f32>,
-    /// 顶部排除比例（0-1）
-    pub top: Option<f32>,
-    /// 底部排除比例（0-1）
-    pub bottom: Option<f32>,
+    /// 左边内缩量（正=右移，负=左扩）
+    pub left: Option<ClickAreaValue>,
+    /// 右边内缩量（正=左移，负=右扩）
+    pub right: Option<ClickAreaValue>,
+    /// 顶边内缩量（正=下移，负=上扩）
+    pub top: Option<ClickAreaValue>,
+    /// 底边内缩量（正=上移，负=下扩）
+    pub bottom: Option<ClickAreaValue>,
 }
 
 /// 点击偏移配置
@@ -468,7 +572,7 @@ impl Default for ClickOffset {
 #[derive(Debug, Clone)]
 pub enum InsetValue {
     /// 像素值，如 50 表示 50px
-    Pixels(i32),
+    Pixels(f32),
     /// 百分比值，如 0.05 表示 5%
     Percent(f32),
 }
@@ -493,21 +597,21 @@ impl<'de> serde::Deserialize<'de> for InsetValue {
             where
                 E: de::Error,
             {
-                Ok(InsetValue::Pixels(v as i32))
+                Ok(InsetValue::Pixels(v as f32))
             }
 
             fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                Ok(InsetValue::Pixels(v as i32))
+                Ok(InsetValue::Pixels(v as f32))
             }
 
             fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                Ok(InsetValue::Pixels(v as i32))
+                Ok(InsetValue::Pixels(v as f32))
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -529,14 +633,14 @@ impl<'de> serde::Deserialize<'de> for InsetValue {
                 E: de::Error,
             {
                 // 允许 null → 默认 0px
-                Ok(InsetValue::Pixels(0))
+                Ok(InsetValue::Pixels(0.0))
             }
 
             fn visit_unit<E>(self) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                Ok(InsetValue::Pixels(0))
+                Ok(InsetValue::Pixels(0.0))
             }
         }
 
@@ -548,7 +652,7 @@ impl InsetValue {
     /// 将百分比值根据容器尺寸转换为像素
     pub fn resolve(&self, container_size: i32) -> i32 {
         match self {
-            InsetValue::Pixels(px) => *px,
+            InsetValue::Pixels(px) => px.round() as i32,
             InsetValue::Percent(pct) => (*pct * container_size as f32).round() as i32,
         }
     }
@@ -890,6 +994,51 @@ pub struct MouseDragResponse {
     pub source_point: Point,
     pub target_point: Point,
     pub duration_ms: u64,
+    pub error: Option<String>,
+}
+
+/// 坐标点击选项
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ClickAtOptions {
+    /// 是否启用拟人化移动，默认 true
+    #[serde(default = "default_humanize")]
+    pub humanize: bool,
+    /// 移动持续时间（毫秒），默认 500
+    #[serde(default = "default_move_duration")]
+    pub duration: u64,
+    /// 点击按钮类型: "left" | "right"，默认 "left"
+    #[serde(default = "default_button")]
+    pub button: String,
+    /// 点击前停顿（毫秒）
+    #[serde(default)]
+    pub pause_before: u64,
+    /// 点击后停顿（毫秒）
+    #[serde(default)]
+    pub pause_after: u64,
+}
+
+fn default_move_duration() -> u64 { 500 }
+
+/// 坐标点击请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClickAtRequest {
+    /// 点击坐标 X
+    pub x: i32,
+    /// 点击坐标 Y
+    pub y: i32,
+    /// 窗口选择器（用于激活窗口，可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowSelectorOrString>,
+    /// 选项
+    #[serde(default)]
+    pub options: Option<ClickAtOptions>,
+}
+
+/// 坐标点击响应
+#[derive(Debug, Clone, Serialize)]
+pub struct ClickAtResponse {
+    pub success: bool,
+    pub click_point: Point,
     pub error: Option<String>,
 }
 

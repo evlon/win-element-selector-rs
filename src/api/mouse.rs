@@ -12,6 +12,7 @@ use super::types::{
     MouseHoverRequest, MouseHoverResponse, MouseHoverOptions,
     MouseDragRequest, MouseDragResponse, MouseDragOptions,
     MouseScrollDetectRequest, MouseScrollDetectResponse,
+    ClickAtRequest, ClickAtResponse, ClickAtOptions,
     ViewportInset,
     Point,
 };
@@ -914,29 +915,38 @@ fn calculate_offset_click_point(
     };
     
     // Step 2: 与 visibleRect 求交集（二次校验）
-    let (final_left, final_right, final_top, final_bottom) = if let Some(ref vr) = visible_rect {
-        let vr_left = vr.x as f32;
-        let vr_right = (vr.x + vr.width) as f32;
-        let vr_top = vr.y as f32;
-        let vr_bottom = (vr.y + vr.height) as f32;
-        
-        // 求交集
-        let intersect_left = base_left.max(vr_left);
-        let intersect_right = base_right.min(vr_right);
-        let intersect_top = base_top.max(vr_top);
-        let intersect_bottom = base_bottom.min(vr_bottom);
-        
-        // 检查交集是否有效
-        if intersect_right > intersect_left && intersect_bottom > intersect_top {
-            (intersect_left, intersect_right, intersect_top, intersect_bottom)
+    // 注意：clickArea 是用户主动指定的点击区域（可能包含 outset/负值，即元素外部），
+    // 不应与 visibleRect 求交集，否则外部区域会被裁掉导致回退到元素本身。
+    // 只有 offset/randomRange 自动计算的区域才需要求交集确保可见性。
+    let use_click_area = options.click_area.is_some();
+    let (final_left, final_right, final_top, final_bottom) = if !use_click_area {
+        if let Some(ref vr) = visible_rect {
+            let vr_left = vr.x as f32;
+            let vr_right = (vr.x + vr.width) as f32;
+            let vr_top = vr.y as f32;
+            let vr_bottom = (vr.y + vr.height) as f32;
+            
+            // 求交集
+            let intersect_left = base_left.max(vr_left);
+            let intersect_right = base_right.min(vr_right);
+            let intersect_top = base_top.max(vr_top);
+            let intersect_bottom = base_bottom.min(vr_bottom);
+            
+            // 检查交集是否有效
+            if intersect_right > intersect_left && intersect_bottom > intersect_top {
+                (intersect_left, intersect_right, intersect_top, intersect_bottom)
+            } else {
+                // 交集为空，说明 offset 指定的区域完全不可见
+                log::warn!("Offset region has no intersection with visibleRect, using visibleRect as fallback");
+                // 降级：直接在 visibleRect 内随机
+                (vr_left, vr_right, vr_top, vr_bottom)
+            }
         } else {
-            // 交集为空，说明 offset 指定的区域完全不可见
-            log::warn!("Offset region has no intersection with visibleRect, using visibleRect as fallback");
-            // 降级：直接在 visibleRect 内随机
-            (vr_left, vr_right, vr_top, vr_bottom)
+            // 无 visibleRect 信息，直接使用基准区域
+            (base_left, base_right, base_top, base_bottom)
         }
     } else {
-        // 无 visibleRect 信息，直接使用基准区域
+        // clickArea: 信任用户指定的区域，不做交集裁剪
         (base_left, base_right, base_top, base_bottom)
     };
     
@@ -955,17 +965,27 @@ fn calculate_offset_click_point(
     Ok(Point::new(x, y))
 }
 
-/// 辅助函数：计算 clickArea 的有效边界
+/// 辅助函数：计算 clickArea 的有效边界（Inset 模型）
+///
+/// Inset 模型：每个字段表示从元素对应边的内缩量（正值）或外扩量（负值）
+/// - eff_left   = rect.x + left_inset
+/// - eff_right  = (rect.x + rect.width) - right_inset
+/// - eff_top    = rect.y + top_inset
+/// - eff_bottom = (rect.y + rect.height) - bottom_inset
 fn calculate_effective_bounds(rect: &super::types::Rect, area: &super::types::ClickArea) -> (f32, f32, f32, f32) {
-    let left = area.left.unwrap_or(0.0);
-    let right = area.right.unwrap_or(0.0);
-    let top = area.top.unwrap_or(0.0);
-    let bottom = area.bottom.unwrap_or(0.0);
+    let left_inset = area.left.as_ref()
+        .map(|v| v.resolve(rect.width)).unwrap_or(0.0);
+    let right_inset = area.right.as_ref()
+        .map(|v| v.resolve(rect.width)).unwrap_or(0.0);
+    let top_inset = area.top.as_ref()
+        .map(|v| v.resolve(rect.height)).unwrap_or(0.0);
+    let bottom_inset = area.bottom.as_ref()
+        .map(|v| v.resolve(rect.height)).unwrap_or(0.0);
 
-    let eff_left = rect.x as f32 + rect.width as f32 * left;
-    let eff_right = rect.x as f32 + rect.width as f32 * (1.0 - right);
-    let eff_top = rect.y as f32 + rect.height as f32 * top;
-    let eff_bottom = rect.y as f32 + rect.height as f32 * (1.0 - bottom);
+    let eff_left   = rect.x as f32 + left_inset;
+    let eff_right  = (rect.x + rect.width) as f32 - right_inset;
+    let eff_top    = rect.y as f32 + top_inset;
+    let eff_bottom = (rect.y + rect.height) as f32 - bottom_inset;
     (eff_left, eff_right, eff_top, eff_bottom)
 }
 
@@ -1929,6 +1949,72 @@ pub async fn hover_mouse(body: web::Json<MouseHoverRequest>) -> impl Responder {
             }
         }
     }
+}
+
+/// POST /api/mouse/click-at
+/// 在指定屏幕坐标点击（移动 + 点击一步完成）
+pub async fn click_at_coordinate(body: web::Json<ClickAtRequest>) -> impl Responder {
+    let request = body.into_inner();
+    let options = request.options.unwrap_or(ClickAtOptions::default());
+
+    let click_point = Point::new(request.x, request.y);
+    let button = options.button.clone();
+
+    info!(
+        "API: /api/mouse/click-at x={} y={} humanize={} duration={}ms button={}",
+        request.x, request.y, options.humanize, options.duration, button
+    );
+
+    // 可选：激活窗口
+    if let Some(ref win) = request.window {
+        let ws = build_window_selector(win);
+        let _ = super::super::core::uia::activate_window_by_selector(&ws);
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // 点击前停顿
+    if options.pause_before > 0 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(options.pause_before)).await;
+    }
+
+    with_auto_pause(|| async {
+        // 移动鼠标到目标位置
+        let start = mouse_control::get_cursor_position();
+        if options.humanize {
+            let _ = mouse_control::humanized_move(start, click_point, options.duration, "bezier");
+        } else {
+            let _ = mouse_control::linear_move(start, click_point);
+        }
+
+        // 执行点击
+        let click_result = if button == "right" {
+            mouse_control::right_click_at(click_point)
+        } else {
+            mouse_control::click_at(click_point)
+        };
+
+        match click_result {
+            Ok(()) => {
+                // 点击后停顿
+                if options.pause_after > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(options.pause_after)).await;
+                }
+
+                HttpResponse::Ok().json(ClickAtResponse {
+                    success: true,
+                    click_point,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                HttpResponse::Ok().json(ClickAtResponse {
+                    success: false,
+                    click_point,
+                    error: Some(format!("点击失败: {}", e)),
+                })
+            }
+        }
+    }).await
 }
 
 /// POST /api/mouse/drag
