@@ -1445,6 +1445,35 @@ impl State {
                         Some(detailed_result) => {
                             self.detailed_validation = Some(detailed_result.clone());
                             self.validation = detailed_result.overall.clone();
+                            // 校验成功后，用最新元素属性刷新 hierarchy 中目标节点
+                            if let Some(ref new_node) = detailed_result.target_node {
+                                if let Some(target_idx) = self.hierarchy.iter().position(|n| n.is_target) {
+                                    let target = &mut self.hierarchy[target_idx];
+                                    // 更新属性值（保留用户编辑的 filters、included 等字段）
+                                    target.control_type = new_node.control_type.clone();
+                                    target.automation_id = new_node.automation_id.clone();
+                                    target.class_name = new_node.class_name.clone();
+                                    target.name = new_node.name.clone();
+                                    target.framework_id = new_node.framework_id.clone();
+                                    target.localized_control_type = new_node.localized_control_type.clone();
+                                    target.help_text = new_node.help_text.clone();
+                                    target.is_enabled = new_node.is_enabled;
+                                    target.is_offscreen = new_node.is_offscreen;
+                                    target.is_password = new_node.is_password;
+                                    target.accelerator_key = new_node.accelerator_key.clone();
+                                    target.access_key = new_node.access_key.clone();
+                                    target.item_type = new_node.item_type.clone();
+                                    target.item_status = new_node.item_status.clone();
+                                    target.rect = new_node.rect.clone();
+                                    target.process_id = new_node.process_id;
+                                    target.is_checkable = new_node.is_checkable;
+                                    target.is_clickable = new_node.is_clickable;
+                                    target.is_scrollable = new_node.is_scrollable;
+                                    target.is_checked = new_node.is_checked;
+                                    log::info!("[Validation] Refreshed target node properties: name='{}' rect=({},{},{}x{})",
+                                        target.name, target.rect.x, target.rect.y, target.rect.width, target.rect.height);
+                                }
+                            }
                             // 统一用 MultiHighlightManager 高亮所有匹配元素（不自动消失）
                             if let ValidationResult::Found { ref rects, .. } = detailed_result.overall {
                                 if !rects.is_empty() {

@@ -1395,6 +1395,8 @@ pub struct DetailedValidationResult {
     pub is_offscreen: Option<bool>,
     /// 校验失败原因（当 overall = NotFound 时有值）
     pub not_found_reason: Option<NotFoundReason>,
+    /// 校验成功时，第一个匹配元素的最新属性（用于刷新属性面板）
+    pub target_node: Option<HierarchyNode>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

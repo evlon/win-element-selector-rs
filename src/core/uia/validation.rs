@@ -33,6 +33,7 @@ pub fn validate_xpath(
                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                 is_offscreen: None,
                 not_found_reason: None,
+                target_node: None,
             };
         }
     };
@@ -56,6 +57,7 @@ pub fn validate_xpath(
             total_duration_ms: total_start.elapsed().as_millis() as u64,
             is_offscreen: None,
             not_found_reason: Some(NotFoundReason::WindowNotFound),
+            target_node: None,
         };
     }
     
@@ -165,6 +167,7 @@ pub fn validate_xpath(
                     not_found_reason: Some(NotFoundReason::ChildHwndNotFound {
                         class: hint_class,
                     }),
+                    target_node: None,
                 };
             }
 
@@ -218,6 +221,8 @@ pub fn validate_xpath(
                             let is_offscreen = Some(results[0].is_offscreen().unwrap_or(false));
 
                             let layers: Vec<LayerValidationResult> = Vec::new();
+                            // 读取目标元素最新属性用于刷新属性面板
+                            let target_node = element_to_node(&results[0], &auto);
                             log::info!("[PERF][CHILD] ✓ Total child mode: {}ms", child_start.elapsed().as_millis());
                             return DetailedValidationResult {
                                 overall,
@@ -226,6 +231,7 @@ pub fn validate_xpath(
                                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                                 is_offscreen,
                                 not_found_reason: None,
+                                target_node,
                             };
                         }
                     }
@@ -243,6 +249,7 @@ pub fn validate_xpath(
             total_duration_ms: total_start.elapsed().as_millis() as u64,
             is_offscreen: None,
             not_found_reason: Some(NotFoundReason::ElementGone),
+            target_node: None,
         };
     }
     // ── End child mode ──
@@ -368,6 +375,7 @@ pub fn validate_xpath(
                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                 is_offscreen: None,
                 not_found_reason: None,
+                target_node: None,
             };
         }
     };
@@ -494,6 +502,13 @@ pub fn validate_xpath(
         _ => None,
     };
 
+    // 读取目标元素最新属性用于刷新属性面板
+    let target_node = if !results.is_empty() {
+        element_to_node(&results[0], &auto)
+    } else {
+        None
+    };
+
     DetailedValidationResult {
         overall,
         segments,
@@ -501,6 +516,7 @@ pub fn validate_xpath(
         total_duration_ms: total_start.elapsed().as_millis() as u64,
         is_offscreen,
         not_found_reason,
+        target_node,
     }
 }
 
