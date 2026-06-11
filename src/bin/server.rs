@@ -17,7 +17,7 @@ use element_selector::api::{element, mouse, window, idle_motion, keyboard};
 /// 调试日志：设置环境变量 RUST_LOG=debug 查看详细日志
 #[derive(Parser, Debug)]
 #[command(name = "element-selector-server")]
-#[command(version = "1.0.0")]
+#[command(version = env!("BUILD_VERSION"))]
 #[command(about = "Windows UI Automation HTTP 服务", long_about = None)]
 struct Args {
     /// 绑定的 IP 地址
@@ -43,7 +43,7 @@ struct Args {
 async fn health_check() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "status": "ok",
-        "version": "0.2.0",
+        "version": env!("BUILD_VERSION"),
         "service": "element-selector-server"
     }))
 }
