@@ -1461,10 +1461,10 @@ pub fn find_elements_by_xpath(
             break;
         }
         
-        if is_absolute_xpath {
+        if is_child_mode && is_absolute_xpath {
             let win_class = window.get_classname().unwrap_or_default();
             if is_webview_class(&win_class) {
-                log::info!("[Find All] Skipping WebView window '{}' for absolute XPath (children under child HWNDs)", win_class);
+                log::info!("[Find All] Skipping WebView window '{}' for absolute XPath in child mode (children under child HWNDs)", win_class);
                 continue;
             }
         }
