@@ -22,6 +22,7 @@ use windows::{
             BeginPaint, DeleteObject, EndPaint, GetStockObject,
             PAINTSTRUCT, SelectObject, Rectangle, TextOutW,
             CreateSolidBrush, GetTextExtentPoint32W, DEFAULT_GUI_FONT,
+            InvalidateRect,
         },
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -30,7 +31,7 @@ use windows::{
             HWND_TOPMOST, WM_DESTROY, WM_PAINT, WM_CLOSE, WNDCLASSEXW,
             WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, WS_EX_NOACTIVATE,
             WS_EX_TOOLWINDOW,
-            WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW,
+            WS_POPUP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOW, SW_HIDE,
             SetLayeredWindowAttributes, LWA_COLORKEY, GetClientRect,
             SetWindowLongPtrW,
             GetWindowLongPtrW, GWLP_USERDATA,
@@ -181,11 +182,50 @@ impl MultiHighlightManager {
         }
     }
 
-    /// 更新某个高亮框的位置
+    /// 更新某个高亮框的位置（销毁+重建，较慢）
     #[allow(dead_code)]
     pub fn update(&mut self, id: &str, rect: &ElementRect, label: &str) {
         self.remove(id);
         self.add(id, rect, label);
+    }
+
+    /// 快速移动高亮框到新位置（用 SetWindowPos，亚毫秒级，无需销毁重建）
+    /// 如果 rect 无效（width <= 0 或 height <= 0），则隐藏高亮框
+    /// 返回 true 表示该 id 存在（无论移动还是隐藏），false 表示该 id 不存在
+    pub fn reposition(&mut self, id: &str, rect: &ElementRect) -> bool {
+        if let Some(windows) = self.highlights.get(id) {
+            // rect 无效（offscreen / 退化矩形）→ 隐藏高亮框
+            if rect.width <= 0 || rect.height <= 0 {
+                unsafe {
+                    let _ = ShowWindow(windows.border_hwnd, SW_HIDE);
+                    let _ = ShowWindow(windows.label_hwnd, SW_HIDE);
+                }
+                return true;
+            }
+            let (label_width, label_height) = estimate_label_size(&windows.label_text);
+            unsafe {
+                // 移动边框窗口
+                let _ = SetWindowPos(
+                    windows.border_hwnd,
+                    Some(HWND_TOPMOST),
+                    rect.x, rect.y, rect.width, rect.height,
+                    SWP_SHOWWINDOW,
+                );
+                // 移动标签窗口
+                let _ = SetWindowPos(
+                    windows.label_hwnd,
+                    Some(HWND_TOPMOST),
+                    rect.x, rect.y - label_height, label_width, label_height,
+                    SWP_SHOWWINDOW,
+                );
+                // 强制重绘
+                let _ = InvalidateRect(Some(windows.border_hwnd), None, true);
+                let _ = InvalidateRect(Some(windows.label_hwnd), None, true);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// 获取活跃的高亮框数量

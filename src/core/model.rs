@@ -63,6 +63,30 @@ impl std::fmt::Display for CaptureMode {
     }
 }
 
+// ─── ValidationMode ─────────────────────────────────────────────────────────
+
+/// 校验模式 — 用户选择，2种
+///
+/// - `Validate`：仅校验 XPath 是否能定位到元素
+/// - `ValidateAndRefresh`：校验 + 刷新整条层级路径的属性（位置、宽高等）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationMode {
+    /// 仅校验：验证 XPath 是否能定位到元素
+    #[default]
+    Validate,
+    /// 校验更新：校验 + 刷新整条层级路径的属性
+    ValidateAndRefresh,
+}
+
+impl std::fmt::Display for ValidationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationMode::Validate => write!(f, "校验"),
+            ValidationMode::ValidateAndRefresh => write!(f, "校验更新"),
+        }
+    }
+}
+
 // ─── LocateMode ──────────────────────────────────────────────────────────────
 
 /// 定位模式 — 由捕获模式 + 是否跨进程自动决定，4种
@@ -1094,6 +1118,29 @@ impl HierarchyNode {
         // IsOffscreen 不生成过滤器，原因见上方注释
     }
 
+    /// 用另一个节点的属性值同步本节点 filters 的 value（保留 operator、enabled 等用户编辑）
+    /// 用于校验成功后刷新属性面板中显示的值
+    pub fn sync_filter_values_from(&mut self, other: &HierarchyNode) {
+        for filter in &mut self.filters {
+            let new_val = match filter.name.as_str() {
+                "AutomationId" => other.automation_id.clone(),
+                "ClassName" => other.class_name.clone(),
+                "Name" => other.name.clone(),
+                "FrameworkId" => other.framework_id.clone(),
+                "HelpText" => other.help_text.clone(),
+                "AcceleratorKey" => other.accelerator_key.clone(),
+                "AccessKey" => other.access_key.clone(),
+                "ItemType" => other.item_type.clone(),
+                "ItemStatus" => other.item_status.clone(),
+                "IsPassword" => if other.is_password { "true".into() } else { "false".into() },
+                "IsEnabled" => if other.is_enabled { "true".into() } else { "false".into() },
+                // Index、IsOffscreen 等不从元素属性同步
+                _ => continue,
+            };
+            filter.value = new_val;
+        }
+    }
+
     /// XPath tag name derived from ControlType.
     pub fn tag(&self) -> &str {
         if self.control_type.is_empty() { "*" } else { &self.control_type }
@@ -1395,8 +1442,11 @@ pub struct DetailedValidationResult {
     pub is_offscreen: Option<bool>,
     /// 校验失败原因（当 overall = NotFound 时有值）
     pub not_found_reason: Option<NotFoundReason>,
-    /// 校验成功时，第一个匹配元素的最新属性（用于刷新属性面板）
-    pub target_node: Option<HierarchyNode>,
+    /// 校验成功时，整条层级路径上每个元素的最新属性（用于刷新属性面板）
+    /// 索引与 hierarchy 对应，长度可能小于 hierarchy（祖先链短于层级时缺失的用 None 占位）
+    pub hierarchy_refresh: Vec<Option<HierarchyNode>>,
+    /// 校验成功时，找到的 UIElement 对象（用于高亮追踪，不会跨序列化边界）
+    pub found_elements: Vec<uiautomation::core::UIElement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

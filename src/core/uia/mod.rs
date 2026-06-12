@@ -25,6 +25,7 @@ pub use uiautomation::variants::Variant;
 
 // Re-export windows-rs types still needed for non-UIA Win32 APIs
 pub use windows::Win32::Foundation::{HWND, POINT, RECT, LPARAM};
+pub use windows::Win32::UI::Accessibility::IUIAutomationElement;
 pub use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClientRect, GetCursorPos, GetWindowThreadProcessId,
     IsWindowVisible,

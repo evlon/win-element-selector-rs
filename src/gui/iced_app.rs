@@ -23,7 +23,7 @@ use log::info;
 
 use element_selector::core::model::{
     AppConfig, DetailedValidationResult, ElementTab, HistoryEntry,
-    HierarchyNode, LocateMode, Operator, PropertyFilter, SearchMode, ValidationResult, WindowInfo,
+    HierarchyNode, LocateMode, Operator, PropertyFilter, SearchMode, ValidationResult, ValidationMode, WindowInfo,
     SimilarElementSample,
 };
 use element_selector::core::xpath;
@@ -46,6 +46,9 @@ use super::capture_overlay::CaptureOverlay;
 pub enum Message {
     // Top bar
     ValidatePressed,
+    ValidateActionSelected(ValidationMode),
+    ValidateMenuToggled,
+    ValidateMenuDismissed,
     CapturePressed,
     CaptureActionSelected(CaptureMode),
     CaptureMenuToggled,
@@ -121,6 +124,9 @@ pub enum Message {
     ForceRefreshHighlight,
     CodeEdited(text_editor::Action),
     XPathEdited(text_editor::Action),
+
+    // Highlight tracking（校验后高亮框追踪元素位置变化）
+    HighlightRectUpdate { index: usize, rect: element_selector::core::model::ElementRect },
 }
 
 // ─── Pane grid content type ──────────────────────────────────────────────────
@@ -228,6 +234,8 @@ pub struct State {
     // Validation
     pub validation: ValidationResult,
     pub detailed_validation: Option<DetailedValidationResult>,
+    pub validation_mode: ValidationMode,
+    pub validation_menu_open: bool,
 
     // Capture
     pub capture_state: CaptureState,
@@ -281,6 +289,10 @@ pub struct State {
     pub validation_in_progress: std::sync::Arc<AtomicBool>,
     pub validation_rx: Option<std::sync::mpsc::Receiver<Option<DetailedValidationResult>>>,
     pub validation_start_time: Option<Instant>,
+
+    // Highlight tracking（校验成功后追踪元素位置变化）
+    pub highlight_track_rx: Option<std::sync::mpsc::Receiver<Vec<(usize, element_selector::core::model::ElementRect)>>>,
+    pub highlight_track_running: std::sync::Arc<AtomicBool>,
 
     // Highlight async
     pub pending_highlight_rx: Option<std::sync::mpsc::Receiver<element_selector::core::uia::HighlightPhase>>,
@@ -387,6 +399,8 @@ impl State {
             leaf_first: leaf_first_state,
             validation: ValidationResult::Idle,
             detailed_validation: None,
+            validation_mode: ValidationMode::default(),
+            validation_menu_open: false,
 
             capture_state: CaptureState::Idle,
             capture_mode,
@@ -437,6 +451,9 @@ impl State {
             validation_in_progress: std::sync::Arc::new(AtomicBool::new(false)),
             validation_rx: None,
             validation_start_time: None,
+
+            highlight_track_rx: None,
+            highlight_track_running: std::sync::Arc::new(AtomicBool::new(false)),
 
             pending_highlight_rx: None,
             cached_hover_result: None,
@@ -814,6 +831,7 @@ impl State {
         self.last_highlighted_element_id = None;
         self.cached_hover_result = None;
         self.last_highlight_rect = None;
+        self.stop_highlight_tracking();  // 进入捕获时停止高亮追踪
         self.capture_state = CaptureState::WaitingClick {
             deadline: Instant::now() + Duration::from_secs(30),
         };
@@ -828,6 +846,7 @@ impl State {
             manager.clear();
         }
         self.multi_highlight_create_time = None;
+        self.stop_highlight_tracking();  // 停止高亮追踪
         input_hook::deactivate_capture();
         self.overlay.hide();
         self.capture_state = CaptureState::Idle;
@@ -848,6 +867,7 @@ impl State {
     }
 
     fn complete_capture(&mut self) {
+        self.stop_highlight_tracking();  // 捕获完成时停止高亮追踪
         if let CaptureState::WaitingClick { .. } = self.capture_state {
             // 优先使用悬停缓存（和 Ctrl+左键确认捕获一样）
             if let Some(cached) = self.cached_hover_result.take() {
@@ -924,6 +944,9 @@ impl State {
             log::info!("[Validation] Cancelling previous validation before starting new one");
         }
 
+        // 停止旧的追踪
+        self.stop_highlight_tracking();
+
         // 清除旧的高亮
         if let Some(ref mut manager) = self.multi_highlight_manager {
             manager.clear();
@@ -946,13 +969,29 @@ impl State {
         self.validation_rx = Some(rx);
         self.validation_start_time = Some(Instant::now());
         in_progress.store(true, Ordering::SeqCst);
+
+        // 追踪通道：校验成功后，线程继续运行追踪元素位置变化
+        let (track_tx, track_rx) = std::sync::mpsc::channel();
+        self.highlight_track_rx = Some(track_rx);
+        let track_running = self.highlight_track_running.clone();
+        track_running.store(false, Ordering::SeqCst);
+
         std::thread::spawn(move || {
-            let result = uia::validate_xpath(
-                &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None, true,
+            run_validate_and_track(
+                window_selector, element_xpath, hierarchy, search_context,
+                tx, in_progress,
+                track_tx, track_running,
             );
-            let _ = tx.send(Some(result));
-            in_progress.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// 停止高亮追踪
+    fn stop_highlight_tracking(&mut self) {
+        if self.highlight_track_running.load(Ordering::SeqCst) {
+            self.highlight_track_running.store(false, Ordering::SeqCst);
+            log::info!("[HighlightTrack] Stopping highlight tracking by request");
+        }
+        self.highlight_track_rx = None;
     }
 
     /// 取消正在进行的校验
@@ -963,6 +1002,8 @@ impl State {
         self.validation_start_time = None;
         self.validation = ValidationResult::Idle;
         self.status_msg = String::from("已取消校验");
+        // 停止高亮追踪
+        self.stop_highlight_tracking();
         log::info!("[Validation] Cancelled by user");
     }
 
@@ -1445,34 +1486,41 @@ impl State {
                         Some(detailed_result) => {
                             self.detailed_validation = Some(detailed_result.clone());
                             self.validation = detailed_result.overall.clone();
-                            // 校验成功后，用最新元素属性刷新 hierarchy 中目标节点
-                            if let Some(ref new_node) = detailed_result.target_node {
-                                if let Some(target_idx) = self.hierarchy.iter().position(|n| n.is_target) {
-                                    let target = &mut self.hierarchy[target_idx];
-                                    // 更新属性值（保留用户编辑的 filters、included 等字段）
-                                    target.control_type = new_node.control_type.clone();
-                                    target.automation_id = new_node.automation_id.clone();
-                                    target.class_name = new_node.class_name.clone();
-                                    target.name = new_node.name.clone();
-                                    target.framework_id = new_node.framework_id.clone();
-                                    target.localized_control_type = new_node.localized_control_type.clone();
-                                    target.help_text = new_node.help_text.clone();
-                                    target.is_enabled = new_node.is_enabled;
-                                    target.is_offscreen = new_node.is_offscreen;
-                                    target.is_password = new_node.is_password;
-                                    target.accelerator_key = new_node.accelerator_key.clone();
-                                    target.access_key = new_node.access_key.clone();
-                                    target.item_type = new_node.item_type.clone();
-                                    target.item_status = new_node.item_status.clone();
-                                    target.rect = new_node.rect.clone();
-                                    target.process_id = new_node.process_id;
-                                    target.is_checkable = new_node.is_checkable;
-                                    target.is_clickable = new_node.is_clickable;
-                                    target.is_scrollable = new_node.is_scrollable;
-                                    target.is_checked = new_node.is_checked;
-                                    log::info!("[Validation] Refreshed target node properties: name='{}' rect=({},{},{}x{})",
-                                        target.name, target.rect.x, target.rect.y, target.rect.width, target.rect.height);
+                            // 校验更新模式：用最新元素属性刷新 hierarchy 中所有节点
+                            if self.validation_mode == ValidationMode::ValidateAndRefresh {
+                                for (idx, refresh_opt) in detailed_result.hierarchy_refresh.iter().enumerate() {
+                                    if let Some(ref new_node) = refresh_opt {
+                                        if idx < self.hierarchy.len() {
+                                            let target = &mut self.hierarchy[idx];
+                                            // 更新属性值（保留用户编辑的 filters、included 等字段）
+                                            target.control_type = new_node.control_type.clone();
+                                            target.automation_id = new_node.automation_id.clone();
+                                            target.class_name = new_node.class_name.clone();
+                                            target.name = new_node.name.clone();
+                                            target.framework_id = new_node.framework_id.clone();
+                                            target.localized_control_type = new_node.localized_control_type.clone();
+                                            target.help_text = new_node.help_text.clone();
+                                            target.is_enabled = new_node.is_enabled;
+                                            target.is_offscreen = new_node.is_offscreen;
+                                            target.is_password = new_node.is_password;
+                                            target.accelerator_key = new_node.accelerator_key.clone();
+                                            target.access_key = new_node.access_key.clone();
+                                            target.item_type = new_node.item_type.clone();
+                                            target.item_status = new_node.item_status.clone();
+                                            target.rect = new_node.rect.clone();
+                                            target.process_id = new_node.process_id;
+                                            target.is_checkable = new_node.is_checkable;
+                                            target.is_clickable = new_node.is_clickable;
+                                            target.is_scrollable = new_node.is_scrollable;
+                                            target.is_checked = new_node.is_checked;
+                                            // 同步 filters 中的属性值（保留 operator、enabled 等用户编辑）
+                                            target.sync_filter_values_from(new_node);
+                                        }
+                                    }
                                 }
+                                log::info!("[Validation] Refreshed hierarchy nodes: {} of {} updated",
+                                    detailed_result.hierarchy_refresh.iter().filter(|n| n.is_some()).count(),
+                                    self.hierarchy.len());
                             }
                             // 统一用 MultiHighlightManager 高亮所有匹配元素（不自动消失）
                             if let ValidationResult::Found { ref rects, .. } = detailed_result.overall {
@@ -1507,6 +1555,31 @@ impl State {
                 }
             } else {
                 self.validation_rx = Some(rx);
+            }
+        }
+
+        // 轮询高亮追踪更新（校验成功后元素位置变化）
+        if let Some(rx) = self.highlight_track_rx.take() {
+            loop {
+                match rx.try_recv() {
+                    Ok(updates) => {
+                        for (index, rect) in updates {
+                            if let Some(ref mut manager) = self.multi_highlight_manager {
+                                let id = format!("validation_{}", index);
+                                manager.reposition(&id, &rect);
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        self.highlight_track_rx = Some(rx);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // 追踪线程已退出
+                        self.highlight_track_running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
             }
         }
 
@@ -1618,6 +1691,143 @@ impl State {
     }
 }
 
+// ─── 校验 + 追踪线程 ──────────────────────────────────────────────────────
+
+/// 校验线程入口：执行校验 → 发送结果 → 条件性启动高亮追踪
+fn run_validate_and_track(
+    window_selector: String,
+    element_xpath: String,
+    hierarchy: Vec<HierarchyNode>,
+    search_context: Option<element_selector::core::model::SearchContext>,
+    result_tx: std::sync::mpsc::Sender<Option<DetailedValidationResult>>,
+    in_progress: std::sync::Arc<AtomicBool>,
+    track_tx: std::sync::mpsc::Sender<Vec<(usize, element_selector::core::model::ElementRect)>>,
+    track_running: std::sync::Arc<AtomicBool>,
+) {
+    let mut result = uia::validate_xpath(
+        &window_selector, &element_xpath, &hierarchy, search_context.as_ref(), None, true,
+    );
+
+    // 提取 found_elements 用于追踪（发送后 result 被移动）
+    let found_elements = std::mem::take(&mut result.found_elements);
+    let found = !found_elements.is_empty();
+
+    let _ = result_tx.send(Some(result));
+    in_progress.store(false, Ordering::SeqCst);
+
+    // 校验成功 → 进入追踪循环
+    if found {
+        run_highlight_tracking(&found_elements, &track_tx, &track_running);
+    }
+}
+
+/// 高亮追踪循环：轮询元素 bounding rectangle，变化时发送更新
+///
+/// 可独立复用，只需传入元素列表、更新通道和控制标志。
+/// 追踪在以下情况停止：
+/// - `track_running` 被设为 false（外部请求停止）
+/// - `get_bounding_rectangle()` 失败（元素可能已销毁）
+fn run_highlight_tracking(
+    elements: &[uiautomation::core::UIElement],
+    track_tx: &std::sync::mpsc::Sender<Vec<(usize, element_selector::core::model::ElementRect)>>,
+    track_running: &std::sync::Arc<AtomicBool>,
+) {
+    use element_selector::core::model::ElementRect;
+
+    track_running.store(true, Ordering::SeqCst);
+    log::info!("[HighlightTrack] Starting highlight tracking for {} elements", elements.len());
+
+    // 记录上一轮的 rect，仅在变化时发送更新
+    let mut prev_rects: Vec<Option<ElementRect>> = elements.iter().map(|_| None).collect();
+
+    while track_running.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(500));
+
+        if !track_running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let mut updates = Vec::new();
+        for (i, elem) in elements.iter().enumerate() {
+            match poll_element_rect(elem) {
+                ElementRectPoll::Valid(new_rect) => {
+                    let changed = match &prev_rects[i] {
+                        Some(prev) => prev.x != new_rect.x
+                            || prev.y != new_rect.y
+                            || prev.width != new_rect.width
+                            || prev.height != new_rect.height,
+                        None => true,
+                    };
+                    if changed {
+                        prev_rects[i] = Some(new_rect.clone());
+                        updates.push((i, new_rect));
+                    }
+                }
+                ElementRectPoll::InvalidOrOffscreen => {
+                    // 如果之前有高亮，发送空 rect 来隐藏
+                    if prev_rects[i].is_some() {
+                        prev_rects[i] = None;
+                        updates.push((i, ElementRect::default()));
+                    }
+                }
+                ElementRectPoll::Gone => {
+                    // 元素可能已销毁，停止追踪
+                    log::info!("[HighlightTrack] Element {} bounding rect failed, stopping track", i);
+                    track_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+
+        if !updates.is_empty() && track_running.load(Ordering::SeqCst) {
+            let _ = track_tx.send(updates);
+        }
+    }
+
+    log::info!("[HighlightTrack] Stopped highlight tracking");
+    track_running.store(false, Ordering::SeqCst);
+}
+
+/// 轮询单个元素的 bounding rectangle，判断有效性
+enum ElementRectPoll {
+    /// 有效 rect，元素可见
+    Valid(element_selector::core::model::ElementRect),
+    /// 无效/offscreen rect（right <= left 或 bottom <= top），元素仍存在但不可见
+    InvalidOrOffscreen,
+    /// get_bounding_rectangle 失败，元素可能已销毁
+    Gone,
+}
+
+fn poll_element_rect(elem: &uiautomation::core::UIElement) -> ElementRectPoll {
+    use element_selector::core::model::ElementRect;
+
+    let Ok(r) = elem.get_bounding_rectangle() else {
+        return ElementRectPoll::Gone;
+    };
+
+    let left = r.get_left();
+    let top = r.get_top();
+    let right = r.get_right();
+    let bottom = r.get_bottom();
+
+    // offscreen 元素：Windows UIAutomation 返回 right < left / bottom < top
+    // 退化矩形：left == right 或 top == bottom（零宽高）
+    if right <= left || bottom <= top {
+        log::info!(
+            "[HighlightTrack] Element has invalid/offscreen rect ({},{},{},{}), hiding",
+            left, top, right, bottom
+        );
+        return ElementRectPoll::InvalidOrOffscreen;
+    }
+
+    ElementRectPoll::Valid(ElementRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
+}
+
 // ─── Update function ─────────────────────────────────────────────────────────
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
@@ -1640,6 +1850,20 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             } else {
                 state.do_validate();
             }
+        }
+        Message::ValidateActionSelected(mode) => {
+            info!("[ValidateAction] Mode selected: {:?}", mode);
+            state.validation_menu_open = false;
+            state.validation_mode = mode;
+            if !matches!(state.validation, ValidationResult::Running) {
+                state.do_validate();
+            }
+        }
+        Message::ValidateMenuToggled => {
+            state.validation_menu_open = !state.validation_menu_open;
+        }
+        Message::ValidateMenuDismissed => {
+            state.validation_menu_open = false;
         }
         Message::CancelValidation => {
             if matches!(state.validation, ValidationResult::Running) {
@@ -2108,6 +2332,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ForceRefreshHighlight => {
             state.force_refresh_highlight();
         }
+        Message::HighlightRectUpdate { index, rect } => {
+            // 校验追踪：元素位置/大小变化时，快速移动高亮框（SetWindowPath，亚毫秒级）
+            if let Some(ref mut manager) = state.multi_highlight_manager {
+                let id = format!("validation_{}", index);
+                manager.reposition(&id, &rect);
+            }
+        }
     }
     Task::none()
 }
@@ -2238,7 +2469,10 @@ fn mouse_move_subscription() -> Subscription<Message> {
 fn view_top_bar(state: &State) -> Element<'_, Message> {
     let colors = &state.colors;
 
-    let validate_btn = button(text(validation_button_label(state)).color(if matches!(&state.validation, ValidationResult::Found { .. } | ValidationResult::Running) {
+    // Validation split-button: integrated validate button with dropdown menu
+    let validate_group: Element<'_, Message, _, _> = {
+        let validate_label = validation_button_label(state);
+        let validate_btn = button(text(validate_label).color(if matches!(&state.validation, ValidationResult::Found { .. } | ValidationResult::Running) {
             Color::BLACK
         } else {
             colors.text
@@ -2246,6 +2480,73 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .padding([4, 12])
         .style(move |_, _| validation_button_style(state, colors))
         .on_press(Message::ValidatePressed);
+
+        let dropdown_btn = button(text("▼"))
+            .padding([4, 8])
+            .style(move |_, _| button::Style {
+                background: Some(iced::Background::Color(validation_button_bg(state, colors))),
+                text_color: if matches!(&state.validation, ValidationResult::Found { .. } | ValidationResult::Running) {
+                    Color::BLACK
+                } else {
+                    colors.text
+                },
+                border: iced::Border {
+                    width: 1.0,
+                    color: validation_button_border(state, colors),
+                    radius: Radius {
+                        top_left: 0.0,
+                        bottom_left: 0.0,
+                        top_right: 4.0,
+                        bottom_right: 4.0,
+                    },
+                },
+                ..Default::default()
+            })
+            .on_press(Message::ValidateMenuToggled);
+
+        let menu_content = column![
+            button(text(format!("{} F7", ValidationMode::Validate)).color(colors.text))
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(|_, _| button::Style {
+                    background: if state.validation_mode == ValidationMode::Validate {
+                        Some(iced::Background::Color(colors.sel_bg))
+                    } else {
+                        None
+                    },
+                    text_color: colors.text,
+                    border: iced::Border::default(),
+                    ..Default::default()
+                })
+                .on_press(Message::ValidateActionSelected(ValidationMode::Validate)),
+            button(text(format!("{} F7", ValidationMode::ValidateAndRefresh)).color(colors.text))
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(|_, _| button::Style {
+                    background: if state.validation_mode == ValidationMode::ValidateAndRefresh {
+                        Some(iced::Background::Color(colors.sel_bg))
+                    } else {
+                        None
+                    },
+                    text_color: colors.text,
+                    border: iced::Border::default(),
+                    ..Default::default()
+                })
+                .on_press(Message::ValidateActionSelected(ValidationMode::ValidateAndRefresh)),
+        ]
+        .spacing(1)
+        .padding(4);
+
+        let dropdown = DropDown::new(
+            row![validate_btn, dropdown_btn].spacing(0),
+            menu_content,
+            state.validation_menu_open,
+        )
+        .on_dismiss(Message::ValidateMenuDismissed)
+        .width(Length::Fixed(140.0));
+
+        dropdown.into()
+    };
 
     // Capture split-button: integrated capture button with dropdown menu
     let capture_group: Element<'_, Message, _, _> = {
@@ -2354,7 +2655,7 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
         .padding([4, 8])
         .on_press(Message::LogPanelToggled);
 
-    let mut items = vec![Space::new().width(Length::Fill).into(), validate_btn.into(), capture_group.into()];
+    let mut items = vec![Space::new().width(Length::Fill).into(), validate_group.into(), capture_group.into()];
     if let Some(btn) = complete_capture_btn {
         items.push(btn.into());
     }
@@ -2380,57 +2681,62 @@ fn view_top_bar(state: &State) -> Element<'_, Message> {
 }
 
 fn validation_button_label(state: &State) -> String {
+    let mode_str = match state.validation_mode {
+        ValidationMode::Validate => "校验",
+        ValidationMode::ValidateAndRefresh => "校验更新",
+    };
     match &state.validation {
         ValidationResult::Found { count, .. } => format!("找到 {} 个", count),
         ValidationResult::Running => String::from("取消"),
         ValidationResult::NotFound { .. } => String::from("未找到"),
         ValidationResult::Error(_) => String::from("校验出错"),
-        ValidationResult::Idle => String::from("校验 F7"),
+        ValidationResult::Idle => format!("{} F7", mode_str),
+    }
+}
+
+fn validation_button_bg(state: &State, colors: &ThemeColors) -> Color {
+    match &state.validation {
+        ValidationResult::Running => colors.warn,
+        ValidationResult::Found { .. } => colors.ok,
+        _ => colors.panel_fill,
+    }
+}
+
+fn validation_button_border(state: &State, colors: &ThemeColors) -> Color {
+    match &state.validation {
+        ValidationResult::Running => colors.warn,
+        ValidationResult::Found { .. } => colors.ok,
+        ValidationResult::NotFound { .. } => colors.err,
+        ValidationResult::Error(_) => colors.err,
+        _ => colors.border,
     }
 }
 
 fn validation_button_style(state: &State, colors: &ThemeColors) -> button::Style {
-    match &state.validation {
-        ValidationResult::Running => button::Style {
-            background: Some(iced::Background::Color(colors.warn)),
-            border: iced::Border {
-                color: colors.warn,
-                width: 1.0,
-                radius: 4.0.into(),
+    let bg = validation_button_bg(state, colors);
+    let border_color = validation_button_border(state, colors);
+    let text_color = if matches!(&state.validation, ValidationResult::Found { .. } | ValidationResult::Running) {
+        Color::BLACK
+    } else if matches!(&state.validation, ValidationResult::NotFound { .. } | ValidationResult::Error(_)) {
+        colors.err
+    } else {
+        colors.text
+    };
+    let has_bg = matches!(&state.validation, ValidationResult::Running | ValidationResult::Found { .. });
+    button::Style {
+        background: if has_bg { Some(iced::Background::Color(bg)) } else { None },
+        border: iced::Border {
+            color: border_color,
+            width: 1.0,
+            radius: Radius {
+                top_left: 4.0,
+                bottom_left: 4.0,
+                top_right: 0.0,
+                bottom_right: 0.0,
             },
-            text_color: Color::BLACK,
-            shadow: Default::default(),
-            snap: false,
         },
-        ValidationResult::Found { .. } => button::Style {
-            background: Some(iced::Background::Color(colors.ok)),
-            border: iced::Border {
-                color: colors.ok,
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            text_color: Color::BLACK,
-            shadow: Default::default(),
-            snap: false,
-        },
-        ValidationResult::NotFound { .. } => button::Style {
-            border: iced::Border {
-                color: colors.err,
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            text_color: colors.err,
-            ..Default::default()
-        },
-        _ => button::Style {
-            border: iced::Border {
-                color: colors.border,
-                width: 1.0,
-                radius: 4.0.into(),
-            },
-            text_color: colors.text,
-            ..Default::default()
-        },
+        text_color,
+        ..Default::default()
     }
 }
 

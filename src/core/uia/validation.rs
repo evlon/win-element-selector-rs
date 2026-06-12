@@ -33,7 +33,8 @@ pub fn validate_xpath(
                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                 is_offscreen: None,
                 not_found_reason: None,
-                target_node: None,
+                hierarchy_refresh: vec![],
+                found_elements: vec![],
             };
         }
     };
@@ -57,7 +58,8 @@ pub fn validate_xpath(
             total_duration_ms: total_start.elapsed().as_millis() as u64,
             is_offscreen: None,
             not_found_reason: Some(NotFoundReason::WindowNotFound),
-            target_node: None,
+            hierarchy_refresh: vec![],
+            found_elements: vec![],
         };
     }
     
@@ -167,7 +169,8 @@ pub fn validate_xpath(
                     not_found_reason: Some(NotFoundReason::ChildHwndNotFound {
                         class: hint_class,
                     }),
-                    target_node: None,
+                    hierarchy_refresh: vec![],
+                    found_elements: vec![],
                 };
             }
 
@@ -221,8 +224,8 @@ pub fn validate_xpath(
                             let is_offscreen = Some(results[0].is_offscreen().unwrap_or(false));
 
                             let layers: Vec<LayerValidationResult> = Vec::new();
-                            // 读取目标元素最新属性用于刷新属性面板
-                            let target_node = element_to_node(&results[0], &auto);
+                            // 读取整条层级路径的最新属性用于刷新属性面板
+                            let hierarchy_refresh = build_hierarchy_refresh(&results[0], &auto, hierarchy);
                             log::info!("[PERF][CHILD] ✓ Total child mode: {}ms", child_start.elapsed().as_millis());
                             return DetailedValidationResult {
                                 overall,
@@ -231,7 +234,8 @@ pub fn validate_xpath(
                                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                                 is_offscreen,
                                 not_found_reason: None,
-                                target_node,
+                                hierarchy_refresh,
+                                found_elements: results,
                             };
                         }
                     }
@@ -249,7 +253,8 @@ pub fn validate_xpath(
             total_duration_ms: total_start.elapsed().as_millis() as u64,
             is_offscreen: None,
             not_found_reason: Some(NotFoundReason::ElementGone),
-            target_node: None,
+            hierarchy_refresh: vec![],
+            found_elements: vec![],
         };
     }
     // ── End child mode ──
@@ -375,7 +380,8 @@ pub fn validate_xpath(
                 total_duration_ms: total_start.elapsed().as_millis() as u64,
                 is_offscreen: None,
                 not_found_reason: None,
-                target_node: None,
+                hierarchy_refresh: vec![],
+                found_elements: vec![],
             };
         }
     };
@@ -502,11 +508,11 @@ pub fn validate_xpath(
         _ => None,
     };
 
-    // 读取目标元素最新属性用于刷新属性面板
-    let target_node = if !results.is_empty() {
-        element_to_node(&results[0], &auto)
+    // 读取整条层级路径的最新属性用于刷新属性面板
+    let hierarchy_refresh = if !results.is_empty() {
+        build_hierarchy_refresh(&results[0], &auto, hierarchy)
     } else {
-        None
+        vec![]
     };
 
     DetailedValidationResult {
@@ -516,8 +522,39 @@ pub fn validate_xpath(
         total_duration_ms: total_start.elapsed().as_millis() as u64,
         is_offscreen,
         not_found_reason,
-        target_node,
+        hierarchy_refresh,
+        found_elements: results,
     }
+}
+
+/// 构建整条层级路径的刷新数据。
+/// 遍历 hierarchy 的每一层，通过 found element 的祖先链找到对应的 UIElement，
+/// 读取最新属性生成 HierarchyNode（用于刷新属性面板）。
+fn build_hierarchy_refresh(
+    found_elem: &UIElement,
+    auto: &UIAutomation,
+    hierarchy: &[HierarchyNode],
+) -> Vec<Option<HierarchyNode>> {
+    let first_match = UiaXPathElement::new(found_elem.clone().into(), auto.clone().into());
+    let ancestors = first_match.ancestors();
+
+    hierarchy.iter().enumerate().map(|(layer_idx, _)| {
+        let actual_elem = if layer_idx == hierarchy.len() - 1 {
+            Some(&first_match)
+        } else {
+            let ancestor_idx = ancestors.len().saturating_sub(layer_idx + 1);
+            ancestors.get(ancestor_idx)
+        };
+
+        match actual_elem {
+            Some(elem) => {
+                let raw: IUIAutomationElement = elem.raw_element_clone();
+                let uia_elem: UIElement = raw.into();
+                element_to_node(&uia_elem, auto)
+            }
+            None => None,
+        }
+    }).collect()
 }
 
 /// 从 segment_results 中提取 NotFoundReason（需求 §7.2）。
